@@ -1,0 +1,7 @@
+# Артефакты сборки
+frontend/src-tauri/target/
+node_modules/
+dist/
+
+# Локальные данные лаунчера
+*.log

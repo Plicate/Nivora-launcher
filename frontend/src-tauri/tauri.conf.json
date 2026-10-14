@@ -1,0 +1,75 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Nivora Launcher",
+  "version": "1.0.0",
+  "identifier": "com.nivora.launcher",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://127.0.0.1:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Nivora Launcher",
+        "width": 1280,
+        "height": 800,
+        "minWidth": 960,
+        "minHeight": 600,
+        "resizable": true,
+        "fullscreen": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' asset: https://asset.localhost https://api.modrinth.com https://cdn.modrinth.com https://textures.minecraft.net https://edge.forgecdn.net https://mediafilez.forgecdn.net https://www.spigotmc.org https://static.spigotmc.org https://hangarcdn.papermc.io https://papermc.io https://avatars.githubusercontent.com https://github.githubassets.com data:; media-src 'self' asset: https://asset.localhost blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' ipc: http://ipc.localhost https://login.microsoftonline.com https://piston-meta.mojang.com https://api.minecraftservices.com https://api.modrinth.com https://cdn.modrinth.com https://meta.fabricmc.net https://meta.quiltmc.org https://api.papermc.io https://fill.papermc.io https://ci.pufferfish.host https://api.purpurmc.org https://api.spiget.org https://hangar.papermc.io",
+      "assetProtocol": {
+        "enable": true,
+        "scope": [
+          "$HOME/.local/share/nivora-launcher/**",
+          "$HOME/.config/nivora-launcher/**",
+          "$HOME/.cache/nivora-launcher/**",
+          "$HOME/AppData/Roaming/nivora-launcher/**",
+          "$HOME/AppData/Local/nivora-launcher/**",
+          "$HOME/AppData/Local/Cache/nivora-launcher/**",
+          "$HOME/.local/share/trial-launcher/**",
+          "$HOME/.config/trial-launcher/**",
+          "$HOME/.cache/trial-launcher/**",
+          "$HOME/AppData/Roaming/trial-launcher/**",
+          "$HOME/AppData/Local/trial-launcher/**",
+          "$HOME/AppData/Local/Cache/trial-launcher/**"
+        ]
+      }
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "createUpdaterArtifacts": true,
+    "publisher": "Nivora",
+    "category": "Game",
+    "windows": {
+      "wix": {
+        "upgradeCode": "cf347b8a-2f38-5f71-a3bd-39a441f446af"
+      }
+    },
+    "linux": {
+      "deb": {
+        "depends": ["python3"]
+      },
+      "rpm": {
+        "depends": ["python3"]
+      }
+    },
+    "icon": ["../src/assets/uni.png", "icons/icon.ico"],
+    "shortDescription": "Minecraft launcher for local and Microsoft profiles"
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/vedrooou0/Nivora-launcher/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEEwRkYyODU1NDdFRTkyOEQKUldTTmt1NUhWU2ovb1BzNUw0bUEyZG80YnptVVptNWtZQkVBV3ltcGUwSFRuN0Z6WmtkNnFrM0EK"
+    }
+  }
+}

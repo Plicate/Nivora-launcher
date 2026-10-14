@@ -1,0 +1,61 @@
+pkgname=nivora-launcher
+pkgver=1.0.0
+pkgrel=93
+pkgdesc='Universal Minecraft launcher'
+arch=('x86_64')
+license=('GPL-3.0-only')
+depends=('python' 'python-defusedxml' 'python-psutil' 'libsecret' 'gnome-keyring' 'gtk3' 'libappindicator' 'qt6-base' 'qt6-svg' 'webkit2gtk-4.1' 'bubblewrap' 'java-runtime')
+makedepends=('base-devel' 'nodejs' 'npm' 'rust')
+# Native C/assembly objects from Rust dependencies must remain ordinary ELF.
+options=('!lto')
+optdepends=('java-runtime: use a system Java runtime'
+            'xdg-utils: open the Minecraft folder')
+: "${NIVORA_LAUNCHER_SOURCE_SHA256:?Run scripts/build_arch_package.sh to generate and verify the local source archive checksum}"
+source=("${pkgname}-${pkgver}.tar.gz")
+sha256sums=("${NIVORA_LAUNCHER_SOURCE_SHA256}")
+
+build() {
+  cd "${srcdir}/${pkgname}"
+  if command -v npm >/dev/null 2>&1 && command -v cargo >/dev/null 2>&1; then
+    install -Dm755 packaging/arch/nivora-launcher-backend \
+      frontend/src-tauri/resources/backend/nivora-launcher-backend
+    (
+      cd frontend
+      npm install --no-audit --no-fund
+      # npm 11 may block esbuild's postinstall script; explicitly approve and rebuild it.
+      if npm install-scripts ls >/dev/null 2>&1; then
+        npm install-scripts approve esbuild
+      fi
+      npm rebuild esbuild --no-audit --no-fund
+      npm run tauri -- icon src/assets/uni.png --output src-tauri/icons
+    )
+    # Isolate native compiler flags, including cc-rs target-specific overrides.
+    # Merely appending -fuse-ld=bfd does not repair native LTO objects in rlibs.
+    python scripts/arch_native_build.py || return $?
+  else
+    install -dm755 cpp-ui/build
+    g++ -std=c++17 -O2 -pipe -fPIC -pie -Wall -Wextra \
+      $(pkg-config --cflags Qt6Widgets Qt6Svg) \
+      cpp-ui/main.cpp \
+      -o cpp-ui/build/nivora-launcher-gui \
+      $(pkg-config --libs Qt6Widgets Qt6Svg)
+  fi
+}
+
+package() {
+  cd "${srcdir}/${pkgname}"
+  install -dm755 "${pkgdir}/usr/lib/${pkgname}"
+  cp -r nivora_launcher "${pkgdir}/usr/lib/${pkgname}/"
+  if [[ -x frontend/src-tauri/target/release/nivora-launcher ]]; then
+    install -Dm755 frontend/src-tauri/target/release/nivora-launcher "${pkgdir}/usr/lib/${pkgname}/nivora-launcher-gui"
+    install -Dm755 frontend/src-tauri/resources/backend/nivora-launcher-backend "${pkgdir}/usr/lib/${pkgname}/resources/backend/nivora-launcher-backend"
+  else
+    install -Dm755 cpp-ui/build/nivora-launcher-gui "${pkgdir}/usr/lib/${pkgname}/nivora-launcher-gui"
+  fi
+  install -dm755 "${pkgdir}/usr/share/${pkgname}"
+  cp -r cpp-ui/assets/. "${pkgdir}/usr/share/${pkgname}/"
+  install -Dm644 README.md "${pkgdir}/usr/share/doc/${pkgname}/README.md"
+  install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+  install -Dm755 nivora-launcher "${pkgdir}/usr/bin/nivora-launcher"
+  install -Dm644 packaging/arch/nivora-launcher.desktop "${pkgdir}/usr/share/applications/nivora-launcher.desktop"
+}

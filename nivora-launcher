@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+set -euo pipefail
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+if [ -d "/usr/lib/nivora-launcher/nivora_launcher" ]; then
+  export PYTHONPATH="/usr/lib/nivora-launcher:${PYTHONPATH:-}"
+else
+  export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH:-}"
+fi
+# WebKitGTK can hit a Wayland protocol error on some NVIDIA/XWayland setups.
+# Prefer the available XWayland display unless the user selected a backend.
+if [ -z "${GDK_BACKEND:-}" ] && [ -n "${WAYLAND_DISPLAY:-}" ] && [ -n "${DISPLAY:-}" ]; then
+  export GDK_BACKEND=x11
+fi
+# Avoid WebKitGTK GBM/DMA-BUF allocation failures with NVIDIA and XWayland.
+if [ -z "${WEBKIT_DISABLE_DMABUF_RENDERER:-}" ]; then
+  export WEBKIT_DISABLE_DMABUF_RENDERER=1
+fi
+if [ "$#" -eq 0 ] || [ "${1:-}" = "--gui" ]; then
+  if [ -x "/usr/lib/nivora-launcher/nivora-launcher-gui" ]; then
+    exec "/usr/lib/nivora-launcher/nivora-launcher-gui"
+  fi
+  if [ -x "${SCRIPT_DIR}/nivora-launcher-gui" ]; then
+    exec "${SCRIPT_DIR}/nivora-launcher-gui"
+  fi
+fi
+exec python3 -m nivora_launcher "$@"
