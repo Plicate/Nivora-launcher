@@ -59,7 +59,7 @@ The current v3 SDK surface includes:
 - Event names are typed, including `instance.beforeLaunch`, `instance.afterExit`, `instance.crash`, `log.line`, `mods.beforeInstall`, and `snapshot.created`.
 - Host capabilities are namespaced: storage and config are plugin-scoped; files are limited to the plugin or the explicitly permitted instance; database access uses a plugin-scoped database; network methods are permission- and host-allowlist-scoped.
 - Launcher capabilities include confirmation dialogs, external links, selected-instance metadata, notifications, registered commands and shortcuts, plus a `launcher:servers` list isolated to the plugin namespace (maximum 200 entries).
-- Each ordinary runtime request is limited to five seconds; user dialogs may wait up to five minutes. `network:listen` is not available to runtime plugins. The built-in LAN room page remains an internal launcher feature.
+- Each ordinary runtime request is limited to five seconds; user dialogs may wait up to five minutes. `network:listen` is reserved and not available to runtime plugins.
 - Registered commands appear on their plugin card; shortcuts must include Ctrl, Alt, or Meta, do not override launcher shortcuts, and do not fire while editing text. Theme contributions are validated and exposed as plugin-namespaced tokens through `api.theme.get()`.
 - The contract does not expose `window`, `document`, browser DOM objects, Node.js modules, process access, or filesystem/network globals. The QuickJS runtime is the security boundary; lint heuristics are advisory only.
 
@@ -142,7 +142,7 @@ V2/v3-entrypoint выполняются в QuickJS только после пр�
 - Имена событий типизированы, включая `instance.beforeLaunch`, `instance.afterExit`, `instance.crash`, `log.line`, `mods.beforeInstall` и `snapshot.created`.
 - Возможности хоста именсованы: storage и config ограничены плагином; файлы — только плагин или явно разрешённый экземпляр; база данных — отдельная на плагин; сетевые методы ограничены permission и allowlist хостов.
 - Возможности лаунчера: диалоги подтверждения, внешние ссылки, metadata выбранного экземпляра, уведомления, зарегистрированные команды и шорткаты, а также список `launcher:servers`, изолированный в namespace плагина (максимум 200 записей).
-- Обычный рантайм-запрос ограничен пятью секундами; пользовательские диалоги могут ждать до пяти минут. `network:listen` рантайм-плагинам недоступен. Встроенная страница LAN-комнат остаётся внутренней функцией лаунчера.
+- Обычный рантайм-запрос ограничен пятью секундами; пользовательские диалоги могут ждать до пяти минут. `network:listen` зарезервирован и рантайм-плагинам недоступен.
 - Зарегистрированные команды появляются на карточке плагина; шорткаты обязаны содержать Ctrl, Alt или Meta, не перекрывать шорткаты лаунчера и не срабатывать при редактировании текста. Теми валидируются и отдаются как токены в namespace плагина через `api.theme.get()`.
 - Контракт не открывает `window`, `document`, объекты DOM браузера, модули Node.js, доступ к процессам или глобалы файловой системы/сети. Граница безопасности — рантайм QuickJS; эвристики линтера имеют только рекомендательный характер.
 

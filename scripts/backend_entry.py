@@ -2,7 +2,8 @@
 
 Desktop-оболочка (Tauri) запускает ``nivora-launcher-backend.exe`` без аргументов
 и общается строками JSON через stdin/stdout — это цикл ``gui_service.main``.
-С аргументом ``--cli`` тот же exe работает как CLI (см. ``_launcher_cli_command``):
+С аргументом ``--win-sandbox`` exe запускает Java в AppContainer (песочница
+экземпляра). С аргументом ``--cli`` тот же exe работает как CLI (см. ``_launcher_cli_command``):
 ``nivora-launcher-backend.exe --cli launch 1.21.1 --instance demo``.
 """
 
@@ -32,6 +33,12 @@ def _force_utf8_streams() -> None:
 def main() -> int:
     _force_utf8_streams()
     argv = sys.argv[1:]
+    if argv and argv[0] == "--win-sandbox":
+        # Windows-песочница экземпляра (AppContainer): короткий helper,
+        # оборачивающий запуск Java, — см. nivora_launcher/windows_sandbox.py.
+        from nivora_launcher.windows_sandbox import main as sandbox_main
+
+        return sandbox_main(argv[1:])
     if argv and argv[0] == "--cli":
         from nivora_launcher.cli import main as cli_main
 

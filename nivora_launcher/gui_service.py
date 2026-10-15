@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import atexit
 import base64
 import ipaddress
 import json
@@ -41,7 +40,6 @@ from .instance_files import InstanceFiles, MAX_INSTANCE_UPLOAD_BYTES
 from .instance_workspace import InstanceWorkspace
 from .instances import InstanceStore
 from .launcher import GameLauncher
-from .lan_sessions import LanSessionError, LanSessionManager
 from .loaders import LoaderRepository
 from .metadata import VersionRepository, safe_instance_name
 from .metrics import ProcessMetricsTracker, metrics_for_instance, read_metrics
@@ -96,8 +94,6 @@ _MAX_SESSION_LOG_LINES = 500
 _SESSION_LOGS: dict[str, deque[str]] = {}
 _SESSION_RUNNING: dict[str, bool] = {}
 _INSTANCE_METRIC_TRACKERS: dict[str, ProcessMetricsTracker] = {}
-_LAN_SESSION_MANAGER = LanSessionManager()
-atexit.register(_LAN_SESSION_MANAGER.stop)
 
 
 def _session_start(instance_name: str) -> None:
@@ -756,6 +752,9 @@ def _handle(request: dict[str, Any], emit: Callable[[dict[str, Any]], None] | No
 
     if operation == "bootstrap":
         return _bootstrap(config, accounts, instances, plugin_store)
+
+    if operation == "security_status":
+        return sandbox_status()
 
     if operation == "versions":
         values = repository.list_versions(include_snapshots=bool(request.get("include_snapshots", True)))
@@ -1899,57 +1898,6 @@ def _handle(request: dict[str, Any], emit: Callable[[dict[str, Any]], None] | No
             raise LauncherError(f"Не удалось открыть ссылку: {exc}") from exc
         return {"opened": True}
 
-    if operation == "lan_session_create":
-        try:
-            return _LAN_SESSION_MANAGER.create(
-                str(request.get("room_name", "")),
-                str(request.get("password", "")),
-                str(request.get("player_nickname", "")),
-                request.get("host_control_port", 0),
-                request.get("minecraft_game_port", 25565),
-            )
-        except (LanSessionError, ValueError) as exc:
-            raise LauncherError(str(exc)) from exc
-
-    if operation == "lan_session_join":
-        try:
-            return _LAN_SESSION_MANAGER.join(
-                str(request.get("room_name", "")),
-                str(request.get("password", "")),
-                str(request.get("player_nickname", "")),
-                request.get("host_control_port", 0),
-                request.get("minecraft_game_port", 25565),
-                host_address=str(request.get("host_address", "127.0.0.1")),
-            )
-        except (LanSessionError, ValueError) as exc:
-            raise LauncherError(str(exc)) from exc
-
-    if operation == "lan_session_status":
-        try:
-            return _LAN_SESSION_MANAGER.status(
-                str(request.get("room_name", "")),
-                str(request.get("password", "")),
-                str(request.get("player_nickname", "")),
-                request.get("host_control_port", 0),
-                request.get("minecraft_game_port", 25565),
-                host_address=str(request.get("host_address", "")) or None,
-            )
-        except (LanSessionError, ValueError) as exc:
-            raise LauncherError(str(exc)) from exc
-
-    if operation == "lan_session_leave":
-        try:
-            return _LAN_SESSION_MANAGER.leave(
-                str(request.get("room_name", "")),
-                str(request.get("password", "")),
-                str(request.get("player_nickname", "")),
-                request.get("host_control_port", 0),
-                request.get("minecraft_game_port", 25565),
-                host_address=str(request.get("host_address", "")) or None,
-            )
-        except (LanSessionError, ValueError) as exc:
-            raise LauncherError(str(exc)) from exc
-
     if operation.startswith("github_plugin_"):
         github = GitHubPluginService(http=http, token_provider=SecretToolTokenProvider())
 
@@ -2519,6 +2467,43 @@ def _handle(request: dict[str, Any], emit: Callable[[dict[str, Any]], None] | No
             assets=not bool(request.get("no_assets", False)),
             replace_existing=bool(request.get("replace_existing", False)),
         )
+        return {
+            "version_id": result.version_id,
+            "instance_dir": str(result.instance_dir),
+            "instances": [_instance_public(value) for value in instances.list()],
+        }
+
+    if operation == "instance_repair_version":
+        name = str(request.get("instance_name", "")).strip()
+        if not name:
+            raise LauncherError("Сначала выберите экземпляр")
+        info = instances.get(name)
+        if str(getattr(info, "game_edition", "java")).strip().lower() == "bedrock":
+            raise LauncherError("Восстановление версий доступно только для Java-экземпляров")
+        if str(getattr(info, "kind", "client")).strip().lower() == "server":
+            raise LauncherError("Восстановление доступно только для клиентских экземпляров")
+        if bool(getattr(info, "running", False)):
+            raise LauncherError("Остановите экземпляр перед восстановлением")
+        loader = str(request.get("loader", "")).strip().lower() or str(getattr(info, "loader", "vanilla")).strip().lower() or "vanilla"
+        if loader not in {"vanilla", "fabric", "forge", "neoforge", "quilt"}:
+            raise LauncherError(f"Неизвестный loader: {loader}")
+        minecraft_version = str(request.get("version", "")).strip() or str(getattr(info, "minecraft_version", "")).strip()
+        if not minecraft_version:
+            raise LauncherError(f"У экземпляра «{info.name}» не определена версия Minecraft")
+        loader_version = str(request.get("loader_version", "")).strip() or _instance_loader_version(info) or None
+        process_lock = InstanceProcessLock(config.paths.data_home, info.name)
+        process_lock.acquire()
+        try:
+            result = installer.repair_version(
+                info.path,
+                minecraft_version,
+                loader=loader,
+                loader_version=loader_version,
+                version_id=str(getattr(info, "version_id", "")).strip() or None,
+            )
+        finally:
+            process_lock.release()
+        scoped_emit({"kind": "status", "event": "workspace-changed", "message": "Версия и модлоадер восстановлены."})
         return {
             "version_id": result.version_id,
             "instance_dir": str(result.instance_dir),

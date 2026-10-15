@@ -39,17 +39,11 @@ API v2/v3 (`plugin.json`) запускает entrypoint в отдельном Qu
 
 В API v1 поля permissions остаются метаданными и не открывают plugin-коду доступ к host API. Launcher не загружает манифест как код.
 
-## Встроенные LAN-комнаты
-
-`network:listen` не входит в набор permissions API v2/v3, поэтому сторонний плагин не может получить доступ к общему менеджеру LAN-комнат. Встроенная страница «LAN-комнаты» продолжает работать через внутренний интерфейс лаунчера.
-
-LAN-сервис принимает участников по прямому частному IP-адресу хоста и проксирует для участника один Minecraft TCP-порт через локальный loopback. Это не Hamachi/Radmin-подобная виртуальная сеть: нет виртуального адаптера, произвольной маршрутизации, шифрования транспорта, NAT traversal или внешнего relay. Устройства должны уже иметь прямой сетевой маршрут друг к другу; игровые UDP и LAN-discovery не пересылаются.
-
 ## Доверие и разрешения API v2/v3
 
 Подписанный плагин запускается только после явного закрепления Ed25519-ключа издателя. Для неподписанного пакета пользователь отдельно включает локальный запуск; согласие привязано к SHA-256 конкретной версии. Пакеты по умолчанию выключены. Замена пакета сохраняет grants только для разрешений, которые объявлены и до, и после замены; новые разрешения нужно выдать отдельно.
 
-V2 предоставляет `launcher:servers` для списка серверов, изолированного в namespace конкретного плагина. Доступны `api.launcher.servers.list()`, `save()`, `add()` и `remove()`; хост ограничивает список 200 записями и проверяет permission при каждом вызове. `network:fetch`, `network:dns` и `network:ping` требуют соответствующих grants и точного host из `network_hosts`. Доступ к LAN-комнатам через `network:listen` не предоставляется.
+V2 предоставляет `launcher:servers` для списка серверов, изолированного в namespace конкретного плагина. Доступны `api.launcher.servers.list()`, `save()`, `add()` и `remove()`; хост ограничивает список 200 записями и проверяет permission при каждом вызове. `network:fetch`, `network:dns` и `network:ping` требуют соответствующих grants и точного host из `network_hosts`. Разрешение `network:listen` зарезервировано и плагинам не предоставляется.
 
 V3 добавляет расширенные host-секции `runtime`, `permissions`, `config.readProjected`, `http`, `instances`, `os` и `proxy`. Уже реализованы следующие операции:
 
@@ -194,17 +188,11 @@ The archive is validated before saving: the launcher caps it at 64 MiB, the unpa
 
 In API v1 the permissions fields remain metadata and do not give plugin code access to the host API. The launcher never loads the manifest as code.
 
-## Built-in LAN rooms
-
-`network:listen` is not part of the API v2/v3 permission set, so a third-party plugin cannot reach the shared LAN-room manager. The built-in "LAN rooms" page keeps working through the launcher's internal interface.
-
-The LAN service accepts participants over the host's direct private IP address and proxies a single Minecraft TCP port for the participant over a local loopback. This is not a Hamachi/Radmin-style virtual network: there is no virtual adapter, arbitrary routing, transport encryption, NAT traversal or external relay. Devices must already have a direct network route to each other; game UDP and LAN discovery are not forwarded.
-
 ## Trust and permissions, API v2/v3
 
 A signed plugin runs only after the publisher's Ed25519 key is explicitly pinned. For an unsigned package the user separately enables local execution; the consent is bound to the SHA-256 of that exact version. Packages are disabled by default. Replacing a package keeps grants only for permissions declared both before and after the replacement; new permissions must be granted again.
 
-V2 provides `launcher:servers` for a server list namespaced to the plugin. Available are `api.launcher.servers.list()`, `save()`, `add()` and `remove()`; the host caps the list at 200 entries and checks the permission on every call. `network:fetch`, `network:dns` and `network:ping` require the matching grants and an exact host from `network_hosts`. Access to LAN rooms via `network:listen` is not granted.
+V2 provides `launcher:servers` for a server list namespaced to the plugin. Available are `api.launcher.servers.list()`, `save()`, `add()` and `remove()`; the host caps the list at 200 entries and checks the permission on every call. `network:fetch`, `network:dns` and `network:ping` require the matching grants and an exact host from `network_hosts`. The `network:listen` permission is reserved and is not granted to plugins.
 
 V3 adds the extended host sections `runtime`, `permissions`, `config.readProjected`, `http`, `instances`, `os` and `proxy`. Implemented operations:
 

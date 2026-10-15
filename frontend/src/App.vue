@@ -19,7 +19,6 @@ import MemoryField from './components/MemoryField.vue'
 import NumericStepper from './components/NumericStepper.vue'
 import ServerWorkspace from './components/ServerWorkspace.vue'
 import LoaderBadge from './components/LoaderBadge.vue'
-import LanRoomPanel from './components/LanRoomPanel.vue'
 import PluginCenter from './components/PluginCenter.vue'
 import PluginViewRenderer from './components/PluginViewRenderer.vue'
 import SkinPreview from './components/SkinPreview.vue'
@@ -100,7 +99,6 @@ const views: Record<ViewName, { title: string; kicker: string }> = {
   mods: { title: 'Каталог', kicker: 'Моды и ресурсы' },
   modpacks: { title: 'Модпаки', kicker: 'Готовые сборки' },
   plugins: { title: 'Плагины для лаунчера', kicker: 'Расширения интерфейса' },
-  'lan-rooms': { title: 'LAN-комнаты', kicker: 'Локальная сеть' },
   themes: { title: 'Центр настройки тем', kicker: 'Студия оформления' },
   settings: { title: 'Настройки', kicker: 'Параметры лаунчера' },
 }
@@ -202,8 +200,8 @@ const defaultAnimationSettings: AnimationSettings = {
   page_duration_ms: 260,
   surface_duration_ms: 190,
   surface_stagger_ms: 24,
-  page_styles: { instances: '', 'instance-settings': '', accounts: '', mods: '', modpacks: '', plugins: '', 'lan-rooms': '', themes: '', settings: '' },
-  page_durations_ms: { instances: 260, 'instance-settings': 260, accounts: 260, mods: 260, modpacks: 260, plugins: 260, 'lan-rooms': 260, themes: 260, settings: 260 },
+  page_styles: { instances: '', 'instance-settings': '', accounts: '', mods: '', modpacks: '', plugins: '', themes: '', settings: '' },
+  page_durations_ms: { instances: 260, 'instance-settings': 260, accounts: 260, mods: 260, modpacks: 260, plugins: 260, themes: 260, settings: 260 },
 }
 
 const initialState: AppState = {
@@ -230,7 +228,7 @@ const initialState: AppState = {
     auto_refresh_metadata: true,
     metadata_refresh_hours: 6,
     download_timeout_seconds: 30,
-    download_retries: 3,
+    download_retries: 5,
     confirm_destructive_actions: true,
     show_activity_panel: true,
     show_toasts: true,
@@ -271,8 +269,8 @@ const initialState: AppState = {
       density: 'comfortable',
      ui_scale: 100,
      radius_tokens: { card: 7, button: 8, control: 10 },
-      page_themes: { instances: 'inherit', 'instance-settings': 'inherit', accounts: 'inherit', mods: 'inherit', modpacks: 'inherit', plugins: 'inherit', 'lan-rooms': 'inherit', themes: 'inherit', settings: 'inherit' },
-      page_layouts: { instances: 'balanced', 'instance-settings': 'balanced', accounts: 'balanced', mods: 'wide', modpacks: 'wide', plugins: 'wide', 'lan-rooms': 'balanced', themes: 'wide', settings: 'balanced' },
+      page_themes: { instances: 'inherit', 'instance-settings': 'inherit', accounts: 'inherit', mods: 'inherit', modpacks: 'inherit', plugins: 'inherit', themes: 'inherit', settings: 'inherit' },
+      page_layouts: { instances: 'balanced', 'instance-settings': 'balanced', accounts: 'balanced', mods: 'wide', modpacks: 'wide', plugins: 'wide', themes: 'wide', settings: 'balanced' },
     widget_visibility: { 'instances.workspace': true, 'accounts.status': true, 'mods.context': true },
      color_tokens: { ...defaultColorTokens },
      instance_groups: [],
@@ -530,7 +528,7 @@ const settingsDraft = reactive({
   auto_refresh_metadata: true,
   metadata_refresh_hours: 6,
   download_timeout_seconds: 30,
-  download_retries: 3,
+  download_retries: 5,
   confirm_destructive_actions: true,
   show_activity_panel: true,
   show_toasts: true,
@@ -635,8 +633,8 @@ const appearanceDraft = reactive<AppearanceSettings>({
      page_styles: { ...defaultAnimationSettings.page_styles },
      page_durations_ms: { ...defaultAnimationSettings.page_durations_ms },
    } as AnimationSettings,
-    page_themes: { instances: 'inherit', 'instance-settings': 'inherit', accounts: 'inherit', mods: 'inherit', modpacks: 'inherit', plugins: 'inherit', 'lan-rooms': 'inherit', themes: 'inherit', settings: 'inherit' },
-    page_layouts: { instances: 'balanced', 'instance-settings': 'balanced', accounts: 'balanced', mods: 'wide', modpacks: 'wide', plugins: 'wide', 'lan-rooms': 'balanced', themes: 'wide', settings: 'balanced' },
+    page_themes: { instances: 'inherit', 'instance-settings': 'inherit', accounts: 'inherit', mods: 'inherit', modpacks: 'inherit', plugins: 'inherit', themes: 'inherit', settings: 'inherit' },
+    page_layouts: { instances: 'balanced', 'instance-settings': 'balanced', accounts: 'balanced', mods: 'wide', modpacks: 'wide', plugins: 'wide', themes: 'wide', settings: 'balanced' },
   widget_visibility: { 'instances.workspace': true, 'accounts.status': true, 'mods.context': true },
   color_tokens: { ...defaultColorTokens },
 })
@@ -2496,8 +2494,8 @@ async function resetAppearance() {
   appearanceDraft.wallpaper_blur = 12
   appearanceDraft.wallpaper_opacity = 34
   wallpaperRenderBlur.value = 12
-  appearanceDraft.page_themes = { instances: 'inherit', 'instance-settings': 'inherit', accounts: 'inherit', mods: 'inherit', modpacks: 'inherit', plugins: 'inherit', 'lan-rooms': 'inherit', themes: 'inherit', settings: 'inherit' }
-  appearanceDraft.page_layouts = { instances: 'balanced', 'instance-settings': 'balanced', accounts: 'balanced', mods: 'wide', modpacks: 'wide', plugins: 'wide', 'lan-rooms': 'balanced', themes: 'wide', settings: 'balanced' }
+  appearanceDraft.page_themes = { instances: 'inherit', 'instance-settings': 'inherit', accounts: 'inherit', mods: 'inherit', modpacks: 'inherit', plugins: 'inherit', themes: 'inherit', settings: 'inherit' }
+  appearanceDraft.page_layouts = { instances: 'balanced', 'instance-settings': 'balanced', accounts: 'balanced', mods: 'wide', modpacks: 'wide', plugins: 'wide', themes: 'wide', settings: 'balanced' }
   appearanceDraft.widget_visibility = { 'instances.workspace': true, 'accounts.status': true, 'mods.context': true }
   settingsDraft.font_family = 'system'
   syncActiveTheme()
@@ -3064,7 +3062,7 @@ function applyState(next: AppState, preserveAppearance = false) {
     auto_refresh_metadata: next.settings.auto_refresh_metadata !== false,
     metadata_refresh_hours: next.settings.metadata_refresh_hours || 6,
     download_timeout_seconds: next.settings.download_timeout_seconds || 30,
-    download_retries: next.settings.download_retries || 3,
+    download_retries: next.settings.download_retries || 5,
     confirm_destructive_actions: next.settings.confirm_destructive_actions !== false,
     show_activity_panel: next.settings.show_activity_panel !== false,
     show_toasts: next.settings.show_toasts !== false,
@@ -5586,11 +5584,6 @@ onBeforeUnmount(() => {
                 />
               </section>
 
-              <section data-page-view="lan-rooms" class="page-content">
-                <div class="section-intro"><div><span class="eyebrow">Игра в локальной сети</span><h2>LAN-комнаты</h2><p>Комната координирует игроков и поднимает launcher-туннель до мира хоста без отдельного VPN-клиента.</p></div></div>
-                <LanRoomPanel @toast="showToast" />
-              </section>
-
               <section data-page-view="themes" class="page-content">
                <ThemeStudio
                  :appearance="appearanceDraft"
@@ -5629,119 +5622,267 @@ onBeforeUnmount(() => {
                />
              </section>
 
-             <section data-page-view="settings" class="page-content">
-            <div class="section-intro">
-               <div>
-                 <span class="eyebrow">Параметры лаунчера</span>
-                 <h2>Настройки</h2>
-                  <p>Пути, память, источники и резервная копия файлов настраиваются здесь.</p>
+             <section data-page-view="settings" class="page-content settings-page">
+               <div class="section-intro">
+                 <div>
+                   <span class="eyebrow">Параметры лаунчера</span>
+                   <h2>Настройки</h2>
+                   <p>Пути, память, источники и резервная копия файлов настраиваются здесь.</p>
+                 </div>
+                 <div class="section-intro-actions">
+                   <button class="button button--outline" type="button" @click="replayLauncherTour"><Icon name="refresh" :size="15" />Повторить экскурсию</button>
+                   <button class="button button--outline" type="button" @click="setView('themes')"><Icon name="palette" :size="15" />Центр настройки тем</button>
+                 </div>
                </div>
-               <button class="button button--accent" type="button" :disabled="busy" @click="void saveSettings()">
-                 <Icon name="settings" :size="17" />Сохранить
-               </button>
-             </div>
-             <div class="settings-save-bar" :class="`settings-save-bar--${settingsSaveState}`">
-               <div class="settings-save-copy"><span class="status-dot" :class="{ 'status-dot--green': settingsSaveState === 'saved', 'status-dot--busy': settingsSaveState === 'saving' }" /><div><strong>{{ settingsSaveState === 'saving' ? 'Сохраняю настройки' : settingsSaveState === 'error' ? 'Нужно исправление' : settingsSaveState === 'dirty' ? 'Есть несохранённые изменения' : 'Настройки сохранены' }}</strong><small>{{ settingsSaveMessage }}</small></div></div>
-               <button class="button button--accent" type="button" :disabled="busy" @click="void saveSettings()"><Icon name="check" :size="15" />{{ settingsSaveState === 'saving' ? 'Сохраняю…' : 'Сохранить изменения' }}</button>
-             </div>
-             <section class="panel first-run-help-panel">
-               <div class="panel-heading">
-                 <div><span class="eyebrow">Обучение</span><h2>Экскурсия по лаунчеру</h2><p>Коротко покажем основные разделы и возможности. Экскурсию можно закрыть в любой момент.</p></div>
-                 <button class="button button--outline" type="button" @click="replayLauncherTour"><Icon name="refresh" :size="15" />Повторить экскурсию</button>
+               <div class="settings-save-bar" :class="`settings-save-bar--${settingsSaveState}`">
+                 <div class="settings-save-copy"><span class="status-dot" :class="{ 'status-dot--green': settingsSaveState === 'saved', 'status-dot--busy': settingsSaveState === 'saving' }" /><div><strong>{{ settingsSaveState === 'saving' ? 'Сохраняю настройки' : settingsSaveState === 'error' ? 'Нужно исправление' : settingsSaveState === 'dirty' ? 'Есть несохранённые изменения' : 'Настройки сохранены' }}</strong><small>{{ settingsSaveMessage }}</small></div></div>
+                 <button class="button button--accent" type="button" :disabled="busy" @click="void saveSettings()"><Icon name="check" :size="15" />{{ settingsSaveState === 'saving' ? 'Сохраняю…' : 'Сохранить изменения' }}</button>
                </div>
-             </section>
-             <nav class="settings-section-nav" aria-label="Разделы настроек">
-               <button type="button" @click="scrollSettingsSection('settings-system')">Среда запуска</button>
-               <button type="button" @click="scrollSettingsSection('settings-profiles')">Профили</button>
-               <button type="button" @click="scrollSettingsSection('settings-sources')">Источники</button>
-               <button type="button" @click="scrollSettingsSection('settings-behavior')">Поведение</button>
-               <button type="button" @click="setView('themes')">Центр настройки тем<Icon name="palette" :size="13" /></button>
-             </nav>
-             <div class="settings-grid">
-               <section id="settings-system" class="panel settings-card">
-                <div class="panel-heading">
-                  <div><span class="eyebrow">Система</span><h2>Среда запуска</h2></div>
-                </div>
-                <div class="settings-form">
-                   <div class="field"><span>Язык интерфейса</span><CustomSelect :model-value="settingsDraft.language ?? 'ru'" :options="languageOptions" @update:model-value="setLanguageFromSettings" /></div>
-                   <label class="field"><span>Папка игры</span><input v-model="settingsDraft.game_dir" :placeholder="defaultGameDirectory" /></label>
-                   <label class="field"><span>Прокси <small>HTTP/HTTPS или SOCKS5, если сеть блокирует каталоги</small></span><input v-model="settingsDraft.http_proxy" placeholder="http://127.0.0.1:порт или socks5://127.0.0.1:1080" /><small class="field-help">SOCKS5 резолвит имена на стороне прокси; авторизация socks5://user:pass@host:port поддерживается.</small></label>
-                   <div class="field">
-                     <span>Java runtime <button class="text-button" type="button" @click="refreshJavaOptions">Обновить список</button></span>
-                     <CustomSelect v-model="javaSelection" :options="javaChoiceOptions" />
-                   </div>
-                   <label v-if="javaSelection === 'manual'" class="field">
-                     <span>Путь к Java executable <small>можно указать JDK/JRE или бинарник</small></span>
-                     <input v-model="settingsDraft.java_path" placeholder="/usr/lib/jvm/.../bin/java" />
-                     <div class="java-path-actions"><button class="button button--small button--quiet" type="button" @click="validateJavaPath">Проверить Java</button><span v-if="javaValidation" class="field-help">{{ javaValidation }}</span></div>
-                   </label>
-                  <div class="field memory-control">
-                    <span>Память JVM <small>максимум {{ memoryTotalLabel }}</small></span>
-                   <div class="memory-input-row">
-                       <NumericStepper :model-value="memoryValue" :min="1" :max="memoryMaxValue || 8192" :step="memoryUnit === 'GiB' ? 1 : 128" :decimals="memoryUnit === 'GiB' ? 2 : 0" aria-label="Память JVM" @update:model-value="memoryValue = $event; clampMemoryDraft()" />
-                       <CustomSelect v-model="memoryUnit" :options="memoryUnitOptions" />
-                    </div>
-                    <small class="field-help">До {{ memoryMaxValue || '—' }} {{ memoryUnit }} · рекомендуем {{ formatMemoryLabel(state.settings.memory_recommended_kib) }}</small>
-                  </div>
-                   <div class="field"><span>Параллельные загрузки</span><NumericStepper v-model="settingsDraft.max_downloads" :min="1" :max="32" aria-label="Параллельные загрузки" /></div>
-                  <div class="source-divider"><span>Профили настроек</span><i /></div>
-                  <div class="settings-profiles">
-                    <div v-for="profile in settingsProfiles" :key="profile.name" class="settings-profile-row">
-                      <span><strong>{{ profile.name }}</strong><small>{{ profile.key_count }} параметров · {{ profile.updated_at ? formatDateShort(profile.updated_at) : '—' }}</small></span>
-                      <span>
-                        <button class="button button--small button--quiet" type="button" :disabled="settingsProfileBusy" @click="applySettingsProfile(profile.name)">Применить</button>
-                        <button class="button button--small button--quiet" type="button" :disabled="settingsProfileBusy" @click="overwriteSettingsProfile(profile.name)">Обновить</button>
-                        <button class="button button--small button--quiet" type="button" :disabled="settingsProfileBusy" @click="exportSettingsProfile(profile.name)">Экспорт</button>
-                        <button class="icon-button" type="button" aria-label="Удалить профиль" :disabled="settingsProfileBusy" @click="deleteSettingsProfile(profile.name)"><Icon name="trash" :size="14" /></button>
-                      </span>
-                    </div>
-                    <span v-if="!settingsProfiles.length && !settingsProfilesLoading" class="muted">Профилей пока нет — сохраните текущие настройки как пресет.</span>
-                    <span v-if="settingsProfilesLoading" class="muted">Загружаю…</span>
-                    <div class="settings-profile-actions">
-                      <input v-model="settingsProfileName" class="settings-profile-name" placeholder="Имя профиля" maxlength="48" />
-                      <button class="button button--small button--accent" type="button" :disabled="settingsProfileBusy || !settingsProfileName.trim()" @click="saveSettingsProfileAs">{{ settingsProfileBusy ? 'Работаю…' : 'Сохранить пресет' }}</button>
-                      <button class="button button--small button--outline" type="button" :disabled="settingsProfileBusy" @click="importSettingsProfile">Импорт YML</button>
-                    </div>
-                    <small class="field-help">Пресет — снимок всех настроек лаунчера, кроме папки игры и client_id: внешность, сеть, профили запуска. Экспорт отдаёт JSON-файл, импорт принимает его же.</small>
-                  </div>
-                  <div class="source-divider"><span>Резервные копии миров по умолчанию</span><i /></div>
-                  <div class="settings-toggle-grid">
-                    <label class="workspace-check"><input v-model="settingsDraft.backup_schedule.enabled" type="checkbox" /><span><strong>Копировать миры по расписанию</strong><small>Расписание для всех экземпляров; в экземпляре можно переопределить</small></span></label>
-                  </div>
-                  <div class="shortcut-grid">
-                    <div class="field"><span>Интервал, часов</span><NumericStepper v-model="settingsDraft.backup_schedule.interval_hours" :min="1" :max="720" :disabled="!settingsDraft.backup_schedule.enabled" aria-label="Интервал копий" /></div>
-                    <div class="field"><span>Хранить копий</span><NumericStepper v-model="settingsDraft.backup_schedule.keep" :min="1" :max="50" :disabled="!settingsDraft.backup_schedule.enabled" aria-label="Количество копий" /></div>
-                    <div class="field"><span>Куда</span><CustomSelect v-model="settingsDraft.backup_schedule.destination" :options="backupDestinationOptions" :disabled="!settingsDraft.backup_schedule.enabled" /></div>
-                  </div>
-                  <small class="field-help">Копируется только игровое содержимое (saves/ или world*), запущенные экземпляры пропускаются и копируются на следующем цикле. WebDAV использует облачный endpoint из раздела облака.</small>
-                   <div class="field">
-                     <span>Graphics / GLX</span>
-                     <CustomSelect v-model="settingsDraft.graphics_mode" :options="graphicsOptions" />
-                      <small class="field-help">Auto включает NVIDIA PRIME, если nvidia-smi видит видеокарту; иначе используется системный GLX. Сохраните изменения, чтобы применить режим. Экземпляры с Auto наследуют эту настройку.</small>
-                   </div>
-                   <div class="diagnostic-note">
-                     <span class="status-dot" :class="{ 'status-dot--green': state.system.nvidia_smi }" />
-                     <span>{{ state.system.session }} · {{ state.system.display }} · {{ state.system.nvidia_smi ? 'nvidia-smi найден' : 'nvidia-smi не найден' }}</span>
-                     <button class="text-button" type="button" @click="loadGraphicsDiagnostics">Проверить GLX</button>
-                   </div>
-                   <pre v-if="graphicsReport" class="diagnostic-output">{{ graphicsReport }}</pre>
-                   <div class="diagnostic-note diagnostic-note--stacked">
-                     <span class="status-dot" :class="{ 'status-dot--busy': updaterBusy, 'status-dot--green': !updaterBusy && updaterVersion }" />
-                     <div>
-                       <strong>Самообновление</strong>
-                       <div>{{ updaterStatus }}</div>
-                       <small v-if="updaterVersion">К установке: {{ updaterVersion }}</small>
-                       <small v-if="updaterProgressTotal">{{ updaterProgressDownloaded }} / {{ updaterProgressTotal }} байт</small>
+               <nav class="settings-section-nav" aria-label="Разделы настроек">
+                 <button type="button" @click="scrollSettingsSection('settings-system')">Среда запуска</button>
+                 <button type="button" @click="scrollSettingsSection('settings-behavior')">Поведение</button>
+                 <button type="button" @click="scrollSettingsSection('settings-hotkeys')">Горячие клавиши</button>
+                 <button type="button" @click="scrollSettingsSection('settings-overlay')">Оверлей</button>
+                 <button type="button" @click="scrollSettingsSection('settings-metrics')">Метрики</button>
+                 <button type="button" @click="scrollSettingsSection('settings-sources')">Источники</button>
+                 <button type="button" @click="scrollSettingsSection('settings-profiles')">Профили запуска</button>
+                 <button type="button" @click="scrollSettingsSection('settings-catalogs')">Каталоги</button>
+                 <button type="button" @click="scrollSettingsSection('settings-cloud')">Облако</button>
+               </nav>
+               <!-- Плитки настроек раскладываются колонками (masonry): короткие
+                    плитки встают под длинными, без пустых дыр справа. Каждая
+                    плитка — одна тема, а не «всё подряд в одной карточке». -->
+               <div class="settings-masonry">
+                 <section id="settings-system" class="panel settings-card">
+                   <div class="panel-heading"><div><span class="eyebrow">Система</span><h2>Среда запуска</h2></div></div>
+                   <div class="settings-form">
+                     <div class="field"><span>Язык интерфейса</span><CustomSelect :model-value="settingsDraft.language ?? 'ru'" :options="languageOptions" @update:model-value="setLanguageFromSettings" /></div>
+                     <label class="field"><span>Папка игры</span><input v-model="settingsDraft.game_dir" :placeholder="defaultGameDirectory" /></label>
+                     <div class="field">
+                       <span>Java runtime <button class="text-button" type="button" @click="refreshJavaOptions">Обновить список</button></span>
+                       <CustomSelect v-model="javaSelection" :options="javaChoiceOptions" />
                      </div>
-                     <span class="workspace-card-actions">
+                     <div class="field"><span>Параллельные загрузки</span><NumericStepper v-model="settingsDraft.max_downloads" :min="1" :max="32" aria-label="Параллельные загрузки" /></div>
+                     <label v-if="javaSelection === 'manual'" class="field field--wide">
+                       <span>Путь к Java executable <small>можно указать JDK/JRE или бинарник</small></span>
+                       <input v-model="settingsDraft.java_path" placeholder="/usr/lib/jvm/.../bin/java" />
+                       <div class="java-path-actions"><button class="button button--small button--quiet" type="button" @click="validateJavaPath">Проверить Java</button><span v-if="javaValidation" class="field-help">{{ javaValidation }}</span></div>
+                     </label>
+                     <div class="field field--wide memory-control">
+                       <span>Память JVM <small>максимум {{ memoryTotalLabel }}</small></span>
+                       <div class="memory-input-row">
+                         <NumericStepper :model-value="memoryValue" :min="1" :max="memoryMaxValue || 8192" :step="memoryUnit === 'GiB' ? 1 : 128" :decimals="memoryUnit === 'GiB' ? 2 : 0" aria-label="Память JVM" @update:model-value="memoryValue = $event; clampMemoryDraft()" />
+                         <CustomSelect v-model="memoryUnit" :options="memoryUnitOptions" />
+                       </div>
+                       <small class="field-help">До {{ memoryMaxValue || '—' }} {{ memoryUnit }} · рекомендуем {{ formatMemoryLabel(state.settings.memory_recommended_kib) }}</small>
+                     </div>
+                     <label class="field field--wide"><span>Прокси <small>HTTP/HTTPS или SOCKS5, если сеть блокирует каталоги</small></span><input v-model="settingsDraft.http_proxy" placeholder="http://127.0.0.1:порт или socks5://127.0.0.1:1080" /><small class="field-help">SOCKS5 резолвит имена на стороне прокси; авторизация socks5://user:pass@host:port поддерживается.</small></label>
+                     <div class="field field--wide">
+                       <span>Graphics / GLX</span>
+                       <CustomSelect v-model="settingsDraft.graphics_mode" :options="graphicsOptions" />
+                       <small class="field-help">Auto включает NVIDIA PRIME, если nvidia-smi видит видеокарту; иначе используется системный GLX. Экземпляры с Auto наследуют эту настройку.</small>
+                     </div>
+                     <div class="diagnostic-note">
+                       <span class="status-dot" :class="{ 'status-dot--green': state.system.nvidia_smi }" />
+                       <span>{{ state.system.session }} · {{ state.system.display }} · {{ state.system.nvidia_smi ? 'nvidia-smi найден' : 'nvidia-smi не найден' }}</span>
+                       <button class="text-button" type="button" @click="loadGraphicsDiagnostics">Проверить GLX</button>
+                     </div>
+                     <pre v-if="graphicsReport" class="diagnostic-output">{{ graphicsReport }}</pre>
+                   </div>
+                 </section>
+
+                 <section id="settings-behavior" class="panel settings-card">
+                   <div class="panel-heading"><div><span class="eyebrow">Поведение</span><h2>Запуск и интерфейс</h2></div></div>
+                   <div class="settings-form">
+                     <div class="field"><span>Экран при запуске</span><CustomSelect v-model="settingsDraft.startup_view" :options="persistentViewOptions" /></div>
+                     <div class="field"><span>Последний экран</span><CustomSelect v-model="settingsDraft.last_view" :options="persistentViewOptions" /></div>
+                     <div class="field"><span>Версии по умолчанию</span><CustomSelect v-model="settingsDraft.default_version_filter" :options="versionFilterOptions" /></div>
+                     <div class="field"><span>Loader по умолчанию</span><CustomSelect v-model="settingsDraft.default_loader" :options="loaderOptions" /></div>
+                     <div class="field field--wide"><span>Аккаунт по умолчанию</span><CustomSelect v-model="settingsDraft.default_account_id" :options="accountOptions" /></div>
+                     <div class="settings-toggle-grid">
+                       <label class="workspace-check"><input v-model="settingsDraft.remember_last_view" type="checkbox" /><span><strong>Запоминать экран</strong><small>Возвращаться на последний открытый раздел</small></span></label>
+                       <label class="workspace-check"><input v-model="settingsDraft.open_last_instance" type="checkbox" /><span><strong>Открывать последний экземпляр</strong><small>Сохранять рабочий контекст выбранного профиля</small></span></label>
+                       <label class="workspace-check"><input v-model="settingsDraft.launch_after_install" type="checkbox" /><span><strong>Запускать после установки</strong><small>Автоматически открыть готовый экземпляр</small></span></label>
+                       <label class="workspace-check"><input v-model="settingsDraft.minimize_on_launch" type="checkbox" /><span><strong>Сворачивать при запуске</strong><small>Скрыть окно лаунчера после старта игры</small></span></label>
+                       <label class="workspace-check"><input v-model="settingsDraft.confirm_destructive_actions" type="checkbox" /><span><strong>Подтверждать опасные действия</strong><small>Удаление экземпляров, ресурсов, плагинов и аккаунтов</small></span></label>
+                       <label class="workspace-check"><input v-model="settingsDraft.show_activity_panel" type="checkbox" /><span><strong>Показывать панель активности</strong><small>Логи, прогресс и отмена операций</small></span></label>
+                       <label class="workspace-check"><input v-model="settingsDraft.show_toasts" type="checkbox" /><span><strong>Показывать уведомления</strong><small>Короткие сообщения о результате действий</small></span></label>
+                     </div>
+                   </div>
+                 </section>
+
+                 <section id="settings-downloads" class="panel settings-card">
+                   <div class="panel-heading"><div><span class="eyebrow">Сеть и журналы</span><h2>Загрузки и metadata</h2></div></div>
+                   <div class="settings-form">
+                     <div class="field"><span>Обновление metadata, часы</span><NumericStepper v-model="settingsDraft.metadata_refresh_hours" :min="1" :max="168" aria-label="Обновление metadata" /></div>
+                     <div class="field"><span>Timeout загрузки, секунд</span><NumericStepper v-model="settingsDraft.download_timeout_seconds" :min="5" :max="120" aria-label="Timeout загрузки" /></div>
+                     <div class="field"><span>Повторные попытки загрузки</span><NumericStepper v-model="settingsDraft.download_retries" :min="1" :max="6" aria-label="Повторные попытки загрузки" /></div>
+                     <div class="field"><span>Хранить логи, дней <small>0 = без лимита</small></span><NumericStepper v-model="settingsDraft.keep_logs_days" :min="0" :max="365" aria-label="Хранение логов" /></div>
+                     <div class="settings-toggle-grid">
+                       <label class="workspace-check"><input v-model="settingsDraft.auto_refresh_metadata" type="checkbox" /><span><strong>Обновлять metadata автоматически</strong><small>Проверять версии при открытии лаунчера</small></span></label>
+                     </div>
+                   </div>
+                 </section>
+
+                 <section id="settings-updates" class="panel settings-card">
+                   <div class="panel-heading"><div><span class="eyebrow">Обновления</span><h2>Самообновление</h2></div></div>
+                   <div class="settings-form">
+                     <div class="diagnostic-note diagnostic-note--stacked">
+                       <span class="status-dot" :class="{ 'status-dot--busy': updaterBusy, 'status-dot--green': !updaterBusy && updaterVersion }" />
+                       <div>
+                         <div>{{ updaterStatus }}</div>
+                         <small v-if="updaterVersion">К установке: {{ updaterVersion }}</small>
+                         <small v-if="updaterProgressTotal">{{ updaterProgressDownloaded }} / {{ updaterProgressTotal }} байт</small>
+                       </div>
+                     </div>
+                     <div class="settings-inline-actions">
                        <button class="button button--small button--quiet" type="button" :disabled="updaterBusy" @click="void checkLauncherUpdates()"><Icon name="refresh" :size="14" />{{ updaterBusy ? 'Проверяю…' : 'Проверить обновления' }}</button>
                        <button class="button button--small button--accent" type="button" :disabled="updaterBusy || !updaterVersion" @click="void installLauncherUpdate()"><Icon name="download" :size="14" />Установить</button>
-                     </span>
+                     </div>
+                     <small v-if="updaterNotes" class="field-help">{{ updaterNotes }}</small>
                    </div>
-                   <small v-if="updaterNotes" class="field-help">{{ updaterNotes }}</small>
-                </div>
-               </section>
-                <section id="settings-profiles" class="panel settings-card settings-card--wide">
+                 </section>
+
+                 <section id="settings-privacy" class="panel settings-card">
+                   <div class="panel-heading"><div><span class="eyebrow">Приватность</span><h2>Телеметрия</h2></div></div>
+                   <div class="settings-form">
+                     <div class="settings-toggle-grid">
+                       <label class="workspace-check"><input v-model="settingsDraft.telemetry" type="checkbox" /><span><strong>Телеметрия</strong><small>Выключено по умолчанию</small></span></label>
+                     </div>
+                     <label class="field field--wide"><span>Crash-report endpoint <small>Sentry-compatible webhook или self-hosted collector</small></span><input v-model="settingsDraft.telemetry_endpoint" :disabled="!settingsDraft.telemetry" placeholder="https://errors.example.com/api/nivora-launcher/crash" /><small class="field-help">Отправляется только при включённой телеметрии и только для падений/неуспешных завершений Minecraft.</small></label>
+                   </div>
+                 </section>
+
+                 <section id="settings-hotkeys" class="panel settings-card">
+                   <div class="panel-heading"><div><span class="eyebrow">Управление</span><h2>Горячие клавиши</h2></div></div>
+                   <div class="settings-form">
+                     <!-- Общие клавиши — тем же рекордером, что и клавиши оверлея:
+                          свободный текст молча ломал клавиши. -->
+                     <div class="hotkey-grid">
+                       <label v-for="shortcut in shortcutRows" :key="shortcut.key" class="field"><span>{{ shortcut.label }}</span><HotkeyInput v-model="settingsDraft.keyboard_shortcuts[shortcut.key]" :default-hint="`по умолчанию ${shortcut.default}`" /></label>
+                     </div>
+                     <small class="field-help">Кликните по полю и нажмите нужную комбинацию — ввести текст руками нельзя.</small>
+                   </div>
+                 </section>
+
+                 <section id="settings-backups" class="panel settings-card">
+                   <div class="panel-heading"><div><span class="eyebrow">Миры</span><h2>Резервные копии по умолчанию</h2></div></div>
+                   <div class="settings-form">
+                     <div class="settings-toggle-grid">
+                       <label class="workspace-check"><input v-model="settingsDraft.backup_schedule.enabled" type="checkbox" /><span><strong>Копировать миры по расписанию</strong><small>Расписание для всех экземпляров; в экземпляре можно переопределить</small></span></label>
+                     </div>
+                     <div class="field"><span>Интервал, часов</span><NumericStepper v-model="settingsDraft.backup_schedule.interval_hours" :min="1" :max="720" :disabled="!settingsDraft.backup_schedule.enabled" aria-label="Интервал копий" /></div>
+                     <div class="field"><span>Хранить копий</span><NumericStepper v-model="settingsDraft.backup_schedule.keep" :min="1" :max="50" :disabled="!settingsDraft.backup_schedule.enabled" aria-label="Количество копий" /></div>
+                     <div class="field field--wide"><span>Куда</span><CustomSelect v-model="settingsDraft.backup_schedule.destination" :options="backupDestinationOptions" :disabled="!settingsDraft.backup_schedule.enabled" /></div>
+                     <small class="field-help">Копируется только игровое содержимое (saves/ или world*), запущенные экземпляры пропускаются и копируются на следующем цикле. WebDAV использует облачный endpoint из раздела облака.</small>
+                   </div>
+                 </section>
+
+                 <section id="settings-presets" class="panel settings-card">
+                   <div class="panel-heading"><div><span class="eyebrow">Пресеты</span><h2>Профили настроек</h2></div></div>
+                   <div class="settings-form">
+                     <div class="settings-profiles">
+                       <div v-for="profile in settingsProfiles" :key="profile.name" class="settings-profile-row">
+                         <span><strong>{{ profile.name }}</strong><small>{{ profile.key_count }} параметров · {{ profile.updated_at ? formatDateShort(profile.updated_at) : '—' }}</small></span>
+                         <span>
+                           <button class="button button--small button--quiet" type="button" :disabled="settingsProfileBusy" @click="applySettingsProfile(profile.name)">Применить</button>
+                           <button class="button button--small button--quiet" type="button" :disabled="settingsProfileBusy" @click="overwriteSettingsProfile(profile.name)">Обновить</button>
+                           <button class="button button--small button--quiet" type="button" :disabled="settingsProfileBusy" @click="exportSettingsProfile(profile.name)">Экспорт</button>
+                           <button class="icon-button" type="button" aria-label="Удалить профиль" :disabled="settingsProfileBusy" @click="deleteSettingsProfile(profile.name)"><Icon name="trash" :size="14" /></button>
+                         </span>
+                       </div>
+                       <span v-if="!settingsProfiles.length && !settingsProfilesLoading" class="muted">Профилей пока нет — сохраните текущие настройки как пресет.</span>
+                       <span v-if="settingsProfilesLoading" class="muted">Загружаю…</span>
+                       <div class="settings-profile-actions">
+                         <input v-model="settingsProfileName" class="settings-profile-name" placeholder="Имя профиля" maxlength="48" />
+                         <button class="button button--small button--accent" type="button" :disabled="settingsProfileBusy || !settingsProfileName.trim()" @click="saveSettingsProfileAs">{{ settingsProfileBusy ? 'Работаю…' : 'Сохранить пресет' }}</button>
+                         <button class="button button--small button--outline" type="button" :disabled="settingsProfileBusy" @click="importSettingsProfile">Импорт YML</button>
+                       </div>
+                       <small class="field-help">Пресет — снимок всех настроек лаунчера, кроме папки игры и client_id: внешность, сеть, профили запуска. Экспорт отдаёт JSON-файл, импорт принимает его же.</small>
+                     </div>
+                   </div>
+                 </section>
+
+                 <section id="settings-overlay" class="panel settings-card">
+                   <div class="panel-heading"><div><span class="eyebrow">В игре</span><h2>Игровой оверлей и запись</h2></div></div>
+                   <div class="settings-form">
+                     <div class="settings-toggle-grid">
+                       <label class="workspace-check"><input v-model="settingsDraft.overlay_settings.enabled" type="checkbox" /><span><strong>Оверлей в игре</strong><small>{{ settingsDraft.overlay_settings.hotkey_overlay }} открывает оверлей поверх Minecraft</small></span></label>
+                       <label class="workspace-check"><input v-model="settingsDraft.overlay_settings.show_mods" type="checkbox" :disabled="!settingsDraft.overlay_settings.enabled" /><span><strong>Виджет модов</strong><small>Список модов экземпляра в оверлее</small></span></label>
+                       <label class="workspace-check"><input v-model="settingsDraft.overlay_settings.show_metrics" type="checkbox" :disabled="!settingsDraft.overlay_settings.enabled" /><span><strong>Виджет метрик</strong><small>CPU, RAM и диск игры</small></span></label>
+                       <label class="workspace-check"><input v-model="settingsDraft.overlay_settings.recording_audio" type="checkbox" :disabled="!settingsDraft.overlay_settings.enabled" /><span><strong>Записывать звук</strong><small>Системный звук через PulseAudio</small></span></label>
+                     </div>
+                     <div class="hotkey-grid">
+                       <label class="field"><span>Клавиша оверлея</span><HotkeyInput v-model="settingsDraft.overlay_settings.hotkey_overlay" :disabled="!settingsDraft.overlay_settings.enabled" default-hint="по умолчанию Shift+Tab" /></label>
+                       <label class="field"><span>Клавиша записи</span><HotkeyInput v-model="settingsDraft.overlay_settings.hotkey_recording" :disabled="!settingsDraft.overlay_settings.enabled" default-hint="по умолчанию F7" /></label>
+                     </div>
+                     <div class="field"><span>Кодировщик</span><CustomSelect v-model="settingsDraft.overlay_settings.recording_encoder" :options="recordingEncoderOptions" :disabled="!settingsDraft.overlay_settings.enabled" /></div>
+                     <div class="field"><span>Контейнер</span><CustomSelect v-model="settingsDraft.overlay_settings.recording_container" :options="recordingContainerOptions" :disabled="!settingsDraft.overlay_settings.enabled" /></div>
+                     <div class="field"><span>FPS записи</span><NumericStepper v-model="settingsDraft.overlay_settings.recording_fps" :min="15" :max="120" :disabled="!settingsDraft.overlay_settings.enabled" aria-label="FPS записи" /></div>
+                     <div class="field"><span>Качество <small>CRF/CQ: меньше — лучше</small></span><NumericStepper v-model="settingsDraft.overlay_settings.recording_quality" :min="15" :max="35" :disabled="!settingsDraft.overlay_settings.enabled" aria-label="Качество записи" /></div>
+                     <!-- Диагностика оверлея: пошаговый отчёт вместо «не открывается». -->
+                     <div class="overlay-selftest">
+                       <button class="button button--small button--outline" type="button" :disabled="overlaySelfTestBusy || !settingsDraft.overlay_settings.enabled" @click="() => { void runOverlaySelfTest() }"><Icon name="info" :size="14" />{{ overlaySelfTestBusy ? 'Проверяю…' : 'Диагностика оверлея' }}</button>
+                       <pre v-if="overlaySelfTestReport.length" class="selftest-report">{{ overlaySelfTestReport.map((step) => `${step.ok ? '✓' : '✗'} ${step.name} — ${step.detail}`).join('\n') }}</pre>
+                     </div>
+                     <small class="field-help">Глобальные клавиши не работают в нативных Wayland-сессиях (в пакетной сборке лаунчер работает через XWayland — там клавиши работают) и в эксклюзивном полноэкранном режиме игры: там оверлей открывается кнопкой «Оверлей» в шапке и пунктом «Игровой оверлей» в меню значка Nivora в трее.</small>
+                   </div>
+                 </section>
+
+                 <section id="settings-metrics" class="panel settings-card">
+                   <div class="panel-heading"><div><span class="eyebrow">Оверлей</span><h2>Системные метрики и виджеты</h2></div></div>
+                   <div class="settings-form">
+                     <div class="settings-toggle-grid">
+                       <label class="workspace-check"><input v-model="settingsDraft.overlay_settings.show_system_metrics" type="checkbox" :disabled="!settingsDraft.overlay_settings.enabled" /><span><strong>Системные метрики</strong><small>CPU, GPU, RAM, диски и температуры</small></span></label>
+                       <label class="workspace-check"><input v-model="settingsDraft.overlay_settings.metrics_cpu" type="checkbox" :disabled="!settingsDraft.overlay_settings.enabled || !settingsDraft.overlay_settings.show_system_metrics" /><span><strong>CPU</strong><small>Загрузка и по ядрам</small></span></label>
+                       <label class="workspace-check"><input v-model="settingsDraft.overlay_settings.metrics_ram" type="checkbox" :disabled="!settingsDraft.overlay_settings.enabled || !settingsDraft.overlay_settings.show_system_metrics" /><span><strong>RAM</strong><small>Память и подкачка</small></span></label>
+                       <label class="workspace-check"><input v-model="settingsDraft.overlay_settings.metrics_gpu" type="checkbox" :disabled="!settingsDraft.overlay_settings.enabled || !settingsDraft.overlay_settings.show_system_metrics" /><span><strong>GPU</strong><small>NVIDIA через nvidia-smi</small></span></label>
+                       <label class="workspace-check"><input v-model="settingsDraft.overlay_settings.metrics_disk" type="checkbox" :disabled="!settingsDraft.overlay_settings.enabled || !settingsDraft.overlay_settings.show_system_metrics" /><span><strong>Диски</strong><small>Заполнение разделов</small></span></label>
+                       <label class="workspace-check"><input v-model="settingsDraft.overlay_settings.metrics_temperatures" type="checkbox" :disabled="!settingsDraft.overlay_settings.enabled || !settingsDraft.overlay_settings.show_system_metrics" /><span><strong>Температуры</strong><small>Linux hwmon, NVIDIA</small></span></label>
+                       <label class="workspace-check"><input v-model="settingsDraft.overlay_settings.show_clock" type="checkbox" :disabled="!settingsDraft.overlay_settings.enabled" /><span><strong>Часы</strong><small>Текущее время в оверлее</small></span></label>
+                       <label class="workspace-check"><input v-model="settingsDraft.overlay_settings.show_chat" type="checkbox" :disabled="!settingsDraft.overlay_settings.enabled" /><span><strong>Быстрый чат сервера</strong><small>Команды и хвост консоли</small></span></label>
+                       <label class="workspace-check"><input v-model="settingsDraft.overlay_settings.compact" type="checkbox" :disabled="!settingsDraft.overlay_settings.enabled" /><span><strong>Компактный режим</strong><small>Меньше отступов</small></span></label>
+                     </div>
+                     <div class="field"><span>Позиция оверлея</span><CustomSelect v-model="settingsDraft.overlay_settings.position" :options="overlayPositionOptions" :disabled="!settingsDraft.overlay_settings.enabled" /></div>
+                     <div class="field"><span>Метрики вне игры</span><CustomSelect v-model="settingsDraft.overlay_settings.system_metrics_display" :options="systemMetricsDisplayOptions" /></div>
+                     <div class="field"><span>Масштаб, %</span><NumericStepper v-model="settingsDraft.overlay_settings.scale" :min="80" :max="130" :disabled="!settingsDraft.overlay_settings.enabled" aria-label="Масштаб оверлея" /></div>
+                     <div class="field"><span>Непрозрачность, %</span><NumericStepper v-model="settingsDraft.overlay_settings.opacity" :min="60" :max="100" :disabled="!settingsDraft.overlay_settings.enabled" aria-label="Непрозрачность оверлея" /></div>
+                     <small class="field-help">Метрики вне игры: «Постоянно» показывает CPU/RAM/GPU в верхней панели лаунчера, «Только оверлей» — лишь по горячей клавише. Датчики и GPU зависят от системы: чего нет — не показываем.</small>
+                   </div>
+                 </section>
+
+                 <section id="settings-sources" class="panel settings-card">
+                   <div class="panel-heading"><div><span class="eyebrow">Интеграции</span><h2>Вход и данные версий</h2></div></div>
+                   <div class="settings-form">
+                     <div class="automatic-integration"><span class="status-dot" :class="{ 'status-dot--green': settingsDraft.login_source === 'microsoft' && state.settings.has_client_id }" /><div><strong>Microsoft OAuth</strong><span>{{ settingsDraft.login_source !== 'microsoft' ? 'Внешний вход отключён.' : state.settings.has_client_id ? 'Public client ID настроен в сборке; вручную вводить его не нужно.' : 'В этой сборке нет настроенного client ID; он должен поставляться вместе с лаунчером.' }}</span></div></div>
+                     <div class="field"><span>Источник входа</span><CustomSelect v-model="settingsDraft.login_source" :options="loginSourceOptions" /></div>
+                     <div class="field"><span>Источник данных</span><CustomSelect v-model="settingsDraft.data_source" :options="dataSourceOptions" /></div>
+                     <label class="field field--wide"><span>Login API URL <small>база device-code и token endpoint</small></span><input v-model="settingsDraft.login_api_url" placeholder="https://login.microsoftonline.com/consumers/oauth2/v2.0" /></label>
+                     <label class="field field--wide"><span>Data API URL <small>{{ settingsDraft.data_source === 'custom' ? 'совместимый version manifest' : 'официальный Mojang manifest по умолчанию' }}</small></span><input v-model="settingsDraft.data_api_url" placeholder="https://piston-meta.mojang.com/mc/game/version_manifest_v2.json" /></label>
+                     <div class="settings-toggle-grid">
+                       <label class="workspace-check"><input v-model="settingsDraft.developer_mode" type="checkbox" /><span><strong>Режим разработчика</strong><small>Разрешает нестандартные HTTPS endpoint. Не включайте на рабочем аккаунте: токены OAuth могут уйти на указанный адрес.</small></span></label>
+                     </div>
+                     <div class="security-note"><Icon name="info" :size="18" /><span>Для распространения лаунчер должен содержать собственный Azure public-client ID. Это публичная настройка сборки, а не секрет и не поле для пользователя.</span></div>
+                   </div>
+                 </section>
+
+                 <section v-if="settingsSectionViews.length" id="settings-plugins" class="panel settings-card">
+                   <div class="panel-heading"><div><span class="eyebrow">Плагины</span><h2>Настройки плагинов</h2></div></div>
+                   <div class="plugin-settings-sections">
+                     <article v-for="entry in settingsSectionViews" :key="`${entry.pluginId}:${entry.view.id}`" class="plugin-settings-section">
+                       <div class="workspace-card-heading"><div><h3>{{ entry.view.title }}</h3><span class="muted">{{ entry.pluginName }} · UI v2</span></div></div>
+                       <PluginViewRenderer
+                         :view="entry.view"
+                         @action="(payload) => runPluginAction({ pluginId: entry.pluginId, ...payload })"
+                         @config="(payload) => void savePluginConfig({ pluginId: entry.pluginId, key: payload.key, value: payload.value })"
+                         @open-link="(url) => void openPluginLink({ pluginId: entry.pluginId, url })"
+                       />
+                     </article>
+                   </div>
+                 </section>
+               </div>
+
+               <section id="settings-profiles" class="panel settings-card settings-card--wide">
                  <div class="panel-heading">
                    <div><span class="eyebrow">Профили запуска</span><h2>Параметры игры</h2><p>Сохраните отдельные наборы памяти, Java, графики, окна и аргументов. Активный профиль применяется к кнопке «Играть».</p></div>
                    <button class="button button--small button--outline" type="button" @click="addLauncherProfile"><Icon name="plus" :size="14" />Новый профиль</button>
@@ -5754,12 +5895,12 @@ onBeforeUnmount(() => {
                      <div class="launcher-profile-heading"><div><span class="profile-active-dot" :class="{ 'profile-active-dot--on': profile.id === settingsDraft.active_launcher_profile_id }" /><strong>{{ profile.name }}</strong><small>{{ profile.id }}</small></div><div class="launcher-profile-actions"><button class="button button--small button--quiet" type="button" @click="settingsDraft.active_launcher_profile_id = profile.id">Использовать</button><button v-if="settingsDraft.launcher_profiles.length > 1" class="icon-button" type="button" aria-label="Удалить профиль запуска" @click="removeLauncherProfile(profile.id)"><Icon name="trash" :size="15" /></button></div></div>
                      <div class="field-grid">
                        <label class="field"><span>Название</span><input v-model="profile.name" maxlength="80" /></label>
-                        <div class="field"><span>Память JVM</span><MemoryField v-model="profile.memory" :max-kib="state.settings.memory_total_kib" /></div>
+                       <div class="field"><span>Память JVM</span><MemoryField v-model="profile.memory" :max-kib="state.settings.memory_total_kib" /></div>
                        <label class="field"><span>Java executable</span><input v-model="profile.java_path" placeholder="Пусто = системная Java" /></label>
                        <div class="field"><span>Графика</span><CustomSelect v-model="profile.graphics_mode" :options="graphicsOptions" /></div>
                        <div class="field"><span>Аккаунт</span><CustomSelect v-model="profile.account_id" :options="accountOptions" /></div>
-                        <div class="field"><span>Ширина окна</span><NumericStepper v-model="profile.window_width" :min="320" :max="8192" aria-label="Ширина окна" /></div>
-                        <div class="field"><span>Высота окна</span><NumericStepper v-model="profile.window_height" :min="240" :max="8192" aria-label="Высота окна" /></div>
+                       <div class="field"><span>Ширина окна</span><NumericStepper v-model="profile.window_width" :min="320" :max="8192" aria-label="Ширина окна" /></div>
+                       <div class="field"><span>Высота окна</span><NumericStepper v-model="profile.window_height" :min="240" :max="8192" aria-label="Высота окна" /></div>
                        <label class="workspace-check"><input v-model="profile.fullscreen" type="checkbox" /><span><strong>Полноэкранный режим</strong><small>Добавляет --fullscreen к запуску.</small></span></label>
                        <label class="field"><span>Quick Play: мир</span><input v-model="profile.quick_play_world" placeholder="Имя сохранения" /></label>
                        <label class="field"><span>Quick Play: сервер</span><input v-model="profile.quick_play_server" placeholder="host:port" /></label>
@@ -5772,28 +5913,26 @@ onBeforeUnmount(() => {
                    </article>
                  </div>
                </section>
-                 <section id="settings-sources" class="panel settings-card">
-                 <div class="panel-heading">
-                   <div><span class="eyebrow">Интеграции</span><h2>Сторонние источники</h2><p>Выберите провайдеры и совместимые API endpoints. Изменения сохраняются локально.</p></div>
-                 </div>
-                 <div class="settings-form">
-                   <div class="automatic-integration"><span class="status-dot" :class="{ 'status-dot--green': settingsDraft.login_source === 'microsoft' && state.settings.has_client_id }" /><div><strong>Microsoft OAuth</strong><span>{{ settingsDraft.login_source !== 'microsoft' ? 'Внешний вход отключён.' : state.settings.has_client_id ? 'Public client ID настроен в сборке; вручную вводить его не нужно.' : 'В этой сборке нет настроенного client ID; он должен поставляться вместе с лаунчером.' }}</span></div></div>
-                    <div class="field"><span>Источник входа</span><CustomSelect v-model="settingsDraft.login_source" :options="loginSourceOptions" /></div>
-                    <label class="field"><span>Login API URL <small>база device-code и token endpoint</small></span><input v-model="settingsDraft.login_api_url" placeholder="https://login.microsoftonline.com/consumers/oauth2/v2.0" /></label>
-                    <label class="workspace-check"><input v-model="settingsDraft.developer_mode" type="checkbox" /><span><strong>Режим разработчика</strong><small>Разрешает нестандартные HTTPS endpoint. Не включайте на рабочем аккаунте: токены OAuth могут уйти на указанный адрес.</small></span></label>
-                    <div class="source-divider"><span>Каталоги ресурсов</span><i /></div>
-                    <div class="resource-catalog-toolbar">
+
+               <section id="settings-catalogs" class="panel settings-card settings-card--wide">
+                 <div class="panel-heading"><div><span class="eyebrow">Интеграции</span><h2>Каталоги</h2></div></div>
+                 <div class="settings-catalog-columns">
+                   <div class="settings-catalog-block">
+                     <div class="source-divider"><span>Каталоги ресурсов</span><i /></div>
+                     <div class="resource-catalog-toolbar">
                        <div class="field"><span>Активный каталог <small>используется в поиске и установке</small></span><CustomSelect v-model="settingsDraft.active_catalog_id" :options="resourceCatalogOptions" @update:model-value="selectActiveCatalog" /></div>
-                      <button class="button button--small button--outline" type="button" @click="addResourceCatalog"><Icon name="plus" :size="14" />Добавить каталог</button>
-                    </div>
+                       <button class="button button--small button--outline" type="button" @click="addResourceCatalog"><Icon name="plus" :size="14" />Добавить каталог</button>
+                     </div>
                      <div class="resource-catalog-list">
                        <article v-for="catalog in settingsDraft.resource_catalogs" :key="catalog.id" class="resource-catalog-row">
                          <div class="field"><span class="field-heading-with-icon"><span>Название</span><CatalogBadge :kind="catalog.kind" compact /></span><input v-model="catalog.name" maxlength="60" /></div>
-                        <div class="field"><span>Тип</span><CustomSelect v-model="catalog.kind" :options="catalogKindOptions" /></div>
-                        <div class="field resource-catalog-url"><span>API URL <small>только HTTPS</small></span><input v-model="catalog.api_url" placeholder="https://api.modrinth.com/v2" /></div>
-                        <button class="icon-button" type="button" aria-label="Удалить каталог" @click="removeResourceCatalog(catalog.id)"><Icon name="trash" :size="15" /></button>
+                         <div class="field"><span>Тип</span><CustomSelect v-model="catalog.kind" :options="catalogKindOptions" /></div>
+                         <div class="field resource-catalog-url"><span>API URL <small>только HTTPS</small></span><input v-model="catalog.api_url" placeholder="https://api.modrinth.com/v2" /></div>
+                         <button class="icon-button" type="button" aria-label="Удалить каталог" @click="removeResourceCatalog(catalog.id)"><Icon name="trash" :size="15" /></button>
                        </article>
                      </div>
+                   </div>
+                   <div class="settings-catalog-block">
                      <div class="source-divider"><span>Каталоги плагинов серверов</span><i /></div>
                      <div class="resource-catalog-toolbar"><div class="field"><span>Активный каталог <small>используется в server workspace</small></span><CustomSelect v-model="settingsDraft.active_plugin_catalog_id" :options="settingsDraft.plugin_catalogs.map((catalog) => ({ value: catalog.id, label: catalog.name, meta: catalog.kind }))" /></div><button class="button button--small button--outline" type="button" @click="addPluginCatalog"><Icon name="plus" :size="14" />Добавить каталог</button></div>
                      <div class="resource-catalog-list">
@@ -5805,121 +5944,26 @@ onBeforeUnmount(() => {
                          <button class="icon-button" type="button" aria-label="Удалить каталог плагинов" @click="removePluginCatalog(catalog.id)"><Icon name="trash" :size="15" /></button>
                        </article>
                      </div>
-                    <div class="source-divider"><span>Версии и metadata</span><i /></div>
-                   <div class="field"><span>Источник данных</span><CustomSelect v-model="settingsDraft.data_source" :options="dataSourceOptions" /></div>
-                   <label class="field"><span>Data API URL <small>{{ settingsDraft.data_source === 'custom' ? 'совместимый version manifest' : 'официальный Mojang manifest по умолчанию' }}</small></span><input v-model="settingsDraft.data_api_url" placeholder="https://piston-meta.mojang.com/mc/game/version_manifest_v2.json" /></label>
-                    <div class="security-note"><Icon name="info" :size="18" /><span>Для распространения лаунчер должен содержать собственный Azure public-client ID. Это публичная настройка сборки, а не секрет и не поле для пользователя.</span></div>
+                   </div>
                  </div>
                </section>
-              </div>
-              <CloudStoragePanel
-                :url="settingsDraft.cloud_url"
-                :username="settingsDraft.cloud_username"
-                :remote-path="settingsDraft.cloud_remote_path"
-                :include-accounts="settingsDraft.cloud_include_accounts"
-                @saved="Object.assign(settingsDraft, $event)"
-                @toast="showToast"
-                @changed="refreshBootstrap"
-              />
-               <section id="settings-behavior" class="panel settings-card settings-card--wide">
-                <div class="panel-heading">
-                  <div><span class="eyebrow">Поведение</span><h2>Запуск и управление</h2><p>Настройте стартовый экран, значения по умолчанию, подтверждения и горячие клавиши без редактирования файлов.</p></div>
-                </div>
-                <div v-if="settingsSectionViews.length" class="plugin-settings-sections">
-                  <article v-for="entry in settingsSectionViews" :key="`${entry.pluginId}:${entry.view.id}`" class="plugin-settings-section">
-                    <div class="workspace-card-heading"><div><h3>{{ entry.view.title }}</h3><span class="muted">{{ entry.pluginName }} · UI v2</span></div></div>
-                    <PluginViewRenderer
-                      :view="entry.view"
-                      @action="(payload) => runPluginAction({ pluginId: entry.pluginId, ...payload })"
-                      @config="(payload) => void savePluginConfig({ pluginId: entry.pluginId, key: payload.key, value: payload.value })"
-                      @open-link="(url) => void openPluginLink({ pluginId: entry.pluginId, url })"
-                    />
-                  </article>
-                </div>
-                <div class="settings-form">
-                  <div class="field-grid">
-                     <div class="field"><span>Экран при запуске</span><CustomSelect v-model="settingsDraft.startup_view" :options="persistentViewOptions" /></div>
-                     <div class="field"><span>Последний экран</span><CustomSelect v-model="settingsDraft.last_view" :options="persistentViewOptions" /></div>
-                    <div class="field"><span>Версии по умолчанию</span><CustomSelect v-model="settingsDraft.default_version_filter" :options="versionFilterOptions" /></div>
-                    <div class="field"><span>Loader по умолчанию</span><CustomSelect v-model="settingsDraft.default_loader" :options="loaderOptions" /></div>
-                    <div class="field"><span>Аккаунт по умолчанию</span><CustomSelect v-model="settingsDraft.default_account_id" :options="accountOptions" /></div>
-                     <div class="field"><span>Обновление metadata, часы</span><NumericStepper v-model="settingsDraft.metadata_refresh_hours" :min="1" :max="168" aria-label="Обновление metadata" /></div>
-                     <div class="field"><span>Timeout загрузки, секунд</span><NumericStepper v-model="settingsDraft.download_timeout_seconds" :min="5" :max="120" aria-label="Timeout загрузки" /></div>
-                     <div class="field"><span>Повторные попытки загрузки</span><NumericStepper v-model="settingsDraft.download_retries" :min="1" :max="6" aria-label="Повторные попытки загрузки" /></div>
-                     <div class="field"><span>Хранить логи, дней <small>0 = без лимита</small></span><NumericStepper v-model="settingsDraft.keep_logs_days" :min="0" :max="365" aria-label="Хранение логов" /></div>
-                  </div>
-                  <div class="settings-toggle-grid">
-                    <label class="workspace-check"><input v-model="settingsDraft.remember_last_view" type="checkbox" /><span><strong>Запоминать экран</strong><small>Возвращаться на последний открытый раздел</small></span></label>
-                    <label class="workspace-check"><input v-model="settingsDraft.open_last_instance" type="checkbox" /><span><strong>Открывать последний экземпляр</strong><small>Сохранять рабочий контекст выбранного профиля</small></span></label>
-                    <label class="workspace-check"><input v-model="settingsDraft.launch_after_install" type="checkbox" /><span><strong>Запускать после установки</strong><small>Автоматически открыть готовый экземпляр</small></span></label>
-                    <label class="workspace-check"><input v-model="settingsDraft.auto_refresh_metadata" type="checkbox" /><span><strong>Обновлять metadata автоматически</strong><small>Проверять версии при открытии лаунчера</small></span></label>
-                    <label class="workspace-check"><input v-model="settingsDraft.confirm_destructive_actions" type="checkbox" /><span><strong>Подтверждать опасные действия</strong><small>Удаление экземпляров, ресурсов, плагинов и аккаунтов</small></span></label>
-                     <label class="workspace-check"><input v-model="settingsDraft.show_activity_panel" type="checkbox" /><span><strong>Показывать панель активности</strong><small>Логи, прогресс и отмена операций</small></span></label>
-                     <label class="workspace-check"><input v-model="settingsDraft.show_toasts" type="checkbox" /><span><strong>Показывать уведомления</strong><small>Короткие сообщения о результате действий</small></span></label>
-                     <label class="workspace-check"><input v-model="settingsDraft.minimize_on_launch" type="checkbox" /><span><strong>Сворачивать при запуске</strong><small>Скрыть окно лаунчера после старта игры</small></span></label>
-                     <label class="workspace-check"><input v-model="settingsDraft.telemetry" type="checkbox" /><span><strong>Телеметрия</strong><small>Выключено по умолчанию</small></span></label>
-                     <label class="field"><span>Crash-report endpoint <small>Sentry-compatible webhook или self-hosted collector</small></span><input v-model="settingsDraft.telemetry_endpoint" :disabled="!settingsDraft.telemetry" placeholder="https://errors.example.com/api/nivora-launcher/crash" /><small class="field-help">Отправляется только при включённой телеметрии и только для падений/неуспешных завершений Minecraft.</small></label>
-                  </div>
-                  <div class="source-divider"><span>Горячие клавиши</span><i /></div>
-                  <div class="common-hotkey-grid">
-                    <!-- Общие клавиши — тем же рекордером, что и клавиши оверлея:
-                         раньше это были свободные текстовые поля, куда можно
-                         было вписать что угодно, и мусор молча ломал клавиши. -->
-                    <label v-for="shortcut in shortcutRows" :key="shortcut.key" class="field"><span>{{ shortcut.label }}</span><HotkeyInput v-model="settingsDraft.keyboard_shortcuts[shortcut.key]" :default-hint="`по умолчанию ${shortcut.default}`" /></label>
-                  </div>
-                  <div class="source-divider"><span>Игровой оверлей и запись</span><i /></div>
-                  <div class="settings-toggle-grid">
-                    <label class="workspace-check"><input v-model="settingsDraft.overlay_settings.enabled" type="checkbox" /><span><strong>Оверлей в игре</strong><small>{{ settingsDraft.overlay_settings.hotkey_overlay }} открывает оверлей поверх Minecraft: моды, время сессии, метрики</small></span></label>
-                    <label class="workspace-check"><input v-model="settingsDraft.overlay_settings.show_mods" type="checkbox" :disabled="!settingsDraft.overlay_settings.enabled" /><span><strong>Виджет модов</strong><small>Список модов экземпляра в отдельной панели оверлея</small></span></label>
-                    <label class="workspace-check"><input v-model="settingsDraft.overlay_settings.show_metrics" type="checkbox" :disabled="!settingsDraft.overlay_settings.enabled" /><span><strong>Виджет метрик</strong><small>CPU, RAM и диск игры в одном виджете</small></span></label>
-                    <label class="workspace-check"><input v-model="settingsDraft.overlay_settings.recording_audio" type="checkbox" :disabled="!settingsDraft.overlay_settings.enabled" /><span><strong>Записывать звук</strong><small>Захват системного звука через PulseAudio</small></span></label>
-                  </div>
-                  <!-- Горячие клавиши оверлея — отдельной сеткой в два поля:
-                       раньше делили пять колонок с остальными настройками,
-                       поля сжимались, и подсказка наезжала на клавиши. -->
-                  <div class="overlay-hotkey-grid">
-                    <label class="field"><span>Клавиша оверлея</span><HotkeyInput v-model="settingsDraft.overlay_settings.hotkey_overlay" :disabled="!settingsDraft.overlay_settings.enabled" default-hint="по умолчанию Shift+Tab" /></label>
-                    <label class="field"><span>Клавиша записи</span><HotkeyInput v-model="settingsDraft.overlay_settings.hotkey_recording" :disabled="!settingsDraft.overlay_settings.enabled" default-hint="по умолчанию F7" /></label>
-                  </div>
-                  <!-- Диагностика оверлея: пошаговый отчёт вместо «не открывается».
-                       Каждая строка — отдельный шаг (среда, окно, показ, клавиши). -->
-                  <div class="overlay-selftest">
-                    <button class="text-button" type="button" :disabled="overlaySelfTestBusy || !settingsDraft.overlay_settings.enabled" @click="() => { void runOverlaySelfTest() }">{{ overlaySelfTestBusy ? 'Проверяю…' : 'Диагностика оверлея' }}</button>
-                    <pre v-if="overlaySelfTestReport.length" class="selftest-report">{{ overlaySelfTestReport.map((step) => `${step.ok ? '✓' : '✗'} ${step.name} — ${step.detail}`).join('\n') }}</pre>
-                  </div>
-                  <small class="field-help field-help--wide">Кликните по полю и нажмите нужную комбинацию — ввести текст руками нельзя. Глобальные клавиши не работают в нативных Wayland-сессиях (в пакетной сборке лаунчер работает через XWayland — там клавиши работают) и в эксклюзивном полноэкранном режиме игры: там оверлей открывается кнопкой «Оверлей» в шапке и пунктом «Игровой оверлей» в меню значка Nivora в трее. Не открывается? Жмите «Диагностика оверлея».</small>
-                  <div class="shortcut-grid">
-                    <div class="field"><span>Кодировщик</span><CustomSelect v-model="settingsDraft.overlay_settings.recording_encoder" :options="recordingEncoderOptions" :disabled="!settingsDraft.overlay_settings.enabled" /></div>
-                    <div class="field"><span>Контейнер</span><CustomSelect v-model="settingsDraft.overlay_settings.recording_container" :options="recordingContainerOptions" :disabled="!settingsDraft.overlay_settings.enabled" /></div>
-                    <div class="field"><span>FPS записи</span><NumericStepper v-model="settingsDraft.overlay_settings.recording_fps" :min="15" :max="120" :disabled="!settingsDraft.overlay_settings.enabled" aria-label="FPS записи" /></div>
-                    <div class="field"><span>Качество <small>CRF/CQ: меньше — лучше</small></span><NumericStepper v-model="settingsDraft.overlay_settings.recording_quality" :min="15" :max="35" :disabled="!settingsDraft.overlay_settings.enabled" aria-label="Качество записи" /></div>
-                  </div>
-                  <div class="source-divider"><span>Системные метрики и виджеты</span><i /></div>
-                  <div class="settings-toggle-grid">
-                    <label class="workspace-check"><input v-model="settingsDraft.overlay_settings.show_system_metrics" type="checkbox" :disabled="!settingsDraft.overlay_settings.enabled" /><span><strong>Системные метрики</strong><small>CPU, GPU, RAM, диски и температуры в стиле MSI Afterburner</small></span></label>
-                    <label class="workspace-check"><input v-model="settingsDraft.overlay_settings.metrics_cpu" type="checkbox" :disabled="!settingsDraft.overlay_settings.enabled || !settingsDraft.overlay_settings.show_system_metrics" /><span><strong>CPU</strong><small>Загрузка и по ядрам</small></span></label>
-                    <label class="workspace-check"><input v-model="settingsDraft.overlay_settings.metrics_ram" type="checkbox" :disabled="!settingsDraft.overlay_settings.enabled || !settingsDraft.overlay_settings.show_system_metrics" /><span><strong>RAM</strong><small>Память и подкачка</small></span></label>
-                    <label class="workspace-check"><input v-model="settingsDraft.overlay_settings.metrics_gpu" type="checkbox" :disabled="!settingsDraft.overlay_settings.enabled || !settingsDraft.overlay_settings.show_system_metrics" /><span><strong>GPU</strong><small>NVIDIA через nvidia-smi; других нет — прячем честно</small></span></label>
-                    <label class="workspace-check"><input v-model="settingsDraft.overlay_settings.metrics_disk" type="checkbox" :disabled="!settingsDraft.overlay_settings.enabled || !settingsDraft.overlay_settings.show_system_metrics" /><span><strong>Диски</strong><small>Заполнение смонтированных разделов</small></span></label>
-                    <label class="workspace-check"><input v-model="settingsDraft.overlay_settings.metrics_temperatures" type="checkbox" :disabled="!settingsDraft.overlay_settings.enabled || !settingsDraft.overlay_settings.show_system_metrics" /><span><strong>Температуры</strong><small>Где датчики доступны (Linux hwmon, NVIDIA)</small></span></label>
-                    <label class="workspace-check"><input v-model="settingsDraft.overlay_settings.show_clock" type="checkbox" :disabled="!settingsDraft.overlay_settings.enabled" /><span><strong>Часы</strong><small>Текущее время в оверлее</small></span></label>
-                    <label class="workspace-check"><input v-model="settingsDraft.overlay_settings.show_chat" type="checkbox" :disabled="!settingsDraft.overlay_settings.enabled" /><span><strong>Быстрый чат сервера</strong><small>Команды и хвост консоли сервера из оверлея</small></span></label>
-                    <label class="workspace-check"><input v-model="settingsDraft.overlay_settings.compact" type="checkbox" :disabled="!settingsDraft.overlay_settings.enabled" /><span><strong>Компактный режим</strong><small>Меньше отступов, больше игры видно</small></span></label>
-                  </div>
-                  <div class="shortcut-grid">
-                    <div class="field"><span>Позиция оверлея</span><CustomSelect v-model="settingsDraft.overlay_settings.position" :options="overlayPositionOptions" :disabled="!settingsDraft.overlay_settings.enabled" /></div>
-                    <div class="field"><span>Масштаб, %</span><NumericStepper v-model="settingsDraft.overlay_settings.scale" :min="80" :max="130" :disabled="!settingsDraft.overlay_settings.enabled" aria-label="Масштаб оверлея" /></div>
-                    <div class="field"><span>Непрозрачность, %</span><NumericStepper v-model="settingsDraft.overlay_settings.opacity" :min="60" :max="100" :disabled="!settingsDraft.overlay_settings.enabled" aria-label="Непрозрачность оверлея" /></div>
-                    <div class="field"><span>Метрики вне игры</span><CustomSelect v-model="settingsDraft.overlay_settings.system_metrics_display" :options="systemMetricsDisplayOptions" /></div>
-                  </div>
-                  <small class="field-help">Метрики вне игры: «Постоянно» показывает CPU/RAM/GPU в верхней панели лаунчера, «Только оверлей» — лишь по горячей клавише. Датчики и GPU зависят от системы: чего нет — не показываем.</small>
-                </div>
-              </section>
-              <section class="panel paths-panel">
-               <div class="path-line"><span>Платформа</span><strong>{{ state.system.platform }} · {{ state.system.machine }}</strong></div>
-               <div class="path-line"><span>Python backend</span><strong>{{ state.system.python || 'подключение…' }}</strong></div>
-               <button class="button button--quiet" type="button" @click="openGameFolder"><Icon name="folder" :size="16" />Открыть папку игры</button>
-              </section>
+
+               <div id="settings-cloud" class="settings-cloud-anchor">
+                 <CloudStoragePanel
+                   :url="settingsDraft.cloud_url"
+                   :username="settingsDraft.cloud_username"
+                   :remote-path="settingsDraft.cloud_remote_path"
+                   :include-accounts="settingsDraft.cloud_include_accounts"
+                   @saved="Object.assign(settingsDraft, $event)"
+                   @toast="showToast"
+                   @changed="refreshBootstrap"
+                 />
+               </div>
+               <section class="panel paths-panel">
+                 <div class="path-line"><span>Платформа</span><strong>{{ state.system.platform }} · {{ state.system.machine }}</strong></div>
+                 <div class="path-line"><span>Python backend</span><strong>{{ state.system.python || 'подключение…' }}</strong></div>
+                 <button class="button button--quiet" type="button" @click="openGameFolder"><Icon name="folder" :size="16" />Открыть папку игры</button>
+               </section>
              </section>
           </div>
         </div>

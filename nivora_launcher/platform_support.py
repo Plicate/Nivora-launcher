@@ -5,6 +5,7 @@ import shutil
 import signal
 import stat
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,22 @@ def set_private_fd(fd: int, mode: int = 0o600) -> None:
     fchmod = getattr(os, "fchmod", None)
     if fchmod is not None:
         fchmod(fd, mode)
+
+
+def set_private_path(path: Path) -> None:
+    """Windows: ACL файла только для текущего пользователя (аналог 0600).
+
+    POSIX-режим на Windows не действует, а каталог данных наследует ACL
+    профиля. Ошибка не прерывает запуск: остаётся ACL профиля пользователя.
+    """
+    if sys.platform != "win32":
+        return
+    from .windows_sandbox import WindowsSandboxError, restrict_to_current_user
+
+    try:
+        restrict_to_current_user(path)
+    except (WindowsSandboxError, OSError, subprocess.SubprocessError):
+        pass
 
 
 def is_reparse_point(path: Path) -> bool:

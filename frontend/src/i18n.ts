@@ -22,7 +22,7 @@ const EN: Record<string, string> = {
   'Моды и ресурсы': 'Mods and resources', 'Готовые сборки': 'Ready-made packs',
   'Расширения интерфейса': 'Interface extensions', 'Локальная сеть': 'Local network',
   'Параметры лаунчера': 'Launcher options', 'Студия оформления': 'Appearance studio',
-  'Центр настройки тем': 'Theme center', 'LAN-комнаты': 'LAN rooms',
+  'Центр настройки тем': 'Theme center',
   'Плагины для лаунчера': 'Launcher plugins', 'Разделы экземпляра': 'Instance sections',
   'Общие настройки': 'General settings', 'Базовая настройка': 'Basic setup',
 
@@ -105,7 +105,6 @@ const EN: Record<string, string> = {
   'Сохранить и продолжить': 'Save and continue', 'Не сохранять': 'Don’t save',
   'Свой каталог': 'Custom catalog', 'Официальный каталог': 'Official catalog',
   'Укажите имя экземпляра': 'Enter an instance name', 'Имя сохранения': 'Save name',
-  'Название комнаты': 'Room name',
 
   // Аккаунты
   'Войти через Microsoft': 'Sign in with Microsoft', 'Выйти': 'Sign out',
@@ -159,7 +158,7 @@ const EN: Record<string, string> = {
   'Закрыть предпросмотр': 'Close preview', 'Удалить снапшот': 'Delete snapshot',
   'Выдержка лога': 'Log excerpt', 'Максимум игроков': 'Max players',
   'Максимум снапшотов': 'Max snapshots', 'Ник игрока': 'Player nickname',
-  'Порт Minecraft': 'Minecraft port', 'Адрес комнаты': 'Room address',
+  'Порт Minecraft': 'Minecraft port',
   'Консоль сервера': 'Server console', 'Команда сервера': 'Server command',
   'Память для Minecraft': 'Memory for Minecraft', 'Имя локального профиля': 'Local profile name',
   'Найти экземпляр': 'Find an instance',  'Оверлей': 'Overlay',
@@ -188,7 +187,6 @@ const EN: Record<string, string> = {
   'Импортировать архив': 'Import an archive', 'Декларативная вкладка': 'Declarative tab',
   'Вкладка создана из метаданных manifest. Файл entrypoint плагина не запускается.': 'The tab is built from manifest metadata. The plugin entrypoint file is not executed.',
   'Игра в локальной сети': 'Local network play',
-  'Комната координирует игроков и поднимает launcher-туннель до мира хоста без отдельного VPN-клиента.': 'The room coordinates players and raises a launcher tunnel to the host’s world without a separate VPN client.',
   'Пути, память, источники и резервная копия файлов настраиваются здесь.': 'Paths, memory, sources and file backups are configured here.',
   'Обучение': 'Tutorial', 'Экскурсия по лаунчеру': 'A tour of the launcher',
   'Коротко покажем основные разделы и возможности. Экскурсию можно закрыть в любой момент.': 'A quick look at the main sections and features. You can close the tour at any moment.',

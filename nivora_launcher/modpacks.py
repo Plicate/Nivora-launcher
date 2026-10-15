@@ -439,7 +439,7 @@ class ModpackImporter:
             raise LauncherError("Архив модпака слишком большой (максимум 512 MiB)")
         try:
             with zipfile.ZipFile(archive_path) as archive:
-                index, manifest, selected = self._archive_plan(archive)
+                index, manifest, selected = self._archive_plan(archive)[:3]
             dependencies: dict[str, Any]
             if manifest:
                 dependencies = _validate_curseforge_compatibility(
@@ -471,7 +471,7 @@ class ModpackImporter:
             raise LauncherError("Архив модпака слишком большой (максимум 512 MiB)")
         try:
             with zipfile.ZipFile(archive_path) as archive:
-                index, manifest, selected = self._archive_plan(archive)
+                index, manifest, selected = self._archive_plan(archive)[:3]
         except zipfile.BadZipFile as exc:
             raise LauncherError("Файл не является корректным ZIP-модпаком") from exc
         mods: list[dict[str, Any]] = []
@@ -589,6 +589,7 @@ class ModpackImporter:
                 "path": str(target),
                 "files": written,
                 "trusted_hash": bool(files.get("trusted_hash")),
+                "skipped_loader_files": list(files.get("skipped_loader_files") or []),
                 "marker": str(marker),
             }
         finally:
@@ -702,18 +703,21 @@ class ModpackImporter:
 
         selected: list[tuple[zipfile.ZipInfo, str]] = []
         destinations: set[str] = set()
+        skipped_loader: list[str] = []
         for info, name in zip(infos, names):
             relative = name.removeprefix(prefix)
             if not relative or info.is_dir() or relative in {index_name, manifest_name}:
                 continue
             destination = _archive_destination(relative)
             if not destination:
+                if _loader_managed_path(relative) and len(skipped_loader) < 100:
+                    skipped_loader.append(_strip_modpack_prefix(relative))
                 continue
             if destination in destinations:
                 raise LauncherError(f"Модпак содержит повторный путь: {destination}")
             destinations.add(destination)
             selected.append((info, destination))
-        return index, manifest, selected
+        return index, manifest, selected, skipped_loader
 
     @staticmethod
     def _modrinth_download_plan(index: dict[str, Any], confirm_unverified: bool) -> list[dict[str, Any]]:
@@ -729,6 +733,10 @@ class ModpackImporter:
                 raise LauncherError("Индекс модпака содержит некорректный файл")
             raw_path = str(entry.get("path", ""))
             if _is_server_override(raw_path):
+                continue
+            if _loader_managed_path(raw_path):
+                # Лаунчер сам управляет versions/ и libraries/: удалённый
+                # файл оттуда мог бы перезаписать модлоадер.
                 continue
             relative = _archive_destination(raw_path)
             downloads = entry.get("downloads", [])
@@ -764,6 +772,16 @@ class ModpackImporter:
             destination = _ftb_manifest_destination(entry)
             url = _text(entry.get("url") or entry.get("download_url") or entry.get("downloadUrl"))
             if not destination or not url:
+                raw_path = "/".join(
+                    part
+                    for part in (
+                        _text(entry.get("path")).replace("\\", "/").strip("/"),
+                        _text(entry.get("name") or entry.get("file_name") or entry.get("filename")).replace("\\", "/").strip("/"),
+                    )
+                    if part
+                )
+                if _loader_managed_path(raw_path):
+                    continue
                 raise LauncherError("Манифест FTB содержит неполный файл")
             if destination in destinations:
                 raise LauncherError(f"Манифест FTB содержит повторный путь: {destination}")
@@ -912,7 +930,7 @@ class ModpackImporter:
     ) -> dict[str, Any]:
         try:
             with zipfile.ZipFile(archive_path) as archive:
-                index, manifest, selected = self._archive_plan(archive)
+                index, manifest, selected, skipped_loader = self._archive_plan(archive)
                 downloads = self._modrinth_download_plan(index, confirm_unverified)
                 curseforge = self._curseforge_download_plan(manifest, confirm_unverified=confirm_unverified) if manifest else []
                 curseforge_downloads = [item for item in curseforge if item["url"]]
@@ -944,7 +962,10 @@ class ModpackImporter:
                 trusted_curseforge = True
                 if curseforge_downloads:
                     trusted_curseforge = self._stage_modrinth_files(curseforge_downloads, stage, staged_bytes)
-                return {"trusted_hash": bool(trusted_modrinth and trusted_curseforge)}
+                return {
+                    "trusted_hash": bool(trusted_modrinth and trusted_curseforge),
+                    "skipped_loader_files": skipped_loader,
+                }
         except zipfile.BadZipFile as exc:
             raise LauncherError("Файл не является корректным ZIP-модпаком") from exc
 
@@ -1204,18 +1225,52 @@ def _archive_prefix(names: Iterable[str]) -> str:
     return ""
 
 
+# Каталогами версии, библиотек и native-компонентов управляет лаунчер:
+# файлы модпака поверх них ломают установленный модлоадер.
+_LOADER_MANAGED_ROOTS = {"versions", "libraries", "natives", "bin"}
+# Экспорты MultiMC/Prism кладут игру в .minecraft — как и overrides,
+# это префикс-обёртка, а не настоящий каталог экземпляра.
+_MODPACK_ROOT_PREFIXES = {"overrides", "client-overrides", ".minecraft", "minecraft"}
+_MODPACK_METADATA_FILES = {
+    "manifest.json",
+    "modrinth.index.json",
+    "modlist.html",
+    "minecraftinstance.json",
+    ".technicpack",
+    "mmc-pack.json",
+    "instance.cfg",
+}
+
+
+def _strip_modpack_prefix(value: str) -> str:
+    parts = _archive_name(value).split("/")
+    while parts and parts[0].casefold() in _MODPACK_ROOT_PREFIXES:
+        parts.pop(0)
+    return "/".join(parts)
+
+
+def _loader_managed_path(value: str) -> bool:
+    parts = _strip_modpack_prefix(value).split("/")
+    return bool(parts) and parts[0] in _LOADER_MANAGED_ROOTS
+
+
 def _archive_destination(value: str) -> str:
     normalized = _archive_name(value)
     parts = normalized.split("/")
     if any(part.casefold() == "server-overrides" for part in parts):
         return ""
-    while parts and parts[0].casefold() in {"overrides", "client-overrides"}:
+    while parts and parts[0].casefold() in _MODPACK_ROOT_PREFIXES:
         parts.pop(0)
     if not parts:
         return ""
     if any(part.startswith(".trial-launcher") for part in parts):
         raise LauncherError("Модпак не может заменять служебные файлы лаунчера")
-    if parts[0] in {"manifest.json", "modrinth.index.json", "modlist.html", "minecraftinstance.json", ".technicpack"}:
+    if parts[0] in _MODPACK_METADATA_FILES:
+        return ""
+    if parts[0] in _LOADER_MANAGED_ROOTS:
+        # Каталоги versions/, libraries/, natives/ и bin/ создаёт лаунчер:
+        # позволить модпаку перезаписывать их — прямой способ сломать
+        # модлоадер экземпляра.
         return ""
     return "/".join(parts)
 

@@ -214,7 +214,9 @@ class SecurityBoundaryTests(unittest.TestCase):
             "https://collector.example/manifest",
         )
 
-    def test_appearance_normalization_keeps_theme_modpack_and_lan_room_pages(self) -> None:
+    def test_appearance_normalization_keeps_theme_modpack_pages_and_drops_lan_rooms(self) -> None:
+        # Страница LAN-комнат удалена: сохранённые конфиги с "lan-rooms"
+        # не должны ломать нормализацию и возвращаются к экрану по умолчанию.
         settings = Settings()
         settings.active_theme_id = "  Aurora-Blue  "
         settings.startup_view = "lan-rooms"
@@ -222,8 +224,8 @@ class SecurityBoundaryTests(unittest.TestCase):
         settings.page_themes = {"modpacks": "light", "lan-rooms": "dark"}
         settings.page_layouts = {"modpacks": "wide", "lan-rooms": "compact"}
         settings.animation_settings = {
-            "page_styles": {"lan-rooms": "scale"},
-            "page_durations_ms": {"lan-rooms": 420},
+            "page_styles": {"modpacks": "scale", "lan-rooms": "scale"},
+            "page_durations_ms": {"modpacks": 420, "lan-rooms": 420},
         }
 
         normalized = _normalize_appearance(settings)
@@ -232,12 +234,14 @@ class SecurityBoundaryTests(unittest.TestCase):
         self.assertEqual(normalized["active_theme_id"], "aurora-blue")
         self.assertEqual(normalized["page_themes"]["modpacks"], "light")
         self.assertEqual(normalized["page_layouts"]["modpacks"], "wide")
-        self.assertEqual(normalized["page_themes"]["lan-rooms"], "dark")
-        self.assertEqual(normalized["page_layouts"]["lan-rooms"], "compact")
-        self.assertEqual(normalized["animation_settings"]["page_styles"]["lan-rooms"], "scale")
-        self.assertEqual(normalized["animation_settings"]["page_durations_ms"]["lan-rooms"], 420)
-        self.assertEqual(behavior["startup_view"], "lan-rooms")
-        self.assertEqual(behavior["last_view"], "lan-rooms")
+        self.assertEqual(normalized["animation_settings"]["page_styles"]["modpacks"], "scale")
+        self.assertEqual(normalized["animation_settings"]["page_durations_ms"]["modpacks"], 420)
+        self.assertNotIn("lan-rooms", normalized["page_themes"])
+        self.assertNotIn("lan-rooms", normalized["page_layouts"])
+        self.assertNotIn("lan-rooms", normalized["animation_settings"]["page_styles"])
+        self.assertNotIn("lan-rooms", normalized["animation_settings"]["page_durations_ms"])
+        self.assertEqual(behavior["startup_view"], "instances")
+        self.assertEqual(behavior["last_view"], "instances")
 
     def test_radius_tokens_are_clamped_and_round_trip(self) -> None:
         settings = Settings()

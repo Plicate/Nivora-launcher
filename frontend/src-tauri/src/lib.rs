@@ -473,8 +473,8 @@ fn validate_backend_request(request: &Value) -> Result<(), String> {
         "server_network_diagnose", "server_network_status", "server_network_prepare", "server_network_open", "server_network_close",
         "server_cores", "server_core_versions", "server_plugin_catalogs", "save_server_plugin_catalogs", "server_create", "server_details", "server_save_config", "server_upload_core", "server_core_download", "server_start", "server_stop", "server_restart", "server_command", "server_log", "server_status", "server_file_list", "server_file_read", "server_file_write", "server_file_mkdir", "server_file_upload", "server_file_delete", "server_plugin_search", "server_plugin_details", "server_plugin_updates", "server_plugin_update", "server_plugin_install", "server_plugin_remove", "server_snapshot_list", "server_snapshot_create", "server_snapshot_restore", "server_snapshot_delete",
         "delete_instance", "duplicate_instance", "external_instances_scan", "external_instance_import", "instance_details", "instance_snapshot_list", "instance_snapshot_create", "instance_snapshot_restore", "instance_snapshot_delete", "instance_groups", "create_instance_group", "delete_instance_group", "update_instance_profile", "instance_log", "instance_file_list", "instance_file_read", "instance_file_write", "instance_file_mkdir", "instance_file_upload", "instance_file_delete", "instance_log_archives", "instance_log_archive_read", "save_instance_settings",
-        "plugin_dev_changes", "plugin_api_operation_trace", "plugin_list", "plugin_install", "plugin_set_enabled", "plugin_uninstall", "plugin_security_status", "plugin_permission_grants_set", "plugin_local_untrusted_execution", "plugin_publisher_pin", "plugin_publisher_unpin", "plugin_local_revoke", "plugin_local_unrevoke", "plugin_api_source", "plugin_api_runtime_info", "plugin_api_capabilities", "plugin_api_quota_usage", "plugin_api_permissions_get", "plugin_api_permissions_set", "plugin_api_authorize", "plugin_api_open_external", "open_external", "plugin_api_files_list", "plugin_api_files_read", "plugin_api_files_write", "plugin_api_files_remove", "plugin_api_config_projected_read", "plugin_http_request", "plugin_api_instances_list", "plugin_api_process_metrics", "plugin_api_proxy_routes_get", "plugin_api_proxy_routes_save", "plugin_api_proxy_routes_add", "plugin_api_proxy_routes_remove", "plugin_network_fetch", "plugin_network_dns", "plugin_network_ping", "plugin_network_port_check", "plugin_server_list_get", "plugin_server_list_save", "plugin_server_list_add", "plugin_server_list_remove", "plugin_storage_get", "plugin_storage_set", "plugin_storage_remove", "plugin_config_get", "plugin_config_set", "plugin_config_remove", "plugin_file_list", "plugin_file_read", "plugin_file_write", "plugin_file_remove", "plugin_database_query", "plugin_database_execute", "lan_session_create", "lan_session_join", "lan_session_status", "lan_session_leave", "github_plugin_status", "github_plugin_search", "github_plugin_details", "github_plugin_install", "github_plugin_oauth_start", "github_plugin_oauth_poll", "github_plugin_sign_out", "github_plugin_publish",
-        "remove_instance_asset", "toggle_mod", "import_asset", "install", "launch", "launch_instance", "open_folder", "modpack_import", "mods_search", "mods_details", "mods_check_updates", "mods_update", "mods_install", "mods_remove", "mod_audit_prepare", "mod_audit_accept", "mod_audit_cancel", "mod_audit_status", "skins_list", "skins_import", "skin_profile", "apply_skin", "clear_skin", "apply_cape", "clear_cape", "open_skins_folder",
+        "plugin_dev_changes", "plugin_api_operation_trace", "plugin_list", "plugin_install", "plugin_set_enabled", "plugin_uninstall", "plugin_security_status", "plugin_permission_grants_set", "plugin_local_untrusted_execution", "plugin_publisher_pin", "plugin_publisher_unpin", "plugin_local_revoke", "plugin_local_unrevoke", "plugin_api_source", "plugin_api_runtime_info", "plugin_api_capabilities", "plugin_api_quota_usage", "plugin_api_permissions_get", "plugin_api_permissions_set", "plugin_api_authorize", "plugin_api_open_external", "open_external", "plugin_api_files_list", "plugin_api_files_read", "plugin_api_files_write", "plugin_api_files_remove", "plugin_api_config_projected_read", "plugin_http_request", "plugin_api_instances_list", "plugin_api_process_metrics", "plugin_api_proxy_routes_get", "plugin_api_proxy_routes_save", "plugin_api_proxy_routes_add", "plugin_api_proxy_routes_remove", "plugin_network_fetch", "plugin_network_dns", "plugin_network_ping", "plugin_network_port_check", "plugin_server_list_get", "plugin_server_list_save", "plugin_server_list_add", "plugin_server_list_remove", "plugin_storage_get", "plugin_storage_set", "plugin_storage_remove", "plugin_config_get", "plugin_config_set", "plugin_config_remove", "plugin_file_list", "plugin_file_read", "plugin_file_write", "plugin_file_remove", "plugin_database_query", "plugin_database_execute", "github_plugin_status", "github_plugin_search", "github_plugin_details", "github_plugin_install", "github_plugin_oauth_start", "github_plugin_oauth_poll", "github_plugin_sign_out", "github_plugin_publish",
+        "remove_instance_asset", "toggle_mod", "import_asset", "install", "instance_repair_version", "launch", "launch_instance", "open_folder", "modpack_import", "mods_search", "mods_details", "mods_check_updates", "mods_update", "mods_install", "mods_remove", "mod_audit_prepare", "mod_audit_accept", "mod_audit_cancel", "mod_audit_status", "skins_list", "skins_import", "skin_profile", "apply_skin", "clear_skin", "apply_cape", "clear_cape", "open_skins_folder",
         "bedrock_runtime_status", "bedrock_versions", "bedrock_setup_version", "bedrock_setup_status", "bedrock_setup_cancel", "bedrock_create_instance", "bedrock_content_list", "bedrock_content_import", "bedrock_content_remove", "bedrock_store_login", "bedrock_store_login_status", "bedrock_store_login_cancel", "bedrock_account_status", "bedrock_screenshots_list", "bedrock_stop", "rename_instance_group",
         "system_notify", "recording_start", "recording_stop", "recording_status",
         // Профили настроек, бэкапы миров, темы оформления и обслуживание кеша
@@ -796,12 +796,8 @@ mod tests {
     }
 
     #[test]
-    fn lan_and_github_catalog_operations_are_allowed() {
+    fn github_catalog_operations_are_allowed() {
         for operation in [
-            "lan_session_create",
-            "lan_session_join",
-            "lan_session_status",
-            "lan_session_leave",
             "github_plugin_status",
             "github_plugin_search",
             "github_plugin_details",
@@ -813,6 +809,19 @@ mod tests {
         ] {
             assert!(validate_backend_request(&json!({"operation": operation})).is_ok(), "{operation}");
         }
+    }
+
+    #[test]
+    fn removed_lan_session_operations_are_rejected() {
+        for operation in ["lan_session_create", "lan_session_join", "lan_session_status", "lan_session_leave"] {
+            assert!(validate_backend_request(&json!({"operation": operation})).is_err(), "{operation}");
+        }
+    }
+
+    #[test]
+    fn instance_repair_version_operation_is_allowed() {
+        assert!(validate_backend_request(&json!({"operation": "instance_repair_version"})).is_ok());
+        assert!(!uses_transient_backend_worker(&json!({"operation": "instance_repair_version"})));
     }
 
     #[test]

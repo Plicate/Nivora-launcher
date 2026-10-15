@@ -73,7 +73,7 @@ const tourSteps = [
   },
   {
     target: 'plugins', icon: 'plug', title: 'Инструменты',
-    body: 'Расширения лаунчера, LAN-комнаты и сторонние источники данных. Код расширений не запускается без вашего разрешения.',
+    body: 'Расширения лаунчера и сторонние источники данных. Код расширений не запускается без вашего разрешения.',
     hint: 'Каждому расширению вы сами выдаёте список разрешений.',
   },
   {
@@ -263,7 +263,7 @@ onBeforeUnmount(() => {
               <button class="button button--outline first-run-language-option" type="button" @click="emit('pick-language', 'en')"><strong>English</strong><small>Theme, settings and hints in English</small></button>
             </div>
           </div>
-          <div v-if="phase === 'welcome'" key="welcome" class="first-run-content first-run-welcome">
+          <div v-else-if="phase === 'welcome'" key="welcome" class="first-run-content first-run-welcome">
             <img class="first-run-hero-icon" :src="launcherLogo" alt="" />
             <h1 id="first-run-title">Добро пожаловать</h1>
             <p>Настроим главное: аккаунт, папку игры и базовые параметры. Это займёт пару минут — остальное можно поменять позже.</p>

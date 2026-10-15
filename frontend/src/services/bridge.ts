@@ -50,8 +50,6 @@ import type {
   ModDependencyGraph,
   CrashReport,
   ResourceUpdate,
-  LanRoomCredentials,
-  LanRoomStatus,
   GitHubPluginDetails,
   GitHubPluginRepository,
   GitHubThemeRepository,
@@ -104,7 +102,7 @@ const fallbackSettings: SettingsInfo = {
   auto_refresh_metadata: true,
   metadata_refresh_hours: 6,
   download_timeout_seconds: 30,
-  download_retries: 3,
+  download_retries: 5,
   confirm_destructive_actions: true,
   show_activity_panel: true,
   show_toasts: true,
@@ -140,8 +138,8 @@ const fallbackSettings: SettingsInfo = {
     page_duration_ms: 140,
     surface_duration_ms: 140,
     surface_stagger_ms: 0,
-    page_styles: { instances: 'fade', 'instance-settings': 'fade', accounts: 'fade', mods: 'fade', modpacks: 'fade', plugins: 'fade', 'lan-rooms': 'fade', themes: 'fade', settings: 'fade' },
-    page_durations_ms: { instances: 140, 'instance-settings': 140, accounts: 140, mods: 140, modpacks: 140, plugins: 140, 'lan-rooms': 140, themes: 140, settings: 140 },
+    page_styles: { instances: 'fade', 'instance-settings': 'fade', accounts: 'fade', mods: 'fade', modpacks: 'fade', plugins: 'fade', themes: 'fade', settings: 'fade' },
+    page_durations_ms: { instances: 140, 'instance-settings': 140, accounts: 140, mods: 140, modpacks: 140, plugins: 140, themes: 140, settings: 140 },
   } as AnimationSettings,
   overlay_settings: {
     enabled: true,
@@ -172,8 +170,8 @@ const fallbackSettings: SettingsInfo = {
   density: 'comfortable',
   ui_scale: 100,
   radius_tokens: { card: 7, button: 8, control: 10 },
-    page_themes: { instances: 'inherit', 'instance-settings': 'inherit', accounts: 'inherit', mods: 'inherit', modpacks: 'inherit', plugins: 'inherit', 'lan-rooms': 'inherit', themes: 'inherit', settings: 'inherit' },
-    page_layouts: { instances: 'balanced', 'instance-settings': 'balanced', accounts: 'balanced', mods: 'wide', modpacks: 'wide', plugins: 'wide', 'lan-rooms': 'balanced', themes: 'wide', settings: 'balanced' },
+    page_themes: { instances: 'inherit', 'instance-settings': 'inherit', accounts: 'inherit', mods: 'inherit', modpacks: 'inherit', plugins: 'inherit', themes: 'inherit', settings: 'inherit' },
+    page_layouts: { instances: 'balanced', 'instance-settings': 'balanced', accounts: 'balanced', mods: 'wide', modpacks: 'wide', plugins: 'wide', themes: 'wide', settings: 'balanced' },
   widget_visibility: { 'instances.workspace': true, 'accounts.status': true, 'mods.context': true },
   color_tokens: {
     accent: '#8b653f', accent_strong: '#c5a274', background: '#191a17', panel: '#20221e', panel_raised: '#282a25', panel_soft: '#30322c',
@@ -428,7 +426,7 @@ async function mockRequest<T>(operation: string, payload: Record<string, unknown
   if (operation === 'plugin_install' || operation === 'plugin_set_enabled' || operation === 'plugin_uninstall') {
     throw new Error('Управление плагинами доступно только в desktop launcher')
   }
-  if (operation.startsWith('lan_session_') || operation.startsWith('github_plugin_')) {
+  if (operation.startsWith('github_plugin_')) {
     throw new Error('Эта функция доступна только в установленном desktop launcher')
   }
   if (operation === 'plugin_network_dns') return { host: String(payload.host || ''), port: payload.port ?? null, addresses: [] } as T
@@ -541,6 +539,7 @@ async function mockRequest<T>(operation: string, payload: Record<string, unknown
   if (operation === 'security_status') {
     return {
       platform: 'linux',
+      sandbox: 'none',
       bubblewrap: false,
       bubblewrap_path: '',
       strict_available: false,
@@ -579,6 +578,11 @@ async function mockRequest<T>(operation: string, payload: Record<string, unknown
     }
     fallbackState.instances = [...fallbackState.instances.filter((item) => item.name !== name), instance]
     return { version_id: versionId, instance_dir: instance.path, instances: structuredClone(fallbackState.instances) } as T
+  }
+  if (operation === 'instance_repair_version') {
+    const instance = fallbackState.instances.find((item) => item.name === String(payload.instance_name || ''))
+    if (!instance) throw new Error('Экземпляр не найден')
+    return { version_id: instance.version_id, instance_dir: instance.path, instances: structuredClone(fallbackState.instances) } as T
   }
   if (operation === 'skins_list') return { skins: [] } as T
   if (operation === 'instance_log') return { lines: [], running: false, metrics: { timestamp: Date.now() / 1000, pid: 0, running: false, uptime_seconds: 0, ram_bytes: 0, cpu_percent: 0, storage_bytes: 0, players: 0, max_players: 0, tps: 0 } } as T
@@ -829,10 +833,6 @@ export const bridge = {
   serverPluginUpdate: (name: string, fileName: string, catalogId: string, confirmUnverified = false) => request<{ plugin: { file_name: string; version: string; version_id: string; sha256: string; trusted_hash: boolean; updated?: boolean }; files: ServerFile[]; catalog_id: string }>('server_plugin_update', { name, file_name: fileName, catalog_id: catalogId, confirm_unverified: confirmUnverified }),
   serverPluginInstall: (name: string, projectId: string, catalogId?: string, confirmUnverified = false) => request<{ plugin: { file_name: string; path: string; version: string; sha256: string; trusted_hash: boolean }; files: ServerFile[]; catalog_id: string }>('server_plugin_install', { name, project_id: projectId, catalog_id: catalogId, confirm_unverified: confirmUnverified }),
   serverPluginRemove: (name: string, fileName: string) => request<{ removed: boolean; files: ServerFile[] }>('server_plugin_remove', { name, file_name: fileName }),
-  lanSessionCreate: (payload: LanRoomCredentials) => request<LanRoomStatus>('lan_session_create', { ...payload }),
-  lanSessionJoin: (payload: LanRoomCredentials) => request<LanRoomStatus>('lan_session_join', { ...payload }),
-  lanSessionStatus: (payload: LanRoomCredentials) => request<LanRoomStatus>('lan_session_status', { ...payload }),
-  lanSessionLeave: (payload: LanRoomCredentials) => request<{ left: boolean; room_name: string }>('lan_session_leave', { ...payload }),
   githubPluginSearch: (query = '', page = 1) => request<{ results: GitHubPluginRepository[]; page: number }>('github_plugin_search', { query, page }),
   githubPluginDetails: (owner: string, repo: string) => request<GitHubPluginDetails>('github_plugin_details', { owner, repo }),
   githubPluginInstall: (owner: string, repo: string, replace = false) => request<{ plugin: PluginManifest; plugins: PluginManifest[]; metadata: { full_name: string; version: string; size: number; sha256: string } }>('github_plugin_install', { owner, repo, replace }),
@@ -957,6 +957,8 @@ export const bridge = {
     replace_existing?: boolean
     fail_if_exists?: boolean
   }) => request<{ version_id: string; instance_dir: string; instances: InstanceInfo[] }>('install', payload),
+  repairInstanceVersion: (name: string, options: { version?: string; loader?: LoaderId; loader_version?: string } = {}) =>
+    request<{ version_id: string; instance_dir: string; instances: InstanceInfo[] }>('instance_repair_version', { instance_name: name, ...options }),
   launch: (payload: {
     version: string
     loader: LoaderId

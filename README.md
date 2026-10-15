@@ -46,8 +46,8 @@ is always installed from official sources under your account’s license.
   Releases, packages are signed with a minisign key. On Linux
   self-update works for AppImage; deb/rpm are updated by reinstalling
   the package.
-- **More** — WebDAV data sync, HTTP/SOCKS5 proxy, LAN rooms, settings
-  profiles, plugin permission limits without code execution, CLI and
+- **More** — WebDAV data sync, HTTP/SOCKS5 proxy, settings profiles,
+  plugin permission limits without code execution, CLI and
   `doctor` diagnostics.
 
 The full feature list lives in [docs/FEATURES.ru.md](docs/FEATURES.ru.md)

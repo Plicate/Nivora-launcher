@@ -43,7 +43,6 @@ const PAGES: &[&str] = &[
     "mods",
     "modpacks",
     "plugins",
-    "lan-rooms",
     "themes",
     "settings",
 ];
@@ -781,7 +780,7 @@ fn normalize_shortcuts(value: &Value) -> Value {
 }
 
 fn normalize_behavior(settings: &Value) -> Map<String, Value> {
-    let views = ["instances", "accounts", "mods", "modpacks", "plugins", "lan-rooms", "themes", "settings"];
+    let views = ["instances", "accounts", "mods", "modpacks", "plugins", "themes", "settings"];
     let filters = ["all", "release", "snapshot", "old_beta", "old_alpha"];
     let loaders = ["vanilla", "fabric", "forge", "neoforge", "quilt"];
     let clamp_member = |value: &str, allowed: &[&str], fallback: &str| -> String {

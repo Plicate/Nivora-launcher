@@ -367,11 +367,15 @@ class HttpClient:
         pinned_addresses = _validate_url(url, resolve_dns=self.resolve_dns)
         request_headers = {"User-Agent": self.user_agent, "Accept": "application/json"}
         request_headers.update(headers or {})
-        request = Request(url, data=data, headers=request_headers, method=method)
-        setattr(request, _DNS_PIN_ATTRIBUTE, pinned_addresses)
         last_error: Exception | None = None
         for attempt in range(self.retries):
             self.check_cancelled()
+            if attempt:
+                # Сервис мог сменить адреса между попытками — резолвим
+                # DNS заново, а не долбим в тот же недоступный IP.
+                pinned_addresses = _validate_url(url, resolve_dns=self.resolve_dns)
+            request = Request(url, data=data, headers=request_headers, method=method)
+            setattr(request, _DNS_PIN_ATTRIBUTE, pinned_addresses)
             self._rate_limit_before_request(url)
             self._notify_request("start", url, attempt + 1)
             try:
@@ -610,24 +614,41 @@ class HttpClient:
 
         temporary = destination.with_name(f".{destination.name}.part")
         _reject_symlink_path(temporary)
-        if temporary.exists():
-            temporary.unlink()
         last_error: Exception | None = None
+        # Оборванные загрузки продолжаются с места обрыва (Range): часть
+        # зеркал регулярно рвёт длинные соединения, и без докачки каждая
+        # попытка начиналась бы с нуля и упиралась в тот же обрыв.
+        integrity_restarts = 0
         for attempt in range(self.retries):
             self.check_cancelled()
             self._notify_request("download", url, attempt + 1)
+            offset = _partial_download_offset(temporary)
             try:
                 request_headers = {"User-Agent": self.user_agent}
                 request_headers.update(headers or {})
+                if attempt and offset:
+                    # Зеркало могло сменить адреса между попытками —
+                    # резолвим DNS заново, а не долбим в тот же IP.
+                    pinned_addresses = _validate_url(url, resolve_dns=self.resolve_dns)
+                if offset:
+                    request_headers["Range"] = f"bytes={offset}-"
                 request = Request(url, headers=request_headers)
                 setattr(request, _DNS_PIN_ATTRIBUTE, pinned_addresses)
                 with self._open(request, redirect_validator=redirect_validator) as response:
-                    total = response.headers.get("Content-Length")
-                    total_size = int(total) if total and total.isdigit() else size
+                    status = getattr(response, "status", None) or getattr(response, "code", None)
+                    remaining = _content_length(response)
+                    resumed = bool(offset) and status == 206
+                    if offset and not resumed:
+                        # Зеркало игнорирует Range — качаем файл целиком.
+                        offset = 0
+                    if resumed and remaining is not None:
+                        total_size = offset + remaining
+                    else:
+                        total_size = remaining if remaining is not None else size
                     if total_size is not None and total_size > MAX_DOWNLOAD_BYTES:
                         raise LauncherError("Файл загрузки слишком большой")
-                    written = 0
-                    with temporary.open("wb") as handle:
+                    written = offset
+                    with temporary.open("ab" if resumed else "wb") as handle:
                         while True:
                             self.check_cancelled()
                             chunk = response.read(1024 * 1024)
@@ -640,6 +661,10 @@ class HttpClient:
                             if progress:
                                 progress(written, total_size)
                             self._notify_download("progress", url, destination, written, total_size)
+                    if size is not None and written != size:
+                        # Соединение закрылось раньше конца файла: частичный
+                        # .part остаётся и следующая попытка докачает его.
+                        raise _IncompleteDownloadError(f"Зеркало закрыло соединение на {written} из {size} байт")
                 if not verify_file(temporary, sha1=sha1, sha256=sha256, sha512=sha512, size=size):
                     raise IntegrityError(f"Проверка хеша не пройдена: {url}")
                 temporary.replace(destination)
@@ -647,19 +672,92 @@ class HttpClient:
                     sidecar.unlink()
                 self._notify_download("complete", url, destination, written, total_size)
                 return True
-            except (HTTPError, URLError, TimeoutError, OSError, IntegrityError, LauncherError) as exc:
+            except HTTPError as exc:
                 last_error = exc
-                if temporary.exists():
-                    temporary.unlink()
-                if isinstance(exc, (IntegrityError, LauncherError)) or attempt + 1 >= self.retries:
+                if exc.code == 429:
+                    retry_after = (exc.headers or {}).get("Retry-After", "") if exc.headers else ""
+                    try:
+                        delay = min(60.0, max(1.0, float(retry_after)))
+                    except (TypeError, ValueError):
+                        delay = 2.0 + attempt
+                    if attempt + 1 < self.retries:
+                        self._rate_limit_after_429(url, delay)
+                        self._notify_request("retry", url, attempt + 1)
+                        self.wait(delay)
+                        continue
+                    raise LauncherError(f"HTTP 429: сервер временно ограничил загрузки {url}. Повторите позже.") from exc
+                if exc.code == 416 and offset:
+                    # Зеркало не подтвердило докачку (файл уже заменили или
+                    # кеш отдаёт другой контент) — уходим на полную загрузку.
+                    _discard_partial(temporary)
+                    self._notify_request("retry", url, attempt + 1)
+                    self.wait(0.5)
+                    continue
+                if exc.code >= 500 and attempt + 1 < self.retries:
+                    self._notify_request("retry", url, attempt + 1)
+                    self.wait(1.0 + attempt)
+                    continue
+                raise LauncherError(f"HTTP {exc.code} при загрузке {url}") from exc
+            except IntegrityError as exc:
+                last_error = exc
+                # Повреждённая докачка (зеркало подмешало чужие байты)
+                # заслуживает одну чистую попытку с нуля.
+                _discard_partial(temporary)
+                if integrity_restarts >= 1 or attempt + 1 >= self.retries:
+                    break
+                integrity_restarts += 1
+                self._notify_request("retry", url, attempt + 1)
+                continue
+            except (URLError, TimeoutError, OSError) as exc:
+                last_error = exc
+                if attempt + 1 >= self.retries:
                     break
                 self._notify_request("retry", url, attempt + 1)
                 self.wait(1.0 + attempt)
+            except LauncherError as exc:
+                last_error = exc
+                break
         if isinstance(last_error, IntegrityError):
             raise last_error
         if isinstance(last_error, LauncherError):
             raise last_error
         raise LauncherError(f"Не удалось скачать {url}: {last_error}") from last_error
+
+
+class _IncompleteDownloadError(OSError):
+    """Зеркало закрыло соединение до конца файла (обрыв посреди загрузки)."""
+
+
+def _partial_download_offset(temporary: Path) -> int:
+    """Размер недокачанного .part для докачки, 0 — качать с нуля."""
+    if not temporary.exists():
+        return 0
+    if temporary.is_symlink():
+        raise LauncherError(f"Небезопасный временный файл загрузки: {temporary}")
+    if not temporary.is_file():
+        raise LauncherError(f"Временный файл загрузки не является файлом: {temporary}")
+    try:
+        partial_size = temporary.stat().st_size
+    except OSError:
+        return 0
+    if partial_size <= 0 or partial_size > MAX_DOWNLOAD_BYTES:
+        _discard_partial(temporary)
+        return 0
+    return partial_size
+
+
+def _discard_partial(temporary: Path) -> None:
+    try:
+        temporary.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _content_length(response: Any) -> int | None:
+    value = response.headers.get("Content-Length")
+    if value and str(value).isdigit():
+        return int(value)
+    return None
 
 
 def file_hash(path: Path, algorithm: str) -> str:

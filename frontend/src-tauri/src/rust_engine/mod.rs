@@ -111,6 +111,9 @@ pub fn is_native(operation: &str) -> bool {
 /// настроенном облаке, кроме операций, чей ответ включает облачный список.
 pub fn needs_worker(operation: &str, request: &Value) -> bool {
     match operation {
+        // На Windows песочница — AppContainer; её проверку (пробный запуск
+        // процесса в контейнере) выполняет Python-бэкенд.
+        "security_status" => return cfg!(windows),
         "world_backup_create" | "world_backup_restore" | "world_backup_delete" | "world_backup_list" => {}
         // Legacy-токены Microsoft в файле переносимы в Secret Service только
         // через Python; чистые файлы обслуживаются нативно.

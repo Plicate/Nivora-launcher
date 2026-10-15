@@ -66,16 +66,16 @@ const graphicsOptions = [
 const securityProfileOptions: Array<{ value: SecurityProfile; label: string; meta: string }> = [
   { value: 'compat', label: 'Compatibility', meta: 'Старые моды: исходные HOME/XDG и без sandbox' },
   { value: 'manual', label: 'Manual', meta: 'Разрешения экземпляра и мягкая cell-изоляция' },
-  { value: 'strict', label: 'Strict', meta: 'bubblewrap, закрытая домашняя папка и deny-by-default' },
+  { value: 'strict', label: 'Strict', meta: 'bubblewrap (Linux) / AppContainer (Windows), закрытая домашняя папка и deny-by-default' },
   { value: 'off', label: 'Off', meta: 'Без ограничений лаунчера, только для доверенных сборок' },
 ]
 
 const securityPermissionOptions: Array<{ value: SecurityPermission; label: string; description: string; highRisk?: boolean }> = [
   { value: 'network:game', label: 'Сеть игры', description: 'Доступ ко всем адресам, включая интернет и локальную сеть; включайте только для нужных сетевых функций', highRisk: true },
   { value: 'files:instance', label: 'Файлы экземпляра', description: 'Запись в папку текущего экземпляра' },
-  { value: 'desktop:display', label: 'Экран игры', description: 'Окно игры и GPU; X11/XWayland может раскрывать экран и ввод других окон', highRisk: true },
-  { value: 'desktop:audio', label: 'Звук игры', description: 'Подключение к PipeWire/PulseAudio и доступ к звуковым устройствам', highRisk: true },
-  { value: 'files:host-read', label: 'Чтение файлов компьютера', description: 'Доступ за пределами папки экземпляра', highRisk: true },
+  { value: 'desktop:display', label: 'Экран игры', description: 'Окно игры и GPU; X11/XWayland может раскрывать экран и ввод других окон. На Windows без него закрыты буфер обмена и чужие окна', highRisk: true },
+  { value: 'desktop:audio', label: 'Звук игры', description: 'Подключение к PipeWire/PulseAudio и доступ к звуковым устройствам; на Windows звук отдельно не запрещается', highRisk: true },
+  { value: 'files:host-read', label: 'Чтение файлов компьютера', description: 'Доступ за пределами папки экземпляра; в Strict на Windows не поддерживается', highRisk: true },
   { value: 'files:host-write', label: 'Запись файлов компьютера', description: 'Изменение данных за пределами папки экземпляра', highRisk: true },
   { value: 'process:spawn', label: 'Запуск процессов', description: 'Не ограничивается внутри одной JVM; доступно только в Off', highRisk: true },
   { value: 'chat:read', label: 'Чтение чата и команд', description: 'Требует Java instrumentation; доступно только в Off', highRisk: true },
@@ -745,6 +745,22 @@ const canExportModpack = computed(() => {
   const instance = props.instance
   return Boolean(instance && (instance.game_edition || 'java') === 'java' && instance.loader !== 'vanilla')
 })
+
+const repairBusy = ref(false)
+async function repairVersion() {
+  if (!props.instance) return
+  if (!(await confirmDialog('Пересоздать версию и модлоадер этого экземпляра? Моды, конфиги, миры и настройки не затрагиваются; файлы версии будут скачаны заново.', { confirmLabel: 'Восстановить' }))) return
+  repairBusy.value = true
+  try {
+    const result = await bridge.repairInstanceVersion(props.instance.name)
+    emit('toast', `Версия восстановлена: ${result.version_id}`)
+    emit('changed')
+  } catch (error) {
+    emit('toast', errorMessage(error))
+  } finally {
+    repairBusy.value = false
+  }
+}
 
 async function duplicateCurrent() {
   if (!props.instance) return
@@ -1490,6 +1506,7 @@ defineExpose({ openConsoleIfOverview, openSettings, stop, ensureLoaded })
           <div class="workspace-launch-actions">
             <button v-if="running" class="button button--outline" type="button" @click="stop"><Icon name="stop" :size="14" />Остановить</button>
             <button v-else class="button button--accent" type="button" :disabled="loading" @click="launch()"><Icon name="play" :size="15" />{{ loading ? 'Запускаю…' : 'Запустить игру' }}</button>
+            <button class="button button--quiet" type="button" :disabled="repairBusy || running" @click="repairVersion"><Icon name="refresh" :size="14" />{{ repairBusy ? 'Восстанавливаю…' : 'Восстановить версию' }}</button>
             <button class="button button--quiet" type="button" @click="selectTab('snapshots')"><Icon name="archive" :size="14" />Снапшоты</button>
           </div>
         </section>
@@ -1718,7 +1735,7 @@ defineExpose({ openConsoleIfOverview, openSettings, stop, ensureLoaded })
             <div class="workspace-form-grid">
               <div class="field"><span>Security profile</span><CustomSelect v-model="draft.security_profile" :options="securityProfileOptions" /></div>
             </div>
-             <p class="field-help">Strict использует OS-level sandbox через bubblewrap. Manual ограничивает окружение, но не заменяет OS-level sandbox. Разрешения JVM/mod, которые нельзя надёжно перехватить внутри одной JVM, отклоняются до запуска и доступны только в Off.</p>
+             <p class="field-help">Strict использует OS-level sandbox: bubblewrap на Linux, AppContainer и Job Object на Windows. На Windows нельзя отдельно запретить звук и скрыть окно игры, а подключение к серверу на этом же компьютере (localhost) блокируется системой. Manual ограничивает окружение, но не заменяет OS-level sandbox. Разрешения JVM/mod, которые нельзя надёжно перехватить внутри одной JVM, отклоняются до запуска и доступны только в Off.</p>
             <div class="security-permission-grid">
               <label v-for="permission in securityPermissionOptions" :key="permission.value" class="workspace-check security-permission" :class="{ 'security-permission--risk': permission.highRisk }">
                 <input v-model="draft.security_permissions" type="checkbox" :value="permission.value" />

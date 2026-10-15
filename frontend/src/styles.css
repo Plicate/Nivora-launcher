@@ -195,7 +195,10 @@ input[type='radio']:checked::after { opacity: 1; transform: scale(1); }
 .numeric-stepper-button:disabled { cursor: not-allowed; opacity: .45; }
 .numeric-stepper input { width: 100%; min-width: 0; height: 40px; padding: 0 7px; border: 0; color: var(--text); background: transparent; outline: none; text-align: center; }
 .memory-field { display: grid; gap: 6px; }
-.memory-field-controls { display: grid; grid-template-columns: minmax(0, 1fr) 104px 48px; gap: 7px; }
+.memory-field-controls { display: flex; flex-wrap: wrap; gap: 7px; }
+.memory-field-controls > .numeric-stepper { flex: 1 1 110px; }
+.memory-field-controls > .custom-select { flex: 1 0 92px; max-width: 104px; }
+.memory-field-controls > .memory-auto-toggle { flex: 0 0 48px; }
 .memory-auto-toggle { min-height: 40px; padding: 0 8px; border: 1px solid var(--line); border-radius: var(--radius-button, 8px); color: var(--quiet); background: var(--panel-raised); cursor: pointer; font-size: 11px; }
 .memory-auto-toggle:hover:not(:disabled), .memory-auto-toggle.active { border-color: var(--accent, var(--blue)); color: var(--text); background: color-mix(in srgb, var(--accent, var(--blue)) 12%, var(--panel-raised)); }
 .memory-auto-toggle:disabled { cursor: not-allowed; opacity: .55; }
@@ -420,40 +423,40 @@ input[type='radio']:checked::after { opacity: 1; transform: scale(1); }
 .settings-toggle-grid .workspace-check { min-height: 40px; padding: 7px 9px; }
 .settings-toggle-grid .workspace-check small { font-size: 10px; }
 .settings-grid { gap: 10px; }
-/* Плотность страницы настроек: плитки сами подстраиваются под фактическую
-   ширину (auto-fill), а не под брейкпоинты — на широком экране 3 колонки,
-   на 1080p — две, в узком окне — одна. Внутри плитки поля тоже текут
-   (auto-fit), длинные элементы занимают всю ширину плитки. */
-.settings-grid { grid-template-columns: repeat(auto-fill, minmax(min(430px, 100%), 1fr)); }
-.settings-card .settings-form { grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 9px 14px; }
-.settings-card .settings-form > .field--wide,
-.settings-card .settings-form > .field-grid,
-.settings-card .settings-form > .source-divider,
-.settings-card .settings-form > .settings-profiles,
-.settings-card .settings-form > .settings-toggle-grid,
-.settings-card .settings-form > .launcher-profile-list,
-.settings-card .settings-form > .diagnostic-note,
-.settings-card .settings-form > .plugin-settings-sections { grid-column: 1 / -1; }
-.settings-toggle-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
-.settings-toggle-grid .workspace-check { align-items: flex-start; min-height: 58px; padding: 10px; border: 1px solid var(--line); border-radius: var(--radius-control, 10px); background: rgba(22, 38, 62, .42); }
-.settings-toggle-grid .workspace-check > span { display: grid; gap: 4px; }
-.settings-toggle-grid .workspace-check strong { color: var(--text); font-size: 10px; }
-.settings-toggle-grid .workspace-check small { color: var(--muted); font-size: 9px; line-height: 1.45; }
-.shortcut-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 9px; }
-/* Поля записи горячих клавиш оверлея: два просторных поля вместо щедрых
-   1/5 общей сетки — сочетание из двух-трёх клавиш и подсказка помещаются
-   без наездов друг на друга. */
-.overlay-hotkey-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-bottom: 9px; }
-@media (max-width: 1180px) { .overlay-hotkey-grid { grid-template-columns: 1fr; } }
-/* Отчёт диагностики оверлея: моноширинный, с зелёными/красными метками ✓/✗ */
-.overlay-selftest { display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; }
-.overlay-selftest .selftest-report { margin: 0; padding: 10px 12px; font-family: var(--font-mono, ui-monospace, monospace); font-size: 12px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; background: color-mix(in srgb, var(--surface-2, rgba(255, 255, 255, 0.04)) 88%, transparent); border: 1px solid var(--border-1, rgba(255, 255, 255, 0.08)); border-radius: 8px; max-height: 220px; overflow: auto; }
-/* Общие клавиши лаунчера: рекордер HotkeyInput выше текстового поля и
-   несёт подсказку — пяти колонок shrink-to-fit ему мало, как и клавишам
-   оверлея раньше */
-.common-hotkey-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-bottom: 9px; }
-@media (max-width: 1180px) { .common-hotkey-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-@media (max-width: 900px) { .common-hotkey-grid { grid-template-columns: 1fr; } }
+/* Страница настроек — колонки плиток (masonry через CSS columns): короткая
+   плитка встаёт под длинной, а не оставляет пустое место рядом с ней.
+   Колонок столько, сколько влезает по ширине (не уже 400px). */
+.settings-masonry { columns: 3 400px; column-gap: 12px; }
+.settings-masonry > .settings-card { display: block; width: 100%; margin: 0 0 12px; break-inside: avoid; -webkit-column-break-inside: avoid; page-break-inside: avoid; }
+.settings-page .settings-card { scroll-margin-top: 130px; }
+.settings-page .settings-card--wide { margin-top: 0; margin-bottom: 12px; }
+.settings-cloud-anchor { scroll-margin-top: 130px; }
+.settings-cloud-anchor > .cloud-card { margin-top: 0; }
+/* Внутри плитки простые поля текут по две-три в ряд, а всё остальное
+   (сетки клавиш, переключатели, подсказки, кнопки) — на всю ширину плитки.
+   Раньше вложенные сетки попадали в одну узкую ячейку и налезали друг на друга. */
+.settings-card .settings-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(190px, 100%), 1fr)); gap: 10px 12px; align-items: start; }
+.settings-card .settings-form > :not(.field),
+.settings-card .settings-form > .field--wide { grid-column: 1 / -1; }
+.settings-card .settings-form > .field { min-width: 0; }
+.settings-toggle-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(200px, 100%), 1fr)); gap: 6px; }
+.settings-toggle-grid .workspace-check { align-items: flex-start; min-height: 0; padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--radius-control, 10px); background: rgba(22, 38, 62, .42); }
+.settings-toggle-grid .workspace-check > span { display: grid; gap: 2px; min-width: 0; }
+.settings-toggle-grid .workspace-check strong { color: var(--text); font-size: 11px; }
+.settings-toggle-grid .workspace-check small { color: var(--muted); font-size: 10px; line-height: 1.4; }
+.settings-toggle-grid .workspace-check input { flex: 0 0 auto; margin-top: 1px; }
+.settings-toggle-grid > :only-child { grid-column: 1 / -1; }
+/* Сетка записи горячих клавиш: каждое поле не уже 170px — сочетание клавиш
+   и подсказка помещаются без наездов на соседей. */
+.hotkey-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(170px, 100%), 1fr)); gap: 10px; }
+.hotkey-grid > .field { min-width: 0; }
+.shortcut-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(140px, 100%), 1fr)); gap: 9px; }
+.settings-inline-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.settings-catalog-columns { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr)); gap: 12px 18px; align-items: start; }
+.settings-catalog-block { display: grid; gap: 9px; min-width: 0; }
+/* Отчёт диагностики оверлея: моноширинный, с метками ✓/✗ */
+.overlay-selftest { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
+.overlay-selftest .selftest-report { align-self: stretch; margin: 0; padding: 10px 12px; font-family: var(--font-mono, ui-monospace, monospace); font-size: 12px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; background: color-mix(in srgb, var(--surface-2, rgba(255, 255, 255, 0.04)) 88%, transparent); border: 1px solid var(--border-1, rgba(255, 255, 255, 0.08)); border-radius: 8px; max-height: 220px; overflow: auto; }
 .automatic-integration { display: flex; min-width: 0; align-items: flex-start; gap: 10px; overflow: hidden; padding: 11px 12px; border: 1px solid var(--line); border-radius: var(--radius-control, 10px); background: rgba(22, 38, 62, .5); }
 .automatic-integration > div { display: grid; min-width: 0; gap: 4px; }
 .automatic-integration strong { color: var(--text); font-size: 11px; }
@@ -558,7 +561,7 @@ input[type='radio']:checked::after { opacity: 1; transform: scale(1); }
   .topbar-actions .activity-trigger span:last-child { display: none; }
   .page-heading { margin-right: auto; margin-left: 12px; }
   .page-content { padding: 24px 18px 38px; }
-  .field-grid, .settings-grid, .cloud-layout, .settings-toggle-grid, .shortcut-grid, .overlay-hotkey-grid, .common-hotkey-grid { grid-template-columns: 1fr; }
+  .field-grid, .settings-grid, .cloud-layout, .settings-toggle-grid, .shortcut-grid, .hotkey-grid { grid-template-columns: 1fr; }
   .loader-picker { grid-template-columns: repeat(3, 1fr); }
   .launch-actions { flex-wrap: wrap; }
   .launch-actions .account-select { flex-basis: 100%; }
@@ -965,7 +968,6 @@ input[type='radio']:checked::after { opacity: 1; transform: scale(1); }
   .catalog-independent-fields { grid-template-columns: 1fr; }
   .settings-save-bar { align-items: flex-start; flex-direction: column; }
   .settings-save-bar .button { width: 100%; }
-  .memory-field-controls { grid-template-columns: minmax(0, 1fr) 92px 44px; }
 }
 @media (max-width: 430px) {
   .loader-picker { grid-template-columns: repeat(2, 1fr); }
@@ -1370,32 +1372,6 @@ body[data-launcher-animations='off'] *, body[data-launcher-animations='off'] *::
 
 /* Extension center */
 .extension-page, .theme-page { display: grid; gap: 14px; }
-.lan-room-panel { display: grid; gap: 18px; padding: 20px; }
-.lan-room-heading { display: flex; align-items: flex-start; gap: 12px; }
-.lan-room-heading > div { min-width: 0; flex: 1; }
-.lan-room-heading h3, .lan-room-active-heading h4 { margin: 4px 0; font-size: 16px; }
-.lan-room-heading p, .lan-room-action-card p, .lan-room-note { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
-.lan-room-icon { display: grid; width: 40px; height: 40px; flex: 0 0 40px; place-items: center; border: 1px solid color-mix(in srgb, var(--accent) 36%, var(--line)); border-radius: calc(var(--radius-control, 10px) * 1.2); color: var(--accent-strong, var(--blue-bright)); background: color-mix(in srgb, var(--accent) 12%, var(--panel)); }
-.lan-room-common-fields { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
-.lan-room-common-fields input, .lan-room-action-card input { width: 100%; min-width: 0; min-height: 37px; padding: 0 10px; border: 1px solid var(--line); border-radius: var(--radius-button, 8px); color: var(--text); background: var(--panel-soft); font: inherit; }
-.lan-room-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
-.lan-room-action-card { display: grid; align-content: start; gap: 14px; padding: 16px; border: 1px solid var(--line); border-radius: calc(var(--radius-control, 10px) * 1.2); background: color-mix(in srgb, var(--panel-raised) 84%, transparent); }
-.lan-room-action-card > div:first-child { display: grid; gap: 5px; }
-.lan-room-action-card > strong, .lan-room-action-card strong { font-size: 12px; }
-.lan-room-error { margin: 0; overflow-wrap: anywhere; }
-.lan-room-active { display: grid; gap: 16px; }
-.lan-room-active-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
-.lan-room-active-heading > div:first-child { display: grid; justify-items: start; gap: 3px; }
-.lan-room-active-heading p { margin: 0; color: var(--muted); font-size: 10px; }
-.lan-room-address { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
-.lan-room-address > span { display: grid; min-width: 0; gap: 5px; padding: 11px; border: 1px solid var(--line); border-radius: var(--radius-control, 10px); background: var(--panel-soft); }
-.lan-room-address small, .lan-room-members > strong { color: var(--muted); font-size: 9.5px; letter-spacing: .03em; }
-.lan-room-address strong { overflow-wrap: anywhere; font-family: var(--font-mono); font-size: 13px; }
-.lan-room-members { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; }
-.lan-room-members > strong { width: 100%; margin-bottom: 2px; }
-.lan-room-members > span { display: inline-flex; align-items: center; gap: 6px; padding: 7px 9px; border: 1px solid var(--line); border-radius: 999px; background: var(--panel-soft); font-size: 10px; }
-.lan-room-members small { color: var(--muted); }
-.lan-room-note { padding: 10px 12px; border-left: 2px solid var(--accent); background: color-mix(in srgb, var(--panel-soft) 82%, var(--accent) 8%); }
 .extension-trust-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
 .extension-trust-card { display: flex; min-width: 0; align-items: flex-start; gap: 11px; padding: 15px; border: 1px solid var(--line); border-radius: calc(var(--radius-card, 7px) * 2); background: color-mix(in srgb, var(--panel-raised) 86%, transparent); }
 .extension-trust-card--accent { border-color: color-mix(in srgb, var(--accent) 46%, transparent); background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 15%, transparent), color-mix(in srgb, var(--panel-raised) 92%, transparent)); }
@@ -1513,7 +1489,6 @@ body[data-launcher-animations='off'] *, body[data-launcher-animations='off'] *::
 }
 @media (max-width: 900px) {
   .extension-trust-row, .theme-notes { grid-template-columns: 1fr; }
-  .lan-room-common-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .plugin-contract { align-items: flex-start; flex-direction: column; }
   .contract-flow { flex-wrap: wrap; white-space: normal; }
 }
@@ -1530,16 +1505,12 @@ body[data-launcher-animations='off'] *, body[data-launcher-animations='off'] *::
   .app-shell[data-sidebar-floating='true'] > .sidebar { top: 0; right: auto; bottom: 0; left: 0; border-radius: 0; }
   .sidebar-resize-handle { display: none; }
   .plugin-grid, .theme-grid { grid-template-columns: 1fr; }
-  .lan-room-actions { grid-template-columns: 1fr; }
   .plugin-toolbar { align-items: stretch; flex-direction: column; }
   .theme-hero { min-height: 230px; align-items: flex-start; padding: 23px; }
   .theme-hero-orb { position: absolute; right: 18px; margin-top: 72px; transform: scale(.75); transform-origin: right top; }
 }
 @media (max-width: 520px) {
   .extension-trust-card { padding: 12px; }
-  .lan-room-panel { padding: 16px; }
-  .lan-room-common-fields, .lan-room-address { grid-template-columns: 1fr; }
-  .lan-room-active-heading { align-items: flex-start; flex-direction: column; }
   .plugin-detail { padding: 16px; }
   .syscall-row { grid-template-columns: 1fr; gap: 4px; }
   .theme-hero-pills { display: grid; }
@@ -1716,7 +1687,3 @@ body[data-launcher-animations='off'] *, body[data-launcher-animations='off'] *::
 .studio-accent-suggest { display: grid; gap: 6px; margin-top: 8px; }
 .studio-accent-suggest small { color: var(--muted); font-size: .72rem; }
 
-/* ── LAN: запасные IPv4 хоста ─────────────────────────────────────────────── */
-.lan-room-alt-hosts { display: grid; gap: 6px; padding: 10px 12px; border: 1px dashed var(--line-strong); border-radius: var(--radius-control, 10px); }
-.lan-room-alt-hosts small { color: var(--muted); font-size: .76rem; }
-.lan-room-alt-hosts code { justify-self: start; padding: 3px 9px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); font-family: var(--font-mono, monospace); font-size: .78rem; color: var(--text); cursor: copy; }

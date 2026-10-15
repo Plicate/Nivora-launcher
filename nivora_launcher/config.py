@@ -56,7 +56,6 @@ DEFAULT_ANIMATION_SETTINGS = {
         "mods": "fade",
         "modpacks": "fade",
         "plugins": "fade",
-        "lan-rooms": "fade",
         "themes": "fade",
         "instance-settings": "fade",
         "settings": "fade",
@@ -67,7 +66,6 @@ DEFAULT_ANIMATION_SETTINGS = {
         "mods": 140,
         "modpacks": 140,
         "plugins": 140,
-        "lan-rooms": 140,
         "themes": 140,
         "instance-settings": 140,
         "settings": 140,
@@ -133,7 +131,7 @@ class Settings:
     auto_refresh_metadata: bool = True
     metadata_refresh_hours: int = 6
     download_timeout_seconds: int = 30
-    download_retries: int = 3
+    download_retries: int = 5
     confirm_destructive_actions: bool = True
     show_activity_panel: bool = True
     show_toasts: bool = True
@@ -173,10 +171,10 @@ class Settings:
     ui_scale: int = 100
     radius_tokens: dict[str, int] = field(default_factory=lambda: dict(DEFAULT_RADIUS_TOKENS))
     page_themes: dict[str, str] = field(
-        default_factory=lambda: {"instances": "inherit", "instance-settings": "inherit", "accounts": "inherit", "mods": "inherit", "modpacks": "inherit", "plugins": "inherit", "lan-rooms": "inherit", "themes": "inherit", "settings": "inherit"}
+        default_factory=lambda: {"instances": "inherit", "instance-settings": "inherit", "accounts": "inherit", "mods": "inherit", "modpacks": "inherit", "plugins": "inherit", "themes": "inherit", "settings": "inherit"}
     )
     page_layouts: dict[str, str] = field(
-        default_factory=lambda: {"instances": "balanced", "instance-settings": "balanced", "accounts": "balanced", "mods": "wide", "modpacks": "wide", "plugins": "wide", "lan-rooms": "balanced", "themes": "wide", "settings": "balanced"}
+        default_factory=lambda: {"instances": "balanced", "instance-settings": "balanced", "accounts": "balanced", "mods": "wide", "modpacks": "wide", "plugins": "wide", "themes": "wide", "settings": "balanced"}
     )
     widget_visibility: dict[str, bool] = field(
         default_factory=lambda: {"instances.workspace": True, "accounts.status": True, "mods.context": True}
@@ -855,7 +853,7 @@ def _normalize_shortcuts(value: Any) -> dict[str, str]:
 
 
 def _normalize_behavior(settings: Settings) -> dict[str, Any]:
-    views = {"instances", "accounts", "mods", "modpacks", "plugins", "lan-rooms", "themes", "settings"}
+    views = {"instances", "accounts", "mods", "modpacks", "plugins", "themes", "settings"}
     filters = {"all", "release", "snapshot", "old_beta", "old_alpha"}
     loaders = {"vanilla", "fabric", "forge", "neoforge", "quilt"}
     startup_view = str(settings.startup_view).strip().lower()
@@ -881,7 +879,7 @@ def _normalize_behavior(settings: Settings) -> dict[str, Any]:
     try:
         retries = min(6, max(1, int(settings.download_retries)))
     except (TypeError, ValueError):
-        retries = 3
+        retries = 5
     try:
         keep_logs = min(365, max(0, int(settings.keep_logs_days)))
     except (TypeError, ValueError):
@@ -926,7 +924,7 @@ def _apply_appearance(settings: Settings, values: dict[str, Any]) -> None:
 
 
 def _normalize_appearance(settings: Settings) -> dict[str, Any]:
-    pages = {"instances", "instance-settings", "accounts", "mods", "modpacks", "plugins", "lan-rooms", "themes", "settings"}
+    pages = {"instances", "instance-settings", "accounts", "mods", "modpacks", "plugins", "themes", "settings"}
     valid_page_themes = {"inherit", "light", "dark", "glass"}
     valid_page_layouts = {"compact", "balanced", "wide"}
     raw_page_themes = settings.page_themes if isinstance(settings.page_themes, dict) else {}
@@ -1070,7 +1068,7 @@ def _normalize_active_profile_id(value: Any, profiles: list[dict[str, Any]]) -> 
 def _normalize_animation_settings(value: Any) -> dict[str, Any]:
     raw = value if isinstance(value, dict) else {}
     styles = {"fade", "slide", "scale", "none"}
-    pages = {"instances", "instance-settings", "accounts", "mods", "modpacks", "plugins", "lan-rooms", "themes", "settings"}
+    pages = {"instances", "instance-settings", "accounts", "mods", "modpacks", "plugins", "themes", "settings"}
     page_styles_raw = raw.get("page_styles") if isinstance(raw.get("page_styles"), dict) else {}
     page_durations_raw = raw.get("page_durations_ms") if isinstance(raw.get("page_durations_ms"), dict) else {}
     fallback_style = str(raw.get("page_style", DEFAULT_ANIMATION_SETTINGS["page_style"])).strip().lower()

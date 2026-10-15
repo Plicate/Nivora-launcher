@@ -42,7 +42,6 @@ const libraryItems: Array<{ view: ViewName; label: string; icon: string }> = [
 
 const toolItems: Array<{ view: ViewName; label: string; icon: string }> = [
   { view: 'plugins', label: 'Плагины', icon: 'plug' },
-  { view: 'lan-rooms', label: 'LAN-комнаты', icon: 'globe' },
   { view: 'themes', label: 'Студия тем', icon: 'palette' },
 ]
 

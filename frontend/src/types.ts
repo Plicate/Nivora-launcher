@@ -1,4 +1,4 @@
-export type ViewName = 'instances' | 'instance-settings' | 'accounts' | 'mods' | 'modpacks' | 'plugins' | 'lan-rooms' | 'themes' | 'settings'
+export type ViewName = 'instances' | 'instance-settings' | 'accounts' | 'mods' | 'modpacks' | 'plugins' | 'themes' | 'settings'
 export type LoaderId = 'vanilla' | 'fabric' | 'forge' | 'neoforge' | 'quilt'
 export type ProjectType = 'mod' | 'resourcepack' | 'shader' | 'datapack' | 'plugin' | 'modpack'
 export type CatalogSort = 'relevance' | 'downloads' | 'newest' | 'updated'
@@ -702,36 +702,6 @@ export interface ResourceUpdate {
   world_title?: string
 }
 
-export interface LanRoomCredentials {
-  room_name: string
-  password: string
-  player_nickname: string
-  host_control_port: number
-  minecraft_game_port: number
-  host_address?: string
-}
-
-export interface LanRoomStatus {
-  room_name: string
-  host_nickname: string
-  host_address: string
-  host_control_port: number
-  minecraft_game_port: number
-  host_reachable_minecraft_address: string
-  minecraft_address: string
-  same_lan_only: boolean
-  network_scope: string
-  coordination_only: boolean
-  game_traffic_tunnel: boolean
-  local_role: 'host' | 'peer'
-  local_nickname: string
-  members: Array<{ nickname: string; source_ip: string; role: string }>
-  peers: Array<{ nickname: string; source_ip: string }>
-  players: string[]
-  player_count: number
-  alternative_hosts?: string[]
-}
-
 export interface GitHubPluginRepository {
   owner: string
   repo: string
@@ -812,6 +782,7 @@ export interface AppState {
 
 export interface SecurityStatus {
   platform: string
+  sandbox?: 'bubblewrap' | 'appcontainer' | 'none'
   bubblewrap: boolean
   bubblewrap_path: string
   strict_available: boolean

@@ -1,4 +1,4 @@
-import type { LanRoomCredentials, LanRoomStatus, PluginManifest, PluginPermission, PluginUiFragment } from '../types'
+import type { PluginManifest, PluginPermission, PluginUiFragment } from '../types'
 
 export const NIVORA_PLUGIN_API_VERSION = '1'
 
@@ -72,13 +72,6 @@ export interface PluginLauncherEvents {
   servers: PluginServerList
 }
 
-export interface PluginLanSessions {
-  create(payload: LanRoomCredentials): Promise<LanRoomStatus>
-  join(payload: LanRoomCredentials): Promise<LanRoomStatus>
-  status(payload: LanRoomCredentials): Promise<LanRoomStatus>
-  leave(payload: LanRoomCredentials): Promise<{ left: boolean; room_name: string }>
-}
-
 export interface PluginUiApi {
   compose(fragment: PluginUiFragment): Readonly<PluginUiFragment>
 }
@@ -91,7 +84,6 @@ export interface TrialPluginContext {
   network: PluginNetwork
   database: PluginDatabase
   launcher: PluginLauncherEvents
-  lanSessions: PluginLanSessions
   ui: PluginUiApi
 }
 
@@ -123,23 +115,7 @@ export interface PluginRpc {
   serverListSave(pluginId: string, servers: readonly PluginServerInput[]): Promise<{ servers: PluginServer[] }>
   serverListAdd(pluginId: string, server: PluginServerInput): Promise<{ server: PluginServer; servers: PluginServer[] }>
   serverListRemove(pluginId: string, serverId: string): Promise<{ removed: boolean; servers: PluginServer[] }>
-  lanSessionCreate(payload: LanRoomCredentials): Promise<LanRoomStatus>
-  lanSessionJoin(payload: LanRoomCredentials): Promise<LanRoomStatus>
-  lanSessionStatus(payload: LanRoomCredentials): Promise<LanRoomStatus>
-  lanSessionLeave(payload: LanRoomCredentials): Promise<{ left: boolean; room_name: string }>
   subscribe?(event: string, listener: (payload: unknown) => void): () => void
-}
-
-export type PluginLanSessionRpc = Pick<PluginRpc, 'lanSessionCreate' | 'lanSessionJoin' | 'lanSessionStatus' | 'lanSessionLeave'>
-
-export function createPluginLanSessions(manifest: PluginManifest, rpc: PluginLanSessionRpc): PluginLanSessions {
-  const requireLanPermission = () => requirePermission(manifest, 'network:listen')
-  return {
-    create: (payload) => { requireLanPermission(); return rpc.lanSessionCreate(payload) },
-    join: (payload) => { requireLanPermission(); return rpc.lanSessionJoin(payload) },
-    status: (payload) => { requireLanPermission(); return rpc.lanSessionStatus(payload) },
-    leave: (payload) => { requireLanPermission(); return rpc.lanSessionLeave(payload) },
-  }
 }
 
 export function createPluginContext(manifest: PluginManifest, rpc: PluginRpc): TrialPluginContext {
@@ -249,7 +225,6 @@ export function createPluginContext(manifest: PluginManifest, rpc: PluginRpc): T
         },
       },
     },
-    lanSessions: createPluginLanSessions(manifest, rpc),
     ui: {
       compose: (fragment) => {
         requirePermission(manifest, 'ui:compose')

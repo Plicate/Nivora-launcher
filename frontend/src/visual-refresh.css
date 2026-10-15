@@ -63,7 +63,7 @@ body { font-family: var(--font-family); }
 
 .panel, .instance-card, .workspace-card, .workspace-header, .mod-card, .account-row,
 .instance-group-section, .instance-groups-toolbar, .launcher-profile-card,
-.settings-card, .server-header, .server-metric, .lan-room-action-card,
+.settings-card, .server-header, .server-metric,
 .resource-catalog-row, .theme-card, .plugin-card, .customization-section,
 .first-run-account-option, .first-run-choice-card {
   border-color: var(--line);
@@ -77,7 +77,7 @@ body { font-family: var(--font-family); }
   background: var(--panel-raised);
 }
 .launch-panel, .account-panel, .create-account-panel, .search-panel,
-.settings-card, .first-run-help-panel { padding: 19px; }
+.settings-card { padding: 19px; }
 .panel-heading { margin-bottom: 17px; }
 .panel-heading h2 { font-size: 18px; font-weight: 600; letter-spacing: -.02em; }
 .instance-grid { gap: 10px; }
@@ -91,7 +91,7 @@ body { font-family: var(--font-family); }
   transform: none;
 }
 .instance-card-body { padding: 15px; }
-.instance-card-mark, .instance-group-mark, .mod-icon, .lan-room-icon {
+.instance-card-mark, .instance-group-mark, .mod-icon {
   border-color: var(--line);
   border-radius: calc(var(--radius-card, 7px) * .857);
   color: var(--accent-strong, var(--accent));

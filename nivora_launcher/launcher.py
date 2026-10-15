@@ -22,7 +22,7 @@ from .instance_files import instance_log_hash
 from .instances import InstanceStore
 from .metadata import VersionRepository
 from .operations import CancellationToken, OperationCancelled
-from .platform_support import open_path, process_start_options, set_private_fd, terminate_process_tree
+from .platform_support import open_path, process_start_options, set_private_fd, set_private_path, terminate_process_tree
 from .process_guard import InstanceProcessLock
 from .runtime import JavaRuntimeManager, java_version, safe_process_environment
 from .security import ensure_instance_cell, prepare_process
@@ -160,8 +160,10 @@ def _create_java_argument_file(
             os.close(fd)
         except OSError:
             pass
-        path.unlink(missing_ok=True)
+        Path(path).unlink(missing_ok=True)
         raise
+    if os.name == "nt":
+        set_private_path(Path(path))
     return _JavaArgumentFile(path=Path(path))
 
 

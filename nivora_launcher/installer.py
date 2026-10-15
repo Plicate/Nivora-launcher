@@ -109,6 +109,64 @@ class MinecraftInstaller:
             return self._install_staged(instance, build)
         return self._materialize(launch_id, instance, resolved, assets=assets)
 
+    def repair_version(
+        self,
+        instance_dir: Path,
+        minecraft_version: str,
+        *,
+        loader: str = "vanilla",
+        loader_version: str | None = None,
+        version_id: str | None = None,
+    ) -> InstallResult:
+        """Пересоздать версию/модлоадер экземпляра, не трогая mods и config.
+
+        Чинит сломанный модлоадер: текущий каталог версии прячется в бэкап,
+        версия ставится заново, при сбое старый каталог возвращается на место.
+        """
+        instance_dir = instance_dir.expanduser().resolve()
+        instances_root = (self.config.game_dir / "instances").resolve()
+        if instance_dir == instances_root or not _within(instance_dir, instances_root) or not instance_dir.is_dir():
+            raise LauncherError(f"Недопустимый путь экземпляра: {instance_dir}")
+        if self._instance_dir(instance_dir.name).resolve() != instance_dir:
+            raise LauncherError(f"Имя экземпляра не соответствует папке: {instance_dir.name}")
+        minecraft_version = str(minecraft_version).strip()
+        if not minecraft_version:
+            raise LauncherError("Не указана версия Minecraft")
+        target_version = str(version_id or minecraft_version).strip()
+        _safe_version_id(target_version)
+        versions_root = instance_dir / "versions"
+        if versions_root.is_symlink():
+            raise LauncherError("Каталог версий является символьной ссылкой")
+        versions_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        version_dir = versions_root / target_version
+        backup = versions_root / f".trial-repair-{uuid.uuid4().hex}.part"
+        moved = False
+        if os.path.lexists(version_dir):
+            if version_dir.is_symlink() or not version_dir.is_dir():
+                raise LauncherError(f"Каталог версии не является папкой: {version_dir}")
+            if _contains_symlink(version_dir, instance_dir):
+                raise LauncherError("Каталог версии содержит символьные ссылки")
+            os.rename(version_dir, backup)
+            moved = True
+        try:
+            return self.install(
+                minecraft_version,
+                loader=loader,
+                loader_version=loader_version,
+                instance_name=instance_dir.name,
+                assets=False,
+                replace_existing=False,
+            )
+        except Exception:
+            if moved:
+                if os.path.lexists(version_dir):
+                    _remove_instance_path(version_dir)
+                os.rename(backup, version_dir)
+            raise
+        finally:
+            if moved and os.path.lexists(backup):
+                _remove_instance_path(backup)
+
     def load_existing(self, instance_dir: Path, version_id: str | None = None) -> InstallResult:
         """Build a launchable result from files already present in an instance."""
         instance_dir = instance_dir.expanduser().resolve()

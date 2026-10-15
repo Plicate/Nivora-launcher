@@ -14,6 +14,7 @@ from .config import ConfigStore, _atomic_json_write
 from .errors import LauncherError
 from .metadata import safe_instance_name
 from .platform_support import is_reparse_point
+from . import windows_sandbox
 
 
 SECURITY_PROFILES = ("compat", "off", "manual", "strict")
@@ -244,8 +245,9 @@ def prepare_process(
     policy = security_policy(settings)
     if policy.profile in {"compat", "off"}:
         return command, instance_dir, dict(environment), None
-    if policy.profile == "strict" and platform.system().lower() != "linux":
-        raise LauncherError("strict profile сейчас поддерживается только на Linux через bubblewrap")
+    system = platform.system().lower()
+    if policy.profile == "strict" and system not in {"linux", "windows"}:
+        raise LauncherError("strict profile поддерживается только на Linux (bubblewrap) и Windows (AppContainer)")
 
     cell = ensure_instance_cell(instance_dir)
     service_files = ensure_service_json_files(instance_dir)
@@ -262,7 +264,9 @@ def prepare_process(
             "TRIAL_LAUNCHER_CELL_ROOT": str(cell.root),
         }
     )
-    if policy.profile == "manual" and platform.system().lower() != "linux":
+    if system == "windows":
+        return _prepare_windows_process(command, instance_dir, cell, service_files, process_environment, policy, host_environment=environment)
+    if policy.profile == "manual" and system != "linux":
         return command, instance_dir, process_environment, (
             f"manual profile на {platform.system()} не предоставляет OS-level sandbox; разрешения network, file и desktop не обеспечиваются."
         )
@@ -439,7 +443,136 @@ def prepare_process(
     return [*sandbox, *mapped_command], instance_dir, process_environment, warning
 
 
+def _prepare_windows_process(
+    command: list[str],
+    instance_dir: Path,
+    cell: InstanceCell,
+    service_files: tuple[Path, ...],
+    environment: dict[str, str],
+    policy: SecurityPolicy,
+    *,
+    host_environment: Mapping[str, str],
+) -> tuple[list[str], Path, dict[str, str], str | None]:
+    """Windows: AppContainer + Job Object вместо bubblewrap (см. windows_sandbox)."""
+    no_sandbox = "manual profile отключает OS-level sandbox; разрешения network, file и desktop не обеспечиваются."
+    if policy.host_file_write:
+        if policy.profile == "strict":
+            raise LauncherError("strict profile не выдаёт модам запись в файлы компьютера; используйте off для доверенной сборки")
+        return command, instance_dir, environment, no_sandbox
+    if policy.host_file_read:
+        # Чтение папок пользователя потребовало бы менять ACL на всём профиле
+        # (с рекурсивной пропагацией) — лаунчер этого не делает.
+        if policy.profile == "strict":
+            raise LauncherError(
+                "files:host-read на Windows не поддерживается в strict: AppContainer потребовал бы менять права на папках пользователя. "
+                "Отключите разрешение или используйте off для доверенной сборки."
+            )
+        return command, instance_dir, environment, no_sandbox
+    if not windows_sandbox.appcontainer_supported():
+        if policy.profile == "strict":
+            raise LauncherError("strict profile на Windows требует AppContainer (Windows 8 или новее)")
+        return command, instance_dir, environment, "AppContainer недоступен: manual profile не может ограничить network, file или desktop permissions."
+
+    environment["APPDATA"] = str(cell.config)
+    environment["LOCALAPPDATA"] = str(cell.cache)
+    for key in windows_sandbox.CELL_ENVIRONMENT_KEYS:
+        environment[windows_sandbox.SANDBOX_ENV_PREFIX + key] = environment[key]
+        if key in host_environment:
+            environment[key] = str(host_environment[key])
+        else:
+            environment.pop(key, None)
+    instance_access = "modify" if "files:instance" in policy.permissions else "read"
+    java_root = _windows_java_root(command[0]) if command else None
+    read_files = [
+        str(Path(value[1:]))
+        for value in command[1:]
+        if value.startswith("@") and Path(value[1:]).is_absolute() and Path(value[1:]).is_file()
+    ]
+    sandbox_policy = {
+        "version": windows_sandbox.POLICY_VERSION,
+        "profile_name": windows_sandbox.appcontainer_name(instance_dir),
+        "instance_dir": str(instance_dir),
+        "instance_access": instance_access,
+        # Временный каталог cell нужен JVM даже при read-only экземпляре.
+        "writable_dirs": [] if instance_access == "modify" else [str(cell.tmp)],
+        "read_dirs": [str(java_root)] if java_root else [],
+        "read_files": read_files,
+        "deny_write_files": [str(path) for path in _existing_service_files(instance_dir, service_files)],
+        "network": policy.network_access,
+        "display": policy.display_access,
+        "audio": policy.audio_access,
+    }
+    warnings: list[str] = []
+    if not policy.display_access:
+        warnings.append(
+            "Windows не может скрыть окно игры без desktop:display; применены ограничения UI: буфер обмена и чужие окна недоступны."
+        )
+    if not policy.audio_access:
+        warnings.append("Windows не позволяет запретить вывод звука в AppContainer; desktop:audio не обеспечивается (микрофон закрыт всегда).")
+    if policy.network_access:
+        warnings.append(
+            "Windows блокирует AppContainer подключения к этому же компьютеру (localhost); для локального сервера используйте профиль off."
+        )
+        warnings.append(
+            "Входящие подключения к игре или серверу в контейнере блокируются: хостить сервер из песочницы нельзя, "
+            "клиенты не смогут подключиться. Сервер из desktop-приложения запускается без песочницы."
+        )
+    else:
+        warnings.append(f"{policy.profile} sandbox отключил сеть; включите network:game для сетевой игры.")
+    wrapped = windows_sandbox.wrap_command(sandbox_policy, command)
+    return wrapped, instance_dir, environment, " ".join(warnings)
+
+
+def _existing_service_files(instance_dir: Path, created: tuple[Path, ...]) -> list[Path]:
+    files = {path for path in created}
+    for name in SERVICE_JSON_FILES:
+        path = instance_dir / name
+        if path.is_file() and not is_reparse_point(path):
+            files.add(path)
+    return sorted(files)
+
+
+def _windows_java_root(value: str) -> Path | None:
+    candidate = Path(value)
+    if not candidate.is_absolute():
+        found = shutil.which(value)
+        if not found:
+            return None
+        candidate = Path(found)
+    try:
+        resolved = candidate.resolve()
+    except OSError:
+        return None
+    if not resolved.is_file():
+        return None
+    root = resolved.parent
+    if root.name.lower() == "bin" and any(
+        (root.parent / marker).exists() for marker in ("release", "lib", "conf")
+    ):
+        root = root.parent
+    try:
+        Path.home().resolve().relative_to(root)
+        return None  # корень Java не должен накрывать профиль пользователя
+    except ValueError:
+        pass
+    if root == Path(root.anchor):
+        return None
+    return root
+
+
 def sandbox_status() -> dict[str, Any]:
+    if platform.system().lower() == "windows":
+        available, error = windows_sandbox.probe()
+        return {
+            "platform": "windows",
+            "sandbox": "appcontainer",
+            "bubblewrap": False,
+            "bubblewrap_path": "",
+            "strict_available": available,
+            "strict_probe_error": error,
+            "profiles": list(SECURITY_PROFILES),
+            "permissions": list(SECURITY_PERMISSIONS),
+        }
     bubblewrap = shutil.which("bwrap")
     probe_error = ""
     strict_available = False
@@ -479,6 +612,7 @@ def sandbox_status() -> dict[str, Any]:
             probe_error = str(exc)[:256]
     return {
         "platform": platform.system().lower(),
+        "sandbox": "bubblewrap" if bubblewrap else "none",
         "bubblewrap": bool(bubblewrap),
         "bubblewrap_path": bubblewrap or "",
         "strict_available": strict_available,
