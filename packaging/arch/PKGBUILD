@@ -1,6 +1,6 @@
 pkgname=nivora-launcher
-pkgver=1.0.0
-pkgrel=93
+pkgver=1.0.1
+pkgrel=1
 pkgdesc='Universal Minecraft launcher'
 arch=('x86_64')
 license=('GPL-3.0-only')

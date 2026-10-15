@@ -4,7 +4,7 @@ import re
 
 APP_ID = "nivora-launcher"
 APP_NAME = "Nivora Launcher"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.0.1"
 # Метка сборки бэкенда. Фронтенд несёт такую же константу
 # (FRONTEND_BUILD_STAMP в frontend/src/services/bridge.ts) и сверяет её
 # с bootstrap-ответом: рассинхрон значит, что в собранное приложение

@@ -1,6 +1,6 @@
 [package]
 name = "nivora-launcher"
-version = "1.0.0"
+version = "1.0.1"
 description = "Nivora Launcher desktop shell"
 authors = ["Nivora Launcher contributors"]
 edition = "2021"
