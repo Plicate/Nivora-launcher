@@ -645,6 +645,25 @@ input[type='radio']:checked::after { opacity: 1; transform: scale(1); }
 .instance-resource-update strong { overflow: hidden; color: var(--text); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .instance-resource-update small { color: var(--muted); font-size: 11px; }
 .workspace-asset { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 11px; border: 1px solid var(--line); border-radius: var(--radius-control, 10px); background: rgba(22, 38, 62, .5); transition: border-color .18s ease, background-color .18s ease, transform .18s ease, opacity .18s ease; }
+.workspace-asset-check { flex: 0 0 auto; width: 16px; height: 16px; margin: 0; accent-color: var(--accent, var(--blue)); cursor: pointer; }
+.workspace-asset-check + .workspace-asset-copy { flex: 1 1 auto; min-width: 0; }
+.workspace-asset--selected { border-color: color-mix(in srgb, var(--accent, var(--blue)) 55%, var(--line)); background: color-mix(in srgb, var(--accent, var(--blue)) 10%, rgba(22, 38, 62, .5)); }
+.workspace-mod-bulkbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-bottom: 10px; padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--radius-control, 10px); background: var(--panel-soft); }
+.workspace-mod-bulkbar-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-left: auto; }
+.workspace-world-import { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 6px 10px; margin-bottom: 10px; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius-control, 10px); background: var(--panel-soft); font-size: 12px; }
+.workspace-world-import > span:first-child { display: flex; align-items: center; gap: 8px; }
+.workspace-world-import-bar { grid-column: 1 / -1; height: 4px; overflow: hidden; border-radius: 999px; background: var(--line); }
+.workspace-world-import-bar > span { display: block; height: 100%; background: var(--accent, var(--blue)); transition: width .2s ease; }
+.catalog-bulkbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin: 0 0 12px; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius-control, 10px); background: var(--panel-soft); }
+.catalog-bulkbar-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-left: auto; }
+.mod-card { position: relative; }
+.mod-card--selected { border-color: color-mix(in srgb, var(--accent, var(--blue)) 60%, var(--line)); box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent, var(--blue)) 35%, transparent); }
+.mod-card-select { position: absolute; top: 10px; right: 10px; display: flex; align-items: center; justify-content: center; width: 26px; height: 26px; border-radius: 8px; background: color-mix(in srgb, var(--panel) 85%, transparent); cursor: pointer; z-index: 1; }
+.mod-card:has(.mod-card-select) .mod-card-copy h3 { padding-right: 30px; }
+.mod-card-select input { width: 15px; height: 15px; margin: 0; accent-color: var(--accent, var(--blue)); cursor: pointer; }
+.catalog-pager { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 6px; margin: 16px 0 4px; }
+.catalog-pager-page { min-width: 34px; }
+.catalog-pager-info { color: var(--muted); font-size: 12px; margin: 0 6px; }
 .workspace-asset:hover { border-color: var(--line-strong); background: rgba(31, 52, 84, .62); transform: translateX(2px); }
 .workspace-asset > span:not(.workspace-world-copy) { display: grid; min-width: 0; gap: 4px; }
 .workspace-world-copy { display: flex; min-width: 0; align-items: center; gap: 10px; }
@@ -1687,3 +1706,17 @@ body[data-launcher-animations='off'] *, body[data-launcher-animations='off'] *::
 .studio-accent-suggest { display: grid; gap: 6px; margin-top: 8px; }
 .studio-accent-suggest small { color: var(--muted); font-size: .72rem; }
 
+
+/* Проверка ника: поле с недопустимыми символами подсвечивается, ошибка — под ним. */
+input.input--invalid, input.input--invalid:focus { border-color: var(--danger); box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger) 16%, transparent); }
+.first-run-nickname-error { flex-basis: 100%; margin-top: 6px; }
+
+/* 3D-миниатюры скинов и лицевая сторона плащей */
+.skin-library-item, .skin-library-account-item { grid-template-columns: 64px minmax(0, 1fr); }
+.skin-library-model { display: block; grid-row: 1 / span 3; width: 64px; height: 84px; overflow: hidden; border-radius: calc(var(--radius-card, 7px) * .857); background: radial-gradient(circle at 50% 30%, var(--panel-soft), transparent 75%); }
+.skin-cape-art { min-height: 96px; }
+.skin-elytra-toggle { margin-top: 12px; }
+.skin-elytra-toggle small { display: block; color: var(--muted); font-size: 10px; }
+.skin-cape-front { display: grid; grid-template-columns: 60px minmax(0, 1fr); gap: 10px; align-items: center; margin-top: 12px; padding: 10px; border: 1px solid var(--line); border-radius: var(--radius-control, 10px); background: var(--panel-soft); }
+.skin-cape-front .cape-thumb { height: 96px; }
+.skin-cape-front small { display: block; color: var(--muted); font-size: 10px; }

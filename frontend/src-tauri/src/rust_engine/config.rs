@@ -153,6 +153,8 @@ pub fn default_settings_object() -> Value {
         "download_timeout_seconds": 30,
         "download_retries": 3,
         "confirm_destructive_actions": true,
+        "auto_repair_enabled": true,
+        "auto_repair_muted": [],
         "show_activity_panel": true,
         "show_toasts": true,
         "minimize_on_launch": false,
@@ -167,6 +169,7 @@ pub fn default_settings_object() -> Value {
         "launcher_profiles": [default_launcher_profile()],
         "active_launcher_profile_id": "default",
         "http_proxy": "",
+        "download_source": "auto",
         "offline_debug_limit_seconds": 0,
         "launcher_version": APP_VERSION,
         "theme": "dark",
@@ -461,6 +464,11 @@ impl ConfigStore {
             settings["cloud_last_sync"] = json!(cloud_sync);
             changed = true;
         }
+        let download_source = normalize_download_source(settings["download_source"].as_str().unwrap_or(""));
+        if settings["download_source"].as_str() != Some(download_source) {
+            settings["download_source"] = json!(download_source);
+            changed = true;
+        }
         if !settings["http_proxy"].as_str().unwrap_or("").trim().is_empty() {
             let proxy = settings["http_proxy"].as_str().unwrap_or("").trim().to_owned();
             let valid = url::Url::parse(&proxy)
@@ -660,7 +668,7 @@ impl ConfigStore {
         // каталог создаётся позже, при первом обращении к game_dir(). Без
         // нестрогого резолва свежая установка не давала войти в Microsoft:
         // загрузка настроек валидировала ещё не созданную папку.
-        let path = expanded.canonicalize().unwrap_or_else(|_| {
+        let path = super::platform_support::canonical_path(&expanded).unwrap_or_else(|_| {
             if expanded.is_absolute() {
                 expanded.clone()
             } else {
@@ -1291,6 +1299,14 @@ pub fn normalize_active_catalog_id(value: &Value, catalogs: &Value) -> Value {
     }
 }
 
+fn normalize_download_source(value: &str) -> &'static str {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "official" => "official",
+        "mirror" => "mirror",
+        _ => "auto",
+    }
+}
+
 /// Запись одного ключа настроек с валидацией — общий путь для save_settings
 /// и внутренних обновлений.
 pub fn set_value_on(settings: &mut Value, key: &str, value: &Value) -> Result<(), String> {
@@ -1322,6 +1338,13 @@ pub fn set_value_on(settings: &mut Value, key: &str, value: &Value) -> Result<()
         }
         "max_downloads" => {
             value = json!(bounded_int(&value, 1, 32, 8));
+        }
+        "download_source" => {
+            let raw = value.as_str().unwrap_or("").trim().to_ascii_lowercase();
+            if !matches!(raw.as_str(), "auto" | "official" | "mirror") {
+                return Err("Источник загрузок: auto, official или mirror".to_owned());
+            }
+            value = json!(raw);
         }
         "http_proxy" => {
             let proxy = value.as_str().unwrap_or("").trim().to_owned();

@@ -3,5 +3,5 @@
   "identifier": "main-window",
   "description": "Permissions for the main Nivora Launcher window.",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": ["core:default", "updater:default", "process:default"]
 }

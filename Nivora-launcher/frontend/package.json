@@ -1,0 +1,33 @@
+{
+    "name": "nivora-launcher-frontend",
+    "private": true,
+    "version": "1.0.1",
+    "type": "module",
+    "scripts": {
+        "dev": "vite --host 127.0.0.1 --port 1420",
+        "build": "vue-tsc --noEmit && vite build",
+        "test": "node --experimental-strip-types --test tests/*.test.mjs",
+        "preview": "vite preview",
+        "tauri": "tauri",
+        "desktop:dev": "tauri dev",
+        "desktop:build": "tauri build"
+    },
+    "dependencies": {
+        "@tauri-apps/api": "^2.5.0",
+        "@tauri-apps/plugin-global-shortcut": "^2.4.1",
+        "@tauri-apps/plugin-process": "^2.0.0",
+        "@tauri-apps/plugin-updater": "^2.0.0",
+        "quickjs-emscripten": "0.25.0",
+        "vue": "^3.5.13"
+    },
+    "devDependencies": {
+        "@tauri-apps/cli": "^2.5.0",
+        "@vitejs/plugin-vue": "^5.2.1",
+        "typescript": "^5.7.3",
+        "vite": "^6.1.0",
+        "vue-tsc": "^2.2.0"
+    },
+    "allowScripts": {
+        "esbuild@0.25.12": true
+    }
+}

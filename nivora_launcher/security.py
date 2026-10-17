@@ -155,7 +155,7 @@ def normalize_security_profile(value: Any) -> str:
 def normalize_security_permissions(
     value: Any,
     *,
-    default: tuple[str, ...] = ("files:instance", "desktop:display", "desktop:audio"),
+    default: tuple[str, ...] = ("network:game", "files:instance", "desktop:display", "desktop:audio"),
 ) -> list[str]:
     raw = value if isinstance(value, (list, tuple, set)) else default
     result: list[str] = []
@@ -246,6 +246,16 @@ def prepare_process(
     if policy.profile in {"compat", "off"}:
         return command, instance_dir, dict(environment), None
     system = platform.system().lower()
+    if system == "windows" and not _windows_appcontainer_enabled(environment):
+        # В AppContainer Minecraft на реальных Windows не стартует: драйверы
+        # OpenGL, LWJGL-natives и JVM требуют доступа, которого контейнер
+        # не даёт, и процесс молча завершается. Пока песочница не доведена,
+        # клиент запускается как обычный процесс (включить обратно:
+        # NIVORA_WINDOWS_APPCONTAINER=1).
+        return command, instance_dir, dict(environment), (
+            "Песочница AppContainer на Windows отключена: Minecraft в ней не запускается. "
+            "Разрешения профиля не ограничиваются на уровне ОС."
+        )
     if policy.profile == "strict" and system not in {"linux", "windows"}:
         raise LauncherError("strict profile поддерживается только на Linux (bubblewrap) и Windows (AppContainer)")
 
@@ -374,6 +384,8 @@ def prepare_process(
     if java_root and mapped_java:
         sandbox.extend(("--ro-bind", str(java_root), "/trial-java"))
         mapped_command[0] = mapped_java
+    if java_root:
+        _append_java_system_config(sandbox, java_root)
     if not policy.network_access:
         sandbox.append("--unshare-net")
     if policy.host_file_read:
@@ -441,6 +453,11 @@ def prepare_process(
     if not policy.network_access:
         warning = (warning + " " if warning else "") + f"{policy.profile} sandbox отключил сеть; включите network:game для сетевой игры."
     return [*sandbox, *mapped_command], instance_dir, process_environment, warning
+
+
+def _windows_appcontainer_enabled(environment: Mapping[str, str]) -> bool:
+    value = environment.get("NIVORA_WINDOWS_APPCONTAINER") or os.environ.get("NIVORA_WINDOWS_APPCONTAINER", "")
+    return str(value).strip().lower() in {"1", "true", "yes"}
 
 
 def _prepare_windows_process(
@@ -713,6 +730,77 @@ def _append_minimal_etc_bindings(sandbox: list[str], cell: InstanceCell) -> None
                     sandbox.extend(("--dir", str(destination_parent)))
                     created_directories.add(destination_parent)
             sandbox.extend(("--ro-bind", str(target), f"/etc/{relative}"))
+
+
+# Дистрибутивные JDK (Debian/Ubuntu, Arch/CachyOS, Fedora) держат
+# conf/security/java.security и cacerts символьными ссылками в /etc. В песочнице
+# /etc — tmpfs, ссылки висят, и Java падает на java.security.Security: после
+# этого не работает ни DNS (InetAddressCachePolicy), ни TLS — в игре «сервер
+# не найден». Подключаем только эти конфигурации Java, read-only.
+JAVA_SYSTEM_CONFIG_PREFIXES = (
+    "/etc/java",
+    "/etc/jvm",
+    "/etc/ssl/certs/java",
+    "/etc/pki/java",
+    "/etc/pki/ca-trust/extracted",
+    "/etc/ca-certificates/extracted",
+)
+
+
+def _java_system_config_path(path: Path) -> bool:
+    value = os.path.normpath(str(path))
+    if value.startswith("/etc/java"):
+        # /etc/java-17-openjdk (Debian), /etc/java21-openjdk (Arch), /etc/java/... (Fedora)
+        return True
+    return any(value == prefix or value.startswith(prefix + "/") for prefix in JAVA_SYSTEM_CONFIG_PREFIXES)
+
+
+def _java_system_config_targets(java_root: Path, *, max_entries: int = 20000) -> list[Path]:
+    targets: set[Path] = set()
+    seen = 0
+
+    def consider(link: Path) -> None:
+        current = link
+        # Цепочка ссылок: /usr/lib/jvm/.../cacerts → /etc/pki/java/cacerts → /etc/pki/ca-trust/...
+        for _ in range(8):
+            try:
+                raw = os.readlink(current)
+            except OSError:
+                return
+            target = Path(os.path.normpath(current.parent / raw))
+            if not _java_system_config_path(target):
+                return
+            targets.add(target)
+            if not target.is_symlink():
+                return
+            current = target
+
+    for directory, dirnames, filenames in os.walk(java_root, followlinks=False):
+        for name in (*dirnames, *filenames):
+            seen += 1
+            if seen > max_entries:
+                return sorted(targets)
+            entry = Path(directory) / name
+            if entry.is_symlink():
+                consider(entry)
+    return sorted(targets)
+
+
+def _append_java_system_config(sandbox: list[str], java_root: Path) -> None:
+    mounted: list[Path] = []
+    for target in _java_system_config_targets(java_root):
+        if any(parent in mounted for parent in target.parents):
+            continue
+        try:
+            resolved = target.resolve(strict=True)
+        except (OSError, RuntimeError):
+            continue
+        if not _java_system_config_path(resolved):
+            continue
+        if not (resolved.is_file() or resolved.is_dir()):
+            continue
+        sandbox.extend(("--ro-bind", str(resolved), str(target)))
+        mounted.append(target)
 
 
 def _stage_system_file(source: Path, target: Path, staged_root: Path, *, max_bytes: int) -> bool:

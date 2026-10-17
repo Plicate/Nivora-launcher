@@ -1,0 +1,133 @@
+name: Release
+
+# Релиз с самообновлением: пуш тега v* собирает подписанные пакеты
+# Windows (NSIS/MSI) и Linux (AppImage/deb/rpm), публикует их в GitHub
+# Release и генерирует latest.json — фид встроенного апдейтера лаунчера
+# (endpoints в tauri.conf.json указывают на этот файл).
+#
+# ОБЯЗАТЕЛЬНЫЕ СЕКРЕТЫ РЕПОЗИТОРИЯ (Settings → Secrets → Actions):
+#   TAURI_SIGNING_PRIVATE_KEY          — содержимое файла приватного ключа minisign
+#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD — пароль этого ключа
+# Без них сборка выйдет неподписанной и апдейтер её отвергнет.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+        with:
+          toolchain: 1.99.0
+          build-warnings: allow
+      - name: Install backend and freezer dependencies
+        run: python -m pip install ".[windows]" pyinstaller
+      - name: Build bundled Python backend
+        run: >-
+          python -m PyInstaller --noconfirm --clean --onefile
+          --name nivora-launcher-backend --paths . --distpath dist/backend
+          --workpath build/pyinstaller-backend --specpath build/pyinstaller-backend
+          --collect-all keyring
+          --hidden-import keyring.backends.Windows
+          nivora_launcher/backend_entrypoint.py
+      - name: Smoke-test packaged CLI mode
+        shell: pwsh
+        run: |
+          & dist/backend/nivora-launcher-backend.exe --cli --help | Out-Null
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Stage backend resource
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force frontend/src-tauri/resources/backend | Out-Null
+          Copy-Item dist/backend/nivora-launcher-backend.exe frontend/src-tauri/resources/backend/
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci --no-audit --no-fund
+      - name: Generate Tauri icons
+        working-directory: frontend
+        run: npm run tauri -- icon src/assets/uni.png --output src-tauri/icons
+      - name: Build signed Windows installers and publish
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "Nivora Launcher ${{ github.ref_name }}"
+          releaseBody: "См. CHANGELOG в репозитории. Обновление доступно прямо из лаунчера: Настройки → Самообновление."
+          releaseDraft: false
+          prerelease: false
+          args: --bundles nsis,msi --locked
+
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+        with:
+          toolchain: 1.99.0
+          build-warnings: allow
+      - name: Install system dependencies (Tauri + AppImage)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libfuse2
+      - name: Install backend and freezer dependencies
+        run: python -m pip install . pyinstaller
+      - name: Build bundled Python backend
+        run: >-
+          python -m PyInstaller --noconfirm --clean --onefile
+          --name nivora-launcher-backend --paths . --distpath dist/backend
+          --workpath build/pyinstaller-backend --specpath build/pyinstaller-backend
+          nivora_launcher/backend_entrypoint.py
+      - name: Smoke-test packaged CLI mode
+        run: dist/backend/nivora-launcher-backend --cli --help > /dev/null
+      - name: Stage backend resource
+        run: |
+          mkdir -p frontend/src-tauri/resources/backend
+          cp dist/backend/nivora-launcher-backend frontend/src-tauri/resources/backend/
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci --no-audit --no-fund
+      - name: Generate Tauri icons
+        working-directory: frontend
+        run: npm run tauri -- icon src/assets/uni.png --output src-tauri/icons
+      # Автообновление на Linux работает только через AppImage:
+      # deb/rpm публикуются для ручной установки, latest.json ссылается
+      # на AppImage.
+      - name: Build signed Linux packages and publish
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "Nivora Launcher ${{ github.ref_name }}"
+          releaseBody: "См. CHANGELOG в репозитории. Обновление доступно прямо из лаунчера: Настройки → Самообновление."
+          releaseDraft: false
+          prerelease: false
+          args: --bundles appimage,deb,rpm --locked

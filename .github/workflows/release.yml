@@ -44,6 +44,7 @@ jobs:
           --workpath build/pyinstaller-backend --specpath build/pyinstaller-backend
           --collect-all keyring
           --hidden-import keyring.backends.Windows
+          --hidden-import truststore
           nivora_launcher/backend_entrypoint.py
       - name: Smoke-test packaged CLI mode
         shell: pwsh

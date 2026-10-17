@@ -20,6 +20,7 @@ from .plugin_catalogs import DEFAULT_PLUGIN_CATALOGS, normalize_plugin_catalogs
 from .platform_support import set_private_fd
 
 
+DOWNLOAD_SOURCES = frozenset({"auto", "official", "mirror"})
 DEFAULT_KEYBOARD_SHORTCUTS = {
     "open_settings": "Ctrl+,",
     "refresh": "Ctrl+R",
@@ -133,6 +134,10 @@ class Settings:
     download_timeout_seconds: int = 30
     download_retries: int = 5
     confirm_destructive_actions: bool = True
+    # Авто-починка после краша: окно с предложением и виды проблем, для
+    # которых пользователь нажал «Больше не показывать».
+    auto_repair_enabled: bool = True
+    auto_repair_muted: list[str] = field(default_factory=list)
     show_activity_panel: bool = True
     show_toasts: bool = True
     minimize_on_launch: bool = False
@@ -149,6 +154,9 @@ class Settings:
     launcher_profiles: list[dict[str, Any]] = field(default_factory=lambda: copy.deepcopy([DEFAULT_LAUNCHER_PROFILE]))
     active_launcher_profile_id: str = "default"
     http_proxy: str = ""
+    # Источник файлов Minecraft/загрузчиков: auto (официальный, при сбое —
+    # зеркало BMCLAPI), official (только официальный), mirror (сначала зеркало).
+    download_source: str = "auto"
     offline_debug_limit_seconds: int = 0
     launcher_version: str = APP_VERSION
     theme: str = "dark"
@@ -383,6 +391,12 @@ class ConfigStore:
         if settings.game_dir != normalized_game_dir:
             settings.game_dir = normalized_game_dir
             changed = True
+        download_source = str(settings.download_source or "").strip().lower()
+        if download_source not in DOWNLOAD_SOURCES:
+            download_source = "auto"
+        if settings.download_source != download_source:
+            settings.download_source = download_source
+            changed = True
         raw_cloud_url = str(settings.cloud_url or "").strip().rstrip("/")
         try:
             cloud_url = urlsplit(raw_cloud_url)
@@ -582,6 +596,10 @@ class ConfigStore:
                 value = min(32, max(1, int(value)))
             except (TypeError, ValueError) as exc:
                 raise LauncherError("max_downloads должно быть числом от 1 до 32") from exc
+        if key == "download_source":
+            value = str(value).strip().lower()
+            if value not in DOWNLOAD_SOURCES:
+                raise LauncherError("Источник загрузок: auto, official или mirror")
         if key == "http_proxy" and value.strip():
             proxy = urlsplit(value.strip())
             if proxy.scheme not in {"http", "https", "socks5", "socks5h"} or not proxy.hostname:
@@ -662,6 +680,8 @@ class ConfigStore:
                 value = {str(item_key): str(item_value) for item_key, item_value in value.items()}
         if key == "keyboard_shortcuts":
             value = _normalize_shortcuts(value)
+        if key == "auto_repair_muted":
+            value = _normalize_muted_kinds(value)
         # Язык интерфейса: null (не выбран), 'ru' или 'en'.
         if key == "language":
             if value is None:
@@ -841,6 +861,17 @@ def _behavior_values(settings: Settings) -> dict[str, Any]:
 def _apply_behavior(settings: Settings, values: dict[str, Any]) -> None:
     for key, value in values.items():
         setattr(settings, key, value)
+
+
+def _normalize_muted_kinds(value: Any) -> list[str]:
+    if not isinstance(value, (list, tuple)):
+        raise LauncherError("auto_repair_muted должен быть списком")
+    result: list[str] = []
+    for item in value[:64]:
+        kind = str(item).strip().lower()[:64]
+        if re.fullmatch(r"[a-z_]+", kind) and kind not in result:
+            result.append(kind)
+    return result
 
 
 def _normalize_shortcuts(value: Any) -> dict[str, str]:

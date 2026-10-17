@@ -16,6 +16,7 @@ use super::instances::InstanceStore;
 use super::loaders::LoaderRepository;
 use super::metadata::{maven_path, merge_version_json, library_url, VersionRepository};
 use super::net::{client_from_settings, HttpClient};
+use super::platform_support::{canonical_path, simplify_path};
 use super::runtime::{safe_process_environment, JavaRuntimeManager};
 use super::state::safe_instance_name;
 
@@ -48,7 +49,7 @@ impl MinecraftInstaller {
         let instances_root = config.game_dir()?.join("instances");
         // load_existing сравнивает канонизированные пути — корень тоже
         // канонизируем, когда он уже существует.
-        let instances_root = instances_root.canonicalize().unwrap_or(instances_root);
+        let instances_root = canonical_path(&instances_root).unwrap_or(instances_root);
         Ok(Self {
             repository: VersionRepository::new(config, Some(http.clone()))?,
             loaders: LoaderRepository::new(http.clone()),
@@ -510,24 +511,41 @@ impl MinecraftInstaller {
             // Пул как в Python: очередь работ, воркеры до max_downloads.
             let workers = self.max_workers.min(32).max(1);
             let queue = Arc::new(std::sync::Mutex::new(jobs.into_iter()));
+            // После первой ошибки остальные потоки не берут новые файлы:
+            // иначе установка «висела», докачивая тысячи assets впустую.
+            let failed = Arc::new(std::sync::atomic::AtomicBool::new(false));
             std::thread::scope(|scope| {
                 let mut handles = Vec::new();
                 for _ in 0..workers {
                     let queue = queue.clone();
+                    let failed = failed.clone();
                     let http = self.http.clone();
                     handles.push(scope.spawn(move || -> Result<(), String> {
                         loop {
-                            let job = { queue.lock().unwrap().next() };
+                            if failed.load(std::sync::atomic::Ordering::Relaxed) {
+                                return Ok(());
+                            }
+                            let job = { queue.lock().unwrap_or_else(|poison| poison.into_inner()).next() };
                             let Some(job) = job else { return Ok(()) };
-                            http.download(&job.url, &job.path, Some(&job.digest), None, None, job.size, None, None, None)?;
+                            if let Err(error) = http.download(&job.url, &job.path, Some(&job.digest), None, None, job.size, None, None, None) {
+                                failed.store(true, std::sync::atomic::Ordering::Relaxed);
+                                return Err(error);
+                            }
                         }
                     }));
                 }
                 drop(queue);
+                let mut first_error: Option<String> = None;
                 for handle in handles {
-                    handle.join().map_err(|_| "Поток загрузки assets упал".to_owned())??;
+                    let outcome = handle.join().map_err(|_| "Поток загрузки assets упал".to_owned()).and_then(|result| result);
+                    if let Err(error) = outcome {
+                        first_error.get_or_insert(error);
+                    }
                 }
-                Ok::<(), String>(())
+                match first_error {
+                    Some(error) => Err(error),
+                    None => Ok::<(), String>(()),
+                }
             })?;
         }
         let materialized = materialize_legacy_assets(instance, &assets_root, &index_name, &index, marker_data.get("materialized"))?;
@@ -689,11 +707,11 @@ impl MinecraftInstaller {
                         if is_symlink(&path) || is_symlink(&dir) {
                             continue;
                         }
-                        let resolved = match path.canonicalize() {
+                        let resolved = match canonical_path(&path) {
                             Ok(resolved) => resolved,
                             Err(_) => continue,
                         };
-                        let instance_root = base.instance_dir.canonicalize().unwrap_or_else(|_| base.instance_dir.clone());
+                        let instance_root = canonical_path(&base.instance_dir).unwrap_or_else(|_| base.instance_dir.clone());
                         if !within(&resolved, &instance_root) {
                             continue;
                         }
@@ -770,14 +788,70 @@ fn tail_text(stdout: &str, stderr: &str, limit: usize) -> String {
     }
 }
 
+/// Аргументы Forge/NeoForge installer: каталог — значение `--installClient`.
+/// Ключа `--target` у installer нет (jopt-simple падал на нём с
+/// UnrecognizedOptionException ещё до установки).
+fn loader_installer_args(installer: &Path, target: &Path) -> Vec<String> {
+    vec![
+        "-jar".to_owned(),
+        simplify_path(installer.to_path_buf()).to_string_lossy().into_owned(),
+        "--installClient".to_owned(),
+        simplify_path(target.to_path_buf()).to_string_lossy().into_owned(),
+    ]
+}
+
+/// Installer отказывается ставить клиент без launcher_profiles.json
+/// («There is no minecraft launcher profile…») — создаём пустой профиль.
+fn ensure_launcher_profiles(target: &Path) -> Result<(), String> {
+    let path = target.join("launcher_profiles.json");
+    if is_symlink(&path) {
+        return Err("launcher_profiles.json экземпляра является символьной ссылкой".to_owned());
+    }
+    if path.is_file() {
+        return Ok(());
+    }
+    fs::write(&path, "{\"profiles\":{},\"selectedProfile\":\"\",\"version\":3}\n")
+        .map_err(|error| format!("Не удалось подготовить launcher_profiles.json: {error}"))
+}
+
+/// Последние `limit` байт потока: вывод installer бывает многомегабайтным,
+/// а для ошибки нужен только хвост.
+fn read_stream_tail(mut stream: impl Read, limit: usize) -> String {
+    let mut tail: Vec<u8> = Vec::new();
+    let mut buffer = [0u8; 16 * 1024];
+    loop {
+        match stream.read(&mut buffer) {
+            Ok(0) | Err(_) => break,
+            Ok(count) => {
+                tail.extend_from_slice(&buffer[..count]);
+                if tail.len() > limit * 2 {
+                    let excess = tail.len() - limit;
+                    tail.drain(..excess);
+                }
+            }
+        }
+    }
+    if tail.len() > limit {
+        let excess = tail.len() - limit;
+        tail.drain(..excess);
+    }
+    String::from_utf8_lossy(&tail).into_owned()
+}
+
 /// forge/neoforge installer — внешний java-процесс. bwrap-песочница из
 /// security.py пока не портирована, поэтому процесс идёт в окружении
 /// compat: отдельная сессия, чистое окружение, каталог экземпляра.
+///
+/// stdout/stderr читаются в отдельных потоках с самого старта: раньше они
+/// читались только после выхода процесса, и installer, напечатавший больше
+/// буфера канала (на Windows — 4 КиБ), навсегда блокировался на записи —
+/// установка Forge/NeoForge «висела» до таймаута в 10 минут.
 fn run_loader_installer(loader: &str, java: &Path, installer: &Path, working_dir: &Path, http: &HttpClient) -> Result<ProcessOutput, String> {
     use std::process::{Command, Stdio};
-    let mut command = Command::new(java);
+    ensure_launcher_profiles(working_dir)?;
+    let mut command = Command::new(simplify_path(java.to_path_buf()));
     command
-        .args(["-jar", &installer.to_string_lossy(), "--installClient", "--target", &working_dir.to_string_lossy()])
+        .args(loader_installer_args(installer, working_dir))
         .current_dir(working_dir)
         .env_clear()
         .envs(safe_process_environment(false))
@@ -789,33 +863,45 @@ fn run_loader_installer(loader: &str, java: &Path, installer: &Path, working_dir
         use std::os::unix::process::CommandExt;
         command.process_group(0);
     }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
     let mut child = command.spawn().map_err(|error| format!("Не удалось запустить installer: {error}"))?;
+    const OUTPUT_LIMIT: usize = 256 * 1024;
+    let stdout_reader = child.stdout.take().map(|stream| std::thread::spawn(move || read_stream_tail(stream, OUTPUT_LIMIT)));
+    let stderr_reader = child.stderr.take().map(|stream| std::thread::spawn(move || read_stream_tail(stream, OUTPUT_LIMIT)));
+    let collect = |reader: Option<std::thread::JoinHandle<String>>| reader.and_then(|handle| handle.join().ok()).unwrap_or_default();
     let deadline = Instant::now() + Duration::from_secs(10 * 60);
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                let mut stdout = String::new();
-                let mut stderr = String::new();
-                if let Some(mut stream) = child.stdout.take() {
-                    let _ = stream.read_to_string(&mut stdout);
-                }
-                if let Some(mut stream) = child.stderr.take() {
-                    let _ = stream.read_to_string(&mut stderr);
-                }
+                let stdout = collect(stdout_reader);
+                let stderr = collect(stderr_reader);
                 return Ok(ProcessOutput { success: status.success(), code: status.code(), stdout, stderr });
             }
             Ok(None) => {}
-            Err(error) => return Err(format!("Не удалось запустить installer: {error}")),
-        }
-        if let Some(token) = &http.cancellation {
-            if let Err(error) = token.check() {
+            Err(error) => {
                 let _ = child.kill();
-                return Err(error);
+                let _ = child.wait();
+                return Err(format!("Не удалось запустить installer: {error}"));
             }
         }
-        if Instant::now() >= deadline {
+        let failure = if let Some(Err(error)) = http.cancellation.as_ref().map(|token| token.check()) {
+            Some(error)
+        } else if Instant::now() >= deadline {
+            Some(format!("{loader} installer превысил лимит времени"))
+        } else {
+            None
+        };
+        if let Some(error) = failure {
             let _ = child.kill();
-            return Err(format!("{loader} installer превысил лимит времени"));
+            let _ = child.wait();
+            let _ = collect(stdout_reader);
+            let _ = collect(stderr_reader);
+            return Err(error);
         }
         std::thread::sleep(Duration::from_millis(250));
     }
@@ -825,7 +911,7 @@ fn run_loader_installer(loader: &str, java: &Path, installer: &Path, working_dir
 
 fn instance_absolute(path: &Path) -> PathBuf {
     let expanded = shellexpand_home(path);
-    expanded.canonicalize().unwrap_or(expanded)
+    canonical_path(&expanded).unwrap_or(expanded)
 }
 
 fn shellexpand_home(path: &Path) -> PathBuf {
@@ -1487,7 +1573,7 @@ fn find_external_version(instance: &Path, loader: &str, loader_version: Option<&
     if is_symlink(instance) || !instance.is_dir() {
         return None;
     }
-    let instance_root = instance.canonicalize().ok()?;
+    let instance_root = canonical_path(instance).ok()?;
     let versions_dir = instance.join("versions");
     if is_symlink(&versions_dir) || !versions_dir.is_dir() {
         return None;
@@ -1519,7 +1605,7 @@ fn find_external_version(instance: &Path, loader: &str, loader_version: Option<&
             if is_symlink(&path) || is_symlink(&dir) {
                 continue;
             }
-            let Ok(resolved) = path.canonicalize() else { continue };
+            let Ok(resolved) = canonical_path(&path) else { continue };
             if !within(&resolved, &instance_root) {
                 continue;
             }
@@ -1706,6 +1792,34 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).expect("создать временный каталог");
         dir
+    }
+
+    #[test]
+    fn loader_installer_uses_install_client_directory_argument() {
+        let args = loader_installer_args(Path::new("/x/installer.jar"), Path::new("/x/instance"));
+        assert_eq!(args, vec!["-jar", "/x/installer.jar", "--installClient", "/x/instance"]);
+        assert!(!args.iter().any(|value| value == "--target"));
+    }
+
+    #[test]
+    fn launcher_profiles_is_created_once() {
+        let root = temp_root("launcher-profiles");
+        ensure_launcher_profiles(&root).unwrap();
+        let path = root.join("launcher_profiles.json");
+        let value: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(value["profiles"].is_object());
+        fs::write(&path, "{\"profiles\":{\"keep\":{}}}").unwrap();
+        ensure_launcher_profiles(&root).unwrap();
+        assert!(fs::read_to_string(&path).unwrap().contains("keep"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn stream_tail_keeps_only_last_bytes() {
+        let data = vec![b'a'; 100_000].into_iter().chain(b"END".iter().copied()).collect::<Vec<u8>>();
+        let tail = read_stream_tail(std::io::Cursor::new(data), 10);
+        assert_eq!(tail.len(), 10);
+        assert!(tail.ends_with("END"));
     }
 
     #[test]

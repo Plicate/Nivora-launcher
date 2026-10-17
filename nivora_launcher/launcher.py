@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import codecs
 import json
 import os
 import platform
@@ -116,6 +117,80 @@ def _looks_like_non_nvidia_renderer(line: str) -> bool:
     return bool(vendor and "nvidia" not in vendor.group(1).lower())
 
 
+def _windows_short_path(path: str) -> str:
+    """8.3-имя существующего пути (ASCII); пустая строка, если недоступно."""
+    if os.name != "nt":
+        return ""
+    try:
+        import ctypes
+
+        get_short = ctypes.windll.kernel32.GetShortPathNameW  # type: ignore[attr-defined]
+        size = get_short(path, None, 0)
+        if not size:
+            return ""
+        buffer = ctypes.create_unicode_buffer(size)
+        return buffer.value if get_short(path, buffer, size) else ""
+    except (AttributeError, OSError, ValueError):
+        return ""
+
+
+def _encodable(value: str, encoding: str) -> bool:
+    try:
+        value.encode(encoding, "strict")
+        return True
+    except (UnicodeEncodeError, LookupError):
+        return False
+
+
+def _windows_ansi_argument(value: str, encoding: str, short_path: Callable[[str], str] = _windows_short_path) -> str:
+    """Привести аргумент к системной ANSI-кодировке Windows.
+
+    java.exe на Windows получает argv и читает @argfile в ANSI-кодировке
+    (cp1251, cp1252…), а не в UTF-8. Пути с символами вне этой кодировки
+    (например, иероглифы в имени пользователя на русской Windows) заменяются
+    короткими 8.3-именами, которые всегда ASCII.
+    """
+    if _encodable(value, encoding):
+        return value
+    pieces: list[str] = []
+    for piece in value.split(";"):
+        if _encodable(piece, encoding):
+            pieces.append(piece)
+            continue
+        prefix, path = "", piece
+        if piece.startswith("-") and "=" in piece:
+            prefix, path = piece.split("=", 1)
+            prefix += "="
+        shortened = short_path(path) if path else ""
+        if not shortened or not _encodable(shortened, encoding):
+            raise LauncherError(
+                "Путь содержит символы, которые Java на Windows не может прочитать в системной кодировке "
+                f"({encoding}): {path}. Перенесите папку игры в путь из латинских букв "
+                "(Настройки → Папка игры) или включите в Windows «Бета: UTF-8 для всех языков»."
+            )
+        pieces.append(prefix + shortened)
+    return ";".join(pieces)
+
+
+def _windows_ansi_command(command: list[str], encoding: str = "", short_path: Callable[[str], str] = _windows_short_path) -> list[str]:
+    encoding = encoding or _windows_ansi_encoding()
+    return [_windows_ansi_argument(value, encoding, short_path) for value in command]
+
+
+def _windows_ansi_encoding() -> str:
+    # «mbcs» — текущая ANSI-кодовая страница Windows; вне Windows кодека нет.
+    try:
+        codecs.lookup("mbcs")
+        return "mbcs"
+    except LookupError:
+        return "utf-8"
+
+
+def _argument_file_encoding() -> str:
+    # Java читает @argfile в той же кодировке, что и argv: на Windows — ANSI.
+    return _windows_ansi_encoding() if os.name == "nt" else "utf-8"
+
+
 def _create_java_argument_file(
     arguments: list[str],
     instance_dir: Path,
@@ -153,8 +228,15 @@ def _create_java_argument_file(
     fd, path = tempfile.mkstemp(prefix=".java-args-", dir=arguments_dir)
     try:
         set_private_fd(fd)
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        with os.fdopen(fd, "w", encoding=_argument_file_encoding(), errors="strict") as handle:
             handle.write(content)
+    except UnicodeEncodeError as exc:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        Path(path).unlink(missing_ok=True)
+        raise LauncherError("Аргументы Java содержат символы вне системной кодировки Windows") from exc
     except BaseException:
         try:
             os.close(fd)
@@ -171,6 +253,21 @@ def _create_launcher_java_argument_file(arguments: list[str], instance_dir: Path
     if os.name == "nt":
         return _create_java_argument_file(arguments, instance_dir, private_directory=data_home)
     return _create_java_argument_file(arguments, instance_dir)
+
+
+def _should_use_argument_file(has_token: bool, java_major: int | None) -> bool:
+    """Передавать ли аргументы Java через @argfile.
+
+    - Java 8 (Forge 1.12–1.16 и старше) не знает @argfile и пытается
+      запустить класс «@путь» — для неё аргументы идут напрямую.
+    - Microsoft-токен не должен попадать в командную строку процесса.
+    - Windows ограничивает командную строку 32 767 символами, а classpath
+      и module path Forge/NeoForge в длинной папке профиля его превышают:
+      CreateProcess падает с WinError 206 и модлоадер «просто не запускается».
+    """
+    if java_major is not None and java_major < 9:
+        return False
+    return has_token or os.name == "nt"
 
 
 def _materialize_auth_token(command: list[str], access_token: str) -> list[str]:
@@ -350,6 +447,8 @@ class GameLauncher:
             raise LauncherError("Ограничение автономного аккаунта исчерпано. Используйте Microsoft-авторизацию.")
         launch_settings = settings or {}
         command = _materialize_auth_token(self.build_command(install, account, launch_settings), account.access_token)
+        if os.name == "nt":
+            command = _windows_ansi_command(command)
         original_command = command
         if dry_run:
             emit(shlex.join(_redact_command(command, {account.access_token, _AUTH_TOKEN_PLACEHOLDER})))
@@ -427,6 +526,13 @@ class GameLauncher:
                         f"{required_java_major} из метаданных версии; совместимость не гарантирована."
                     )
             event(java_line)
+        has_token = account.kind == "microsoft" and bool(account.access_token)
+        argument_file_java = actual_java_major
+        if argument_file_java is None and (has_token or os.name == "nt"):
+            argument_file_java = java_version(Path(command[0]))
+        use_argument_file = _should_use_argument_file(has_token, argument_file_java)
+        if has_token and not use_argument_file:
+            event("Java 8 не поддерживает файлы аргументов (@argfile): параметры передаются напрямую.")
         captured: list[str] = []
         return_code: int | None = None
         wrong_nvidia_renderer = False
@@ -551,7 +657,7 @@ class GameLauncher:
                             install.instance_dir,
                             self.config.paths.data_home,
                         )
-                        if account.kind == "microsoft" and account.access_token
+                        if use_argument_file
                         else None
                     )
                     if java_argument_file:
@@ -578,7 +684,7 @@ class GameLauncher:
                 f"session={environment.get('XDG_SESSION_TYPE', 'unknown')}, "
                 f"legacy_lwjgl={'yes' if _is_legacy_version(install.version_id) else 'no'}"
             )
-            if not java_argument_file and account.kind == "microsoft" and account.access_token:
+            if not java_argument_file and use_argument_file:
                 java_argument_file = _create_launcher_java_argument_file(
                     command[1:],
                     install.instance_dir,

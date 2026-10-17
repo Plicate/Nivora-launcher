@@ -183,7 +183,10 @@ def _normalize_profile_entries(profile_data: dict[str, Any]) -> None:
             if key == "capes" and alias and not name:
                 entry["name"] = alias
             normalized.append(entry)
-        if normalized and active_index is None:
+        # Плащ может быть не надет вовсе (все INACTIVE) — тогда ничего не
+        # «надеваем» за пользователя; угадываем только если API не прислал state.
+        states_reported = any(str(item.get("state", "")).strip() for item in normalized)
+        if normalized and active_index is None and (key == "skins" or not states_reported):
             normalized[0]["state"] = "ACTIVE"
         profile_data[key] = normalized
 
@@ -197,9 +200,12 @@ def _hydrate_profile_images(http: HttpClient, profile_data: dict[str, Any]) -> N
         for entry in entries:
             if not isinstance(entry, dict):
                 continue
-            url = str(entry.get("url", "")).strip()
+            url = _secure_texture_url(str(entry.get("url", "")).strip())
             if not url:
                 continue
+            # Даже если загрузка не удастся, интерфейс получит https-адрес:
+            # http:// блокируется CSP, и превью оставалось без текстуры.
+            entry["url"] = url
             try:
                 content = http.request(url, max_bytes=4 * 1024 * 1024)
                 if key == "skins":
@@ -209,6 +215,15 @@ def _hydrate_profile_images(http: HttpClient, profile_data: dict[str, Any]) -> N
             except (LauncherError, OSError):
                 continue
             entry["url"] = f"data:image/png;base64,{base64.b64encode(content).decode('ascii')}"
+
+
+def _secure_texture_url(url: str) -> str:
+    """Minecraft Services отдаёт текстуры как http://textures.minecraft.net/…;
+    HttpClient разрешает только HTTPS, поэтому скины и плащи не загружались."""
+    lowered = url.lower()
+    if lowered.startswith("http://textures.minecraft.net/") or lowered.startswith("http://textures.mojang.com/"):
+        return "https://" + url[len("http://"):]
+    return url
 
 
 def apply_cape(http: HttpClient, account: Account, cape_id: str) -> None:

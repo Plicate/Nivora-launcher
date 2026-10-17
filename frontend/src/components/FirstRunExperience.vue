@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import Icon from './Icon.vue'
+import { nicknameError } from '../services/nickname'
 import launcherLogo from '../assets/uni.png'
 import type { AccountInfo, ThemeMode } from '../types'
 import { FIRST_RUN_SETUP_STAGES, type FirstRunPhase } from '../services/firstRunExperience'
@@ -91,6 +92,12 @@ const tourSteps = [
 const phaseIndex = computed(() => setupSteps.findIndex((step) => step.phase === props.phase))
 const activeTourIndex = ref(0)
 const offlineName = ref('Player')
+const offlineNameError = computed(() => (offlineName.value ? nicknameError(offlineName.value) : ''))
+
+function submitOffline() {
+  if (props.busy || nicknameError(offlineName.value)) return
+  emit('add-offline', offlineName.value)
+}
 const gameDirectoryDraft = ref(props.gameDirectory)
 const memoryDraft = ref(Math.max(1, Math.floor(props.memoryGib || props.recommendedMemoryGib || 4)))
 const themeDraft = ref<ThemeMode>(props.theme || 'system')
@@ -297,14 +304,16 @@ onBeforeUnmount(() => {
               </button>
               <div class="first-run-offline-box">
                 <div class="first-run-offline-heading"><span class="first-run-option-icon"><Icon name="user" :size="17" /></span><span><strong>Локальный профиль</strong><small>Для одиночной игры; сервисы Microsoft не подключаются.</small></span></div>
-                <div class="first-run-offline-actions"><input v-model="offlineName" type="text" maxlength="16" autocomplete="nickname" aria-label="Имя локального профиля" placeholder="Например, Player" @keydown.enter.prevent="emit('add-offline', offlineName.trim())" /><button class="button button--outline" type="button" :disabled="busy || !offlineName.trim()" @click="emit('add-offline', offlineName.trim())">Создать</button></div>
+                <div class="first-run-offline-actions"><input v-model="offlineName" type="text" maxlength="16" autocomplete="nickname" aria-label="Имя локального профиля" placeholder="Например, Player" spellcheck="false" :aria-invalid="Boolean(offlineNameError)" :class="{ 'input--invalid': offlineNameError }" @keydown.enter.prevent="submitOffline" /><button class="button button--outline" type="button" :disabled="busy || Boolean(nicknameError(offlineName))" @click="submitOffline">Создать</button></div>
+                <p v-if="offlineNameError" class="inline-error first-run-nickname-error" role="alert">{{ offlineNameError }}</p>
               </div>
             </div>
 
             <div v-if="accounts.length" class="first-run-account-add">
               <button class="button button--quiet" type="button" :disabled="busy || !microsoftLoginAvailable" @click="emit('add-microsoft')"><Icon name="plus" :size="14" />Добавить Microsoft-аккаунт</button>
               <span class="first-run-or">или</span>
-              <div class="first-run-offline-actions"><input v-model="offlineName" type="text" maxlength="16" autocomplete="nickname" aria-label="Имя нового локального профиля" placeholder="Имя локального профиля" @keydown.enter.prevent="emit('add-offline', offlineName.trim())" /><button class="button button--small button--outline" type="button" :disabled="busy || !offlineName.trim()" @click="emit('add-offline', offlineName.trim())">Создать</button></div>
+              <div class="first-run-offline-actions"><input v-model="offlineName" type="text" maxlength="16" autocomplete="nickname" aria-label="Имя нового локального профиля" placeholder="Имя локального профиля" spellcheck="false" :aria-invalid="Boolean(offlineNameError)" :class="{ 'input--invalid': offlineNameError }" @keydown.enter.prevent="submitOffline" /><button class="button button--small button--outline" type="button" :disabled="busy || Boolean(nicknameError(offlineName))" @click="submitOffline">Создать</button></div>
+              <p v-if="offlineNameError" class="inline-error first-run-nickname-error" role="alert">{{ offlineNameError }}</p>
             </div>
 
             <div v-if="error" class="first-run-error" role="alert"><Icon name="warning" :size="15" />{{ error }}</div>

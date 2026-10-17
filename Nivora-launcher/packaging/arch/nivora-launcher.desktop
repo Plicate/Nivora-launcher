@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Nivora Launcher
+Comment=Universal Minecraft launcher
+TryExec=nivora-launcher
+Exec=nivora-launcher
+Terminal=false
+Categories=Game;

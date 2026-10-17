@@ -79,6 +79,7 @@ BEDROCK_SNAPSHOT_CATEGORIES = {
     "worlds": "minecraftWorlds",
 }
 from .crash_reports import analyze_crash
+from .auto_repair import RepairContext, apply_fixes, diagnose as diagnose_repairs, issue_kinds_public, normalize_muted, pick_loader_version, record_launch_result
 from .settings_profiles import (
     apply_profile as apply_settings_profile,
     save_profile as save_settings_profile,
@@ -93,12 +94,14 @@ from .themes import GitHubThemeCatalog, ThemeStore
 _MAX_SESSION_LOG_LINES = 500
 _SESSION_LOGS: dict[str, deque[str]] = {}
 _SESSION_RUNNING: dict[str, bool] = {}
+_SESSION_STARTED: dict[str, float] = {}
 _INSTANCE_METRIC_TRACKERS: dict[str, ProcessMetricsTracker] = {}
 
 
 def _session_start(instance_name: str) -> None:
     _SESSION_LOGS[instance_name] = deque(maxlen=_MAX_SESSION_LOG_LINES)
     _SESSION_RUNNING[instance_name] = True
+    _SESSION_STARTED[instance_name] = time.time()
 
 
 def _session_append(instance_name: str, line: str) -> None:
@@ -248,6 +251,9 @@ def _settings_public(config: ConfigStore) -> dict[str, Any]:
         "download_timeout_seconds": settings.download_timeout_seconds,
         "download_retries": settings.download_retries,
         "confirm_destructive_actions": settings.confirm_destructive_actions,
+        "auto_repair_enabled": settings.auto_repair_enabled,
+        "auto_repair_muted": list(settings.auto_repair_muted),
+        "auto_repair_kinds": issue_kinds_public(),
         "show_activity_panel": settings.show_activity_panel,
         "show_toasts": settings.show_toasts,
         "minimize_on_launch": settings.minimize_on_launch,
@@ -261,6 +267,7 @@ def _settings_public(config: ConfigStore) -> dict[str, Any]:
         "launcher_profiles": settings.launcher_profiles,
         "active_launcher_profile_id": settings.active_launcher_profile_id,
         "http_proxy": settings.http_proxy,
+        "download_source": settings.download_source,
         "has_client_id": bool(settings.client_id),
         "developer_mode": settings.developer_mode,
         "theme": settings.theme,
@@ -442,6 +449,8 @@ def _context(
         endpoint = parsed.path.rsplit("/", 1)[-1] or "/"
         if event == "retry":
             message = f"Сеть: повторяю {host}{endpoint} (попытка {attempt + 1})"
+        elif event == "mirror":
+            message = f"Сеть: загружаю через зеркало {host}"
         elif event == "download":
             message = f"Загрузка: {host}{endpoint} (попытка {attempt})"
         else:
@@ -455,6 +464,7 @@ def _context(
         request_observer=observe_request if emit else None,
         proxy=config.settings.http_proxy,
         cancellation=cancellation,
+        download_source=config.settings.download_source,
     )
     accounts = AccountStore(config)
     repository = VersionRepository(config, http)
@@ -810,6 +820,8 @@ def _handle(request: dict[str, Any], emit: Callable[[dict[str, Any]], None] | No
             "download_timeout_seconds",
             "download_retries",
             "confirm_destructive_actions",
+            "auto_repair_enabled",
+            "auto_repair_muted",
             "show_activity_panel",
             "show_toasts",
             "minimize_on_launch",
@@ -824,6 +836,7 @@ def _handle(request: dict[str, Any], emit: Callable[[dict[str, Any]], None] | No
             "launcher_profiles",
             "active_launcher_profile_id",
             "http_proxy",
+            "download_source",
             "client_id",
             "developer_mode",
             "theme",
@@ -866,7 +879,7 @@ def _handle(request: dict[str, Any], emit: Callable[[dict[str, Any]], None] | No
             "cloud_remote_path",
             "cloud_include_accounts",
         }
-        structured = {"page_themes", "page_layouts", "widget_visibility", "color_tokens", "radius_tokens", "instance_groups", "pinned_instance_groups", "resource_catalogs", "plugin_catalogs", "keyboard_shortcuts", "launcher_profiles", "animation_settings", "overlay_settings", "backup_schedule"}
+        structured = {"page_themes", "page_layouts", "widget_visibility", "color_tokens", "radius_tokens", "instance_groups", "pinned_instance_groups", "resource_catalogs", "plugin_catalogs", "keyboard_shortcuts", "launcher_profiles", "animation_settings", "overlay_settings", "backup_schedule", "auto_repair_muted"}
         normalized_values = {
             # language: null — валидное значение («язык не выбран»), str(None)
             # его бы испортил.
@@ -2428,6 +2441,57 @@ def _handle(request: dict[str, Any], emit: Callable[[dict[str, Any]], None] | No
         scoped_emit({"kind": "status", "event": "workspace-changed", "message": "Состояние мода обновлено."})
         return result
 
+    if operation in {"world_import_begin", "world_import_chunk", "world_import_finish", "world_import_cancel"}:
+        from . import world_import
+
+        name = str(request.get("name", "")).strip()
+        info = workspace._java_instance(name)
+        if bool(getattr(info, "running", False)) and operation != "world_import_cancel":
+            raise LauncherError("Остановите игру перед импортом мира")
+        if operation == "world_import_begin":
+            upload_id = world_import.begin(info.path, str(request.get("kind", "")), str(request.get("label", "")))
+            return {"upload_id": upload_id, "chunk_bytes": 8 * 1024 * 1024}
+        upload_id = str(request.get("upload_id", ""))
+        if operation == "world_import_chunk":
+            encoded = str(request.get("data", ""))
+            if len(encoded) > 48 * 1024 * 1024:
+                raise LauncherError("Слишком большой фрагмент загрузки")
+            try:
+                content = base64.b64decode(encoded, validate=True)
+            except (ValueError, TypeError) as exc:
+                raise LauncherError("Фрагмент мира повреждён") from exc
+            try:
+                offset = int(request.get("offset", 0))
+            except (TypeError, ValueError) as exc:
+                raise LauncherError("Некорректное смещение фрагмента") from exc
+            return world_import.chunk(info.path, upload_id, str(request.get("path", "")), content, offset)
+        if operation == "world_import_cancel":
+            world_import.cancel(info.path, upload_id)
+            return {"cancelled": True}
+        imported = world_import.finish(info.path, upload_id)
+        scoped_emit({"kind": "status", "event": "workspace-changed", "message": f"Импортировано миров: {len(imported)}."})
+        return {"imported": imported, "details": workspace.snapshot(info.name)}
+
+    if operation == "mods_remove_files":
+        name = str(request.get("name", "")).strip()
+        info = workspace._java_instance(name)
+        if bool(getattr(info, "running", False)):
+            raise LauncherError("Остановите игру перед удалением модов")
+        paths = request.get("paths")
+        if not isinstance(paths, list) or not paths:
+            raise LauncherError("Не выбрано ни одного мода")
+        removed: list[str] = []
+        failed: list[dict[str, str]] = []
+        for value in paths[:2000]:
+            relative = str(value)
+            try:
+                workspace.remove_asset(name, "mods", relative)
+                removed.append(relative)
+            except LauncherError as exc:
+                failed.append({"path": relative, "error": str(exc)})
+        scoped_emit({"kind": "status", "event": "workspace-changed", "message": f"Удалено модов: {len(removed)}."})
+        return {"removed": removed, "failed": failed, "details": workspace.snapshot(name)}
+
     if operation == "import_asset":
         encoded = str(request.get("data", ""))
         if len(encoded) > 360 * 1024 * 1024:
@@ -2591,8 +2655,13 @@ def _handle(request: dict[str, Any], emit: Callable[[dict[str, Any]], None] | No
                 minecraft_version=getattr(info, "minecraft_version", "") if info is not None else "",
                 loader=getattr(info, "loader", "") if info is not None else "",
             )
+        repair = None
+        if instance_name:
+            record_launch_result(info.path, exit_code)
+            if exit_code != 0:
+                repair = _auto_repair_report(config, workspace, info, lines, exit_code, launch_settings, since=_SESSION_STARTED.get(session_name, 0.0), account_id=str(getattr(account, "account_id", "")))
         scoped_emit({"kind": "status", "event": "operation-finished", "message": f"Игра завершила работу (код {exit_code})."})
-        return {"exit_code": exit_code, "logs": lines[-_MAX_SESSION_LOG_LINES:], "version_id": result.version_id, "crash": crash}
+        return {"exit_code": exit_code, "logs": lines[-_MAX_SESSION_LOG_LINES:], "version_id": result.version_id, "crash": crash, "repair": repair}
 
     if operation == "launch_instance":
         name = str(request.get("name", ""))
@@ -2647,6 +2716,9 @@ def _handle(request: dict[str, Any], emit: Callable[[dict[str, Any]], None] | No
             scoped_emit({"kind": "status", "event": "operation-finished", "message": "Запуск остановлен или завершился с ошибкой."})
             raise
         _session_finish(name)
+        record_launch_result(info.path, exit_code)
+        crash_existing: dict[str, Any] | None = None
+        repair_existing: dict[str, Any] | None = None
         if exit_code != 0:
             _emit_telemetry_report(
                 config,
@@ -2657,8 +2729,134 @@ def _handle(request: dict[str, Any], emit: Callable[[dict[str, Any]], None] | No
                 message=f"Minecraft exited with code {exit_code}",
                 logs=lines,
             )
+            crash_existing = analyze_crash(
+                lines,
+                exit_code,
+                instance_path=info.path,
+                memory=str(launch_settings.get("memory", "")),
+                minecraft_version=str(getattr(info, "minecraft_version", "")),
+                loader=str(getattr(info, "loader", "")),
+            )
+            repair_existing = _auto_repair_report(config, workspace, info, lines, exit_code, launch_settings, since=_SESSION_STARTED.get(name, 0.0), account_id=str(getattr(account, "account_id", "")))
         scoped_emit({"kind": "status", "event": "operation-finished", "message": f"Игра завершила работу (код {exit_code})."})
-        return {"exit_code": exit_code, "logs": lines[-_MAX_SESSION_LOG_LINES:], "version_id": result.version_id}
+        return {
+            "exit_code": exit_code,
+            "logs": lines[-_MAX_SESSION_LOG_LINES:],
+            "version_id": result.version_id,
+            "crash": crash_existing,
+            "repair": repair_existing,
+        }
+
+    if operation == "auto_repair_diagnose":
+        name = str(request.get("instance_name", "")).strip()
+        if not name:
+            raise LauncherError("Сначала выберите экземпляр")
+        manual = bool(request.get("manual", False))
+        if not manual and not config.settings.auto_repair_enabled:
+            return {"instance_name": name, "issues": [], "muted_issues": [], "disabled": True}
+        info = instances.get(name)
+        lines, running = _session_snapshot(info.name)
+        if running:
+            raise LauncherError("Экземпляр ещё запущен — диагностика будет доступна после выхода из игры")
+        raw_exit = request.get("exit_code")
+        try:
+            exit_code = int(raw_exit) if raw_exit is not None else None
+        except (TypeError, ValueError):
+            exit_code = None
+        try:
+            launch_settings = _effective_launch_settings(workspace, config, info.name, {})
+        except LauncherError:
+            launch_settings = {}
+        report = _auto_repair_report(
+            config,
+            workspace,
+            info,
+            lines if (exit_code is not None or request.get("error")) else [],
+            exit_code,
+            launch_settings,
+            error=str(request.get("error", ""))[:4000],
+            since=_SESSION_STARTED.get(info.name, 0.0),
+            manual=manual,
+        )
+        if report is None:
+            raise LauncherError("Авто-починка доступна только для клиентских Java-экземпляров")
+        return report
+
+    if operation == "auto_repair_apply":
+        name = str(request.get("instance_name", "")).strip()
+        if not name:
+            raise LauncherError("Сначала выберите экземпляр")
+        info = instances.get(name)
+        if str(getattr(info, "kind", "client")).strip().lower() != "client" or str(getattr(info, "game_edition", "java")).strip().lower() != "java":
+            raise LauncherError("Авто-починка доступна только для клиентских Java-экземпляров")
+        if bool(getattr(info, "running", False)):
+            raise LauncherError("Остановите экземпляр перед починкой")
+        fixes = request.get("fixes")
+        if not isinstance(fixes, list):
+            raise LauncherError("Не выбрано ни одной починки")
+
+        def repair_version() -> None:
+            loader = str(getattr(info, "loader", "vanilla")).strip().lower() or "vanilla"
+            minecraft_version = str(getattr(info, "minecraft_version", "")).strip()
+            if not minecraft_version:
+                raise LauncherError(f"У экземпляра «{info.name}» не определена версия Minecraft")
+            installer.repair_version(
+                info.path,
+                minecraft_version,
+                loader=loader,
+                loader_version=_instance_loader_version(info) or None,
+                version_id=str(getattr(info, "version_id", "")).strip() or None,
+            )
+
+        def install_mod(project_id: str) -> None:
+            game_version, loader = _instance_mod_context(info)
+            catalog = next((item for item in config.settings.resource_catalogs if item.get("kind") == "modrinth"), None)
+            if not catalog:
+                raise LauncherError("Каталог Modrinth не настроен")
+            provider = ModrinthProvider(http, catalog["api_url"], catalog_id=catalog["id"])
+            provider.install(project_id, info.path, game_version, loader, project_type="mod")
+
+        def update_loader(minimum: str) -> str:
+            return _update_instance_loader(installer, info, minimum)
+
+        def set_account(account_id: str) -> str:
+            account = accounts.set_default(account_id)
+            config.set_value("default_account_id", account.account_id)
+            return account.alias or account.username or account.account_id
+
+        context = RepairContext(
+            instance_name=info.name,
+            instance_path=info.path,
+            save_settings=lambda values: workspace.save_settings(info.name, values),
+            settings=lambda: workspace.settings(info.name),
+            toggle_mod=lambda file_name: workspace.toggle_mod(info.name, file_name, False),
+            repair_version=repair_version,
+            install_mod=install_mod,
+            update_loader=update_loader,
+            set_account=set_account,
+        )
+        process_lock = InstanceProcessLock(config.paths.data_home, info.name)
+        process_lock.acquire()
+        try:
+            results = apply_fixes(context, fixes)
+        finally:
+            process_lock.release()
+        scoped_emit({"kind": "status", "event": "workspace-changed", "message": "Авто-починка применена."})
+        return {
+            "instance_name": info.name,
+            "results": results,
+            "instances": [_instance_public(value) for value in instances.list()],
+        }
+
+    if operation == "auto_repair_mute":
+        kinds = normalize_muted(request.get("kinds"))
+        muted = list(config.settings.auto_repair_muted)
+        if bool(request.get("muted", True)):
+            muted.extend(kind for kind in kinds if kind not in muted)
+        else:
+            muted = [kind for kind in muted if kind not in kinds]
+        config.set_value("auto_repair_muted", muted)
+        return {"settings": _settings_public(config)}
 
     if operation == "open_folder":
         launcher.open_folder(Path(str(request.get("path", ""))).expanduser() if request.get("path") else None)
@@ -2805,6 +3003,17 @@ def _handle(request: dict[str, Any], emit: Callable[[dict[str, Any]], None] | No
             info = None
             instance_name = ""
         project_type = str(request.get("project_type", "mod")).strip().lower()
+        # Постраничный каталог: page с нуля, limit — размер страницы.
+        try:
+            page = max(0, min(500, int(request.get("page", 0) or 0)))
+            page_size = max(1, min(30, int(request.get("limit", 12))))
+        except (TypeError, ValueError) as exc:
+            raise LauncherError("Номер страницы каталога должен быть числом") from exc
+        offset = page * page_size
+        # У каталогов без смещения забираем начало выдачи и режем локально.
+        local_window = min(30, offset + page_size)
+        total: int | None = None
+        local_sliced = False
         if info is not None:
             instance_kind = str(getattr(info, "kind", "client")).strip().lower()
             if project_type == "plugin" and instance_kind != "server":
@@ -2828,22 +3037,23 @@ def _handle(request: dict[str, Any], emit: Callable[[dict[str, Any]], None] | No
                     str(request.get("query", "")),
                     core,
                     game_version,
-                    max(1, min(30, int(request.get("limit", 12)))),
+                    local_window if page else page_size,
                     sort_by=str(request.get("sort_by", "relevance")),
                 )
             ]
+            local_sliced = True
         else:
             catalog = _resource_catalog(config, str(request.get("catalog_id", "")))
         if project_type == "modpack":
             provider = ModpackProvider(http, catalog)
-            values = [
-                item.as_dict()
-                for item in provider.search(
-                    str(request.get("query", "")),
-                    game_version,
-                    max(1, min(30, int(request.get("limit", 12)))),
-                )
-            ]
+            native_offset = str(catalog.get("kind", "modrinth")).strip().lower() == "modrinth"
+            if page and native_offset:
+                found = provider.search(str(request.get("query", "")), game_version, page_size, offset=offset)
+            else:
+                found = provider.search(str(request.get("query", "")), game_version, local_window if page else page_size)
+                local_sliced = not native_offset
+            values = [item.as_dict() for item in found]
+            total = getattr(provider, "last_total", None) if native_offset else None
             values = _sort_project_results(values, str(request.get("sort_by", "relevance")))
         elif project_type != "plugin":
             if catalog.get("kind") in {"ftb", "technic"}:
@@ -2853,10 +3063,20 @@ def _handle(request: dict[str, Any], emit: Callable[[dict[str, Any]], None] | No
                 str(request.get("query", "")),
                 game_version,
                 loader,
-                max(1, min(30, int(request.get("limit", 12)))),
+                page_size,
                 project_type=project_type,
                 sort_by=str(request.get("sort_by", "relevance")),
+                **({"offset": offset} if offset else {}),
             )
+            total = getattr(provider, "last_total", None)
+        if local_sliced:
+            fetched = len(values)
+            values = values[offset : offset + page_size] if page else values
+            has_more = fetched >= local_window and offset + page_size < 30
+        elif isinstance(total, int):
+            has_more = offset + len(values) < total
+        else:
+            has_more = len(values) >= page_size
         installed = (
             workspace.installed_projects(instance_name, project_type, catalog_id=str(catalog["id"]))
             if instance_name and project_type != "plugin"
@@ -2888,6 +3108,10 @@ def _handle(request: dict[str, Any], emit: Callable[[dict[str, Any]], None] | No
         ]
         return {
             "results": values,
+            "page": page,
+            "page_size": page_size,
+            "total": total if isinstance(total, int) else None,
+            "has_more": bool(has_more),
             "instance_name": instance_name,
             "game_version": game_version,
             "loader": loader or "vanilla",
@@ -3581,6 +3805,109 @@ def _instance_loader_version(info: Any) -> str:
             version = version[len(game_prefix) :]
         return version
     return ""
+
+
+def _update_instance_loader(installer: Any, info: Any, minimum: str = "") -> str:
+    """Поставить новейшую стабильную версию загрузчика (не ниже ``minimum``).
+
+    Новая версия ставится рядом со старой; старый каталог версии удаляется
+    только после успешной установки — экземпляр подхватывает самый свежий
+    version JSON, поэтому прервавшаяся установка ничего не ломает.
+    """
+    loader = str(getattr(info, "loader", "vanilla")).strip().lower()
+    if loader not in {"fabric", "quilt", "forge", "neoforge"}:
+        raise LauncherError("У экземпляра нет модлоадера, который можно обновить")
+    minecraft_version = str(getattr(info, "minecraft_version", "")).strip()
+    if not minecraft_version:
+        raise LauncherError(f"У экземпляра «{info.name}» не определена версия Minecraft")
+    choices = [choice.version for choice in installer.loaders.choices(loader, minecraft_version)]
+    target = pick_loader_version(choices, minimum)
+    if not target:
+        raise LauncherError(
+            f"Для Minecraft {minecraft_version} нет версии {loader} "
+            + (f"{minimum} или новее" if minimum else "в каталоге загрузчика")
+        )
+    old_version_id = str(getattr(info, "version_id", "")).strip()
+    result = installer.install(
+        minecraft_version,
+        loader=loader,
+        loader_version=target,
+        instance_name=info.name,
+        assets=False,
+        replace_existing=False,
+    )
+    new_version_id = str(result.version_id)
+    if old_version_id and old_version_id not in {new_version_id, minecraft_version} and re.fullmatch(r"[A-Za-z0-9._+-]+", old_version_id):
+        old_dir = Path(info.path) / "versions" / old_version_id
+        try:
+            if old_dir.is_dir() and not old_dir.is_symlink():
+                shutil.rmtree(old_dir)
+        except OSError:
+            pass
+    return target
+
+
+def _auto_repair_report(
+    config: ConfigStore,
+    workspace: InstanceWorkspace,
+    info: Any,
+    lines: list[str],
+    exit_code: int | None,
+    launch_settings: dict[str, Any],
+    *,
+    error: str = "",
+    since: float = 0.0,
+    manual: bool = False,
+    account_id: str = "",
+) -> dict[str, Any] | None:
+    """Предложения авто-починки; ``None`` — окно показывать не нужно.
+
+    Сбой самой диагностики не должен портить результат запуска, поэтому
+    любые ошибки здесь глушатся (кроме ручного вызова — там их видно).
+    """
+    if info is None or (not manual and not config.settings.auto_repair_enabled):
+        return None
+    if str(getattr(info, "kind", "client")).lower() != "client" or str(getattr(info, "game_edition", "java")).lower() != "java":
+        return None
+    try:
+        try:
+            instance_settings = workspace.settings(info.name)
+        except LauncherError:
+            instance_settings = {}
+        try:
+            # Только JSON со списком: токены из системного хранилища не нужны.
+            account_records = [
+                {key: item.get(key) for key in ("account_id", "kind", "username", "alias", "is_default")}
+                for item in AccountStore(config)._read()
+            ]
+        except LauncherError:
+            account_records = []
+        if not account_id:
+            account_id = str(launch_settings.get("account_id", "") or "").strip()
+            if account_id.lower() in {"", "auto", "microsoft", "offline"}:
+                account_id = str(getattr(config.settings, "default_account_id", "") or "")
+        report = diagnose_repairs(
+            lines,
+            exit_code,
+            instance_path=Path(info.path),
+            instance_settings=instance_settings,
+            effective_memory=str(launch_settings.get("memory", "")),
+            loader=str(getattr(info, "loader", "")),
+            minecraft_version=str(getattr(info, "minecraft_version", "")),
+            error=error,
+            since=since,
+            muted=() if manual else config.settings.auto_repair_muted,
+            loader_version=_instance_loader_version(info),
+            accounts=account_records,
+            current_account_id="" if account_id.lower() == "auto" else account_id,
+        )
+    except Exception:  # noqa: BLE001 — диагностика необязательна
+        if manual:
+            raise
+        return None
+    report["instance_name"] = info.name
+    report["manual"] = manual
+    return report
 
 
 def _effective_launch_settings(

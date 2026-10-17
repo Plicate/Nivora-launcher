@@ -24,7 +24,7 @@ from .snapshots import SnapshotStore
 
 
 INSTANCE_SETTINGS_FILE = ".trial-launcher.json"
-SECURITY_POLICY_VERSION = 3
+SECURITY_POLICY_VERSION = 4
 PROJECT_METADATA_SUFFIX = ".trial-project.json"
 MODPACK_MARKER = ".trial-launcher-modpacks.json"
 MAX_ASSET_METADATA_BYTES = 64 * 1024
@@ -55,7 +55,7 @@ DEFAULT_INSTANCE_SETTINGS: dict[str, Any] = {
     "jvm_preset": "none",
     "console_colors": DEFAULT_CONSOLE_COLORS,
     "security_profile": "strict",
-    "security_permissions": ["files:instance", "desktop:display", "desktop:audio"],
+    "security_permissions": ["network:game", "files:instance", "desktop:display", "desktop:audio"],
     "security_policy_version": SECURITY_POLICY_VERSION,
 }
 INSTANCE_SNAPSHOT_CATEGORIES = ("mods", "resourcepacks", "shaders", "saves")
@@ -69,7 +69,7 @@ INSTANCE_REGULAR_KEYS = tuple(key for key in DEFAULT_INSTANCE_SETTINGS if key no
 INSTANCE_SECURITY_DEFAULTS: dict[str, Any] = {
     "java_path": "",
     "security_profile": "strict",
-    "security_permissions": ["files:instance", "desktop:display", "desktop:audio"],
+    "security_permissions": ["network:game", "files:instance", "desktop:display", "desktop:audio"],
     "security_policy_version": SECURITY_POLICY_VERSION,
 }
 
@@ -551,9 +551,11 @@ def _normalize_instance_settings(values: dict[str, Any]) -> dict[str, Any]:
     except (TypeError, ValueError):
         previous_policy_version = 0
     if previous_policy_version < SECURITY_POLICY_VERSION:
-        # Older defaults exposed both network and desktop channels without a consent step.
-        permissions = [permission for permission in permissions if permission != "network:game"]
-        for permission in ("desktop:display", "desktop:audio"):
+        # Версия 4: в strict сеть игры включена по умолчанию — без неё Minecraft
+        # не видит ни одного сервера. Версии ≤3 выключали network:game
+        # молча, поэтому при миграции включаем её один раз; дальнейший ручной
+        # выбор пользователя сохраняется.
+        for permission in ("network:game", "desktop:display", "desktop:audio"):
             if permission not in permissions:
                 permissions.append(permission)
     result["security_permissions"] = permissions

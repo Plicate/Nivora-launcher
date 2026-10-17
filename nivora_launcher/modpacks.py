@@ -84,10 +84,11 @@ class ModpackProvider:
         if self.kind not in {"modrinth", "ftb", "technic"}:
             raise LauncherError(f"Каталог {self.kind} не поддерживает модпаки")
 
-    def search(self, query: str, game_version: str = "", limit: int = 12) -> list[ModpackResult]:
+    def search(self, query: str, game_version: str = "", limit: int = 12, offset: int = 0) -> list[ModpackResult]:
         limit = max(1, min(30, int(limit)))
+        self.last_total: int | None = None
         if self.kind == "modrinth":
-            return self._search_modrinth(query, game_version, limit)
+            return self._search_modrinth(query, game_version, limit, max(0, min(10_000, int(offset or 0))))
         if self.kind == "ftb":
             return self._search_ftb(query, game_version, limit)
         return self._search_technic(query, game_version, limit)
@@ -238,15 +239,19 @@ class ModpackProvider:
                 pass
             return dependencies
 
-    def _search_modrinth(self, query: str, game_version: str, limit: int) -> list[ModpackResult]:
+    def _search_modrinth(self, query: str, game_version: str, limit: int, offset: int = 0) -> list[ModpackResult]:
         facets = [["project_type:modpack"]]
         if game_version:
             facets.append([f"versions:{game_version}"])
         params: dict[str, str] = {"limit": str(limit), "facets": json.dumps(facets, separators=(",", ":"))}
+        if offset:
+            params["offset"] = str(offset)
         if query.strip():
             params["query"] = query.strip()
         value = self.http.get_json(f"{self.base_url}/search?{urlencode(params)}")
         hits = value.get("hits", []) if isinstance(value, dict) else []
+        total = value.get("total_hits") if isinstance(value, dict) else None
+        self.last_total = int(total) if isinstance(total, int) and total >= 0 else None
         return [self._modrinth_result(item) for item in hits if isinstance(item, dict)]
 
     def _search_ftb(self, query: str, game_version: str, limit: int) -> list[ModpackResult]:

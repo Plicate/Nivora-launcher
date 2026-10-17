@@ -1,6 +1,37 @@
 // Тонкий слой различий платформ: права дескрипторов, reparse-точки, сигналы
 // процессам, открытие путей в системе.
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+/// `canonicalize` на Windows возвращает verbatim-пути вида `\\?\C:\…`.
+/// Java их не понимает (InvalidPathException: Illegal char <?>): Forge/NeoForge
+/// installer, JVM и моды падали на таких путях. Для путей, уходящих во внешние
+/// процессы и в сравнения, используем обычную форму `C:\…`; длинные пути
+/// стандартная библиотека Rust при обращении к ФС префиксует сама.
+pub(crate) fn simplify_path(path: PathBuf) -> PathBuf {
+    if cfg!(windows) {
+        if let Some(simple) = strip_verbatim_prefix(&path.to_string_lossy()) {
+            return PathBuf::from(simple);
+        }
+    }
+    path
+}
+
+/// `canonicalize` + [`simplify_path`].
+pub(crate) fn canonical_path(path: &Path) -> std::io::Result<PathBuf> {
+    std::fs::canonicalize(path).map(simplify_path)
+}
+
+pub(crate) fn strip_verbatim_prefix(text: &str) -> Option<String> {
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        return Some(format!(r"\\{rest}"));
+    }
+    let rest = text.strip_prefix(r"\\?\")?;
+    let bytes = rest.as_bytes();
+    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        return Some(rest.to_owned());
+    }
+    None
+}
 
 /// Применяет POSIX-биты прав там, где они есть; Windows пользуется ACL профиля.
 #[cfg(unix)]
@@ -162,6 +193,15 @@ pub(crate) fn sys_platform() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn verbatim_prefix_is_stripped_for_drive_and_unc_paths() {
+        assert_eq!(strip_verbatim_prefix(r"\\?\C:\Users\Nick\game").as_deref(), Some(r"C:\Users\Nick\game"));
+        assert_eq!(strip_verbatim_prefix(r"\\?\UNC\server\share\x").as_deref(), Some(r"\\server\share\x"));
+        assert_eq!(strip_verbatim_prefix(r"\\?\Volume{abc}\x"), None);
+        assert_eq!(strip_verbatim_prefix(r"C:\plain"), None);
+        assert_eq!(strip_verbatim_prefix("/home/user"), None);
+    }
 
     #[test]
     fn process_existence_reflects_current_and_bogus_pids() {

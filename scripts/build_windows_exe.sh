@@ -208,6 +208,9 @@ fi
   --specpath .build-windows \
   --collect-submodules nivora_launcher \
   --collect-data nivora_launcher \
+  --collect-all keyring \
+  --hidden-import keyring.backends.Windows \
+  --hidden-import truststore \
   "${VERSION_FILE_ARGS[@]}" \
   scripts/backend_entry.py
 
@@ -419,10 +422,12 @@ fi
 
 # Подписанные updater-артефакты создаём только при наличии ключа,
 # локальной сборке exe они не нужны (см. tauri.arch.conf.json для Arch).
-if [ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
-  TAURI_CONFIG_ARGS=()
-else
-  TAURI_CONFIG_ARGS=(--config '{"bundle":{"createUpdaterArtifacts":false}}')
+# tauri.windows.conf.json (свой NSIS-шаблон установщика, ресурсы бэкенда)
+# tauri CLI подхватывает по ОС ХОСТА: при кросс-сборке с Linux он молча
+# игнорировался, и получался стандартный установщик Tauri. Передаём явно.
+TAURI_CONFIG_ARGS=(--config src-tauri/tauri.windows.conf.json)
+if [ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
+  TAURI_CONFIG_ARGS+=(--config '{"bundle":{"createUpdaterArtifacts":false}}')
 fi
 
 # include_bytes! в lib.rs упаковывает бэкенд В САМ nivora-launcher.exe —
@@ -439,6 +444,10 @@ cd "$PROJECT_ROOT"
 
 # --- 4. Артефакты -------------------------------------------------------------
 setup_exe="$(ls -1t "$RELEASE_DIR/bundle/nsis/"*-setup.exe 2>/dev/null | head -n 1 || true)"
+nsis_script="$RELEASE_DIR/nsis/x64/installer.nsi"
+if [ -f "$nsis_script" ] && ! grep -q "NivoraPurgeData" "$nsis_script"; then
+  die "Установщик собран из стандартного шаблона Tauri, а не из frontend/src-tauri/windows/installer.nsi — проверьте bundle.windows.nsis.template."
+fi
 raw_exe="$RELEASE_DIR/nivora-launcher.exe"
 
 [ -n "$setup_exe" ] || die "NSIS-установщик не найден в $RELEASE_DIR/bundle/nsis/ — смотрите вывод tauri build."

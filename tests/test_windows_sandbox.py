@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import os
 import sys
 import tempfile
 import unittest
@@ -25,7 +26,9 @@ class WindowsSandboxPolicyTests(unittest.TestCase):
     def _prepare(self, instance: Path, permissions: list[str], *, profile: str = "strict", command: list[str] | None = None, supported: bool = True):
         system, support = _windows(supported=supported)
         environment = {"PATH": "C:/Windows", "TEMP": "C:/Users/u/AppData/Local/Temp", "LOCALAPPDATA": "C:/Users/u/AppData/Local"}
-        with system, support:
+        # AppContainer по умолчанию выключен (Minecraft в нём не стартует);
+        # эти тесты проверяют сам контейнер, поэтому включают его явно.
+        with system, support, patch.dict("os.environ", {"NIVORA_WINDOWS_APPCONTAINER": "1"}):
             return prepare_process(
                 command or [sys.executable, "-version"],
                 instance,
@@ -269,3 +272,19 @@ class WindowsSandboxPolicyTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WindowsSandboxDefaultTests(unittest.TestCase):
+    def test_game_runs_without_appcontainer_by_default(self) -> None:
+        system, support = _windows(supported=True)
+        with tempfile.TemporaryDirectory() as directory, system, support, patch.dict("os.environ", {}, clear=False):
+            os.environ.pop("NIVORA_WINDOWS_APPCONTAINER", None)
+            command, _cwd, environment, warning = prepare_process(
+                ["java.exe", "-version"],
+                Path(directory),
+                {"APPDATA": "C:/Users/u/AppData/Roaming"},
+                {"security_profile": "strict", "security_permissions": ["network:game"]},
+            )
+        self.assertEqual(command, ["java.exe", "-version"])
+        self.assertEqual(environment["APPDATA"], "C:/Users/u/AppData/Roaming")
+        self.assertIn("AppContainer", warning)

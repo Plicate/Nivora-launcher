@@ -686,7 +686,8 @@ class MinecraftInstaller:
             raise LauncherError(f"Локальный installer является символьной ссылкой: {local_installer}")
         shutil.copy2(installer_path, local_installer)
         local_installer.chmod(0o600)
-        command = [str(java), "-jar", str(local_installer), "--installClient", "--target", str(base.instance_dir)]
+        _ensure_launcher_profiles(base.instance_dir)
+        command = loader_installer_command(java, local_installer, base.instance_dir)
         process: subprocess.Popen[str] | None = None
         try:
             prepared_command, prepared_cwd, prepared_environment, _ = prepare_process(
@@ -778,6 +779,27 @@ class MinecraftInstaller:
             if match:
                 return algorithm, match.group(1)
         raise LauncherError("Loader installer не имеет корректного SHA-512, SHA-256 или SHA-1 checksum")
+
+def loader_installer_command(java: Path | str, installer: Path, target: Path) -> list[str]:
+    """Командная строка Forge/NeoForge installer для установки клиента.
+
+    Каталог передаётся значением ``--installClient``: отдельного ключа
+    ``--target`` у installer нет, jopt-simple отвергает его как неизвестный,
+    и установка падала ещё до начала работы (на любой ОС).
+    """
+    return [str(java), "-jar", str(installer), "--installClient", str(target)]
+
+
+def _ensure_launcher_profiles(target: Path) -> None:
+    """Forge/NeoForge installer отказывается ставить клиент без launcher_profiles.json
+    («There is no minecraft launcher profile…») — создаём пустой профиль."""
+    path = target / "launcher_profiles.json"
+    if path.is_symlink():
+        raise LauncherError("launcher_profiles.json экземпляра является символьной ссылкой")
+    if path.is_file():
+        return
+    path.write_text(json.dumps({"profiles": {}, "selectedProfile": "", "version": 3}) + "\n", encoding="utf-8")
+
 
 def _rebase_install_result(result: InstallResult, source: Path, destination: Path) -> InstallResult:
     def rebase(path: Path) -> Path:

@@ -5,7 +5,9 @@ import http.client
 import ipaddress
 import json
 import socket
+import ssl
 import struct
+import sys
 import threading
 import time
 from pathlib import Path
@@ -38,6 +40,79 @@ _DEFAULT_RATE_LIMIT_INTERVALS = {
 # could block for minutes and look like an endless spinner in the UI.
 _MAX_RATE_LIMIT_WAIT_SECONDS = 15.0
 _RATE_LIMIT_LOCK = threading.Lock()
+_CONNECT_TIMEOUT_PER_ADDRESS = 10.0
+DOWNLOAD_SOURCES = ("auto", "official", "mirror")
+# Зеркало BMCLAPI отдаёт файлы Mojang и загрузчиков по тем же путям.
+# Подлинность проверяется хешами из метаданных.
+MIRROR_BASE = "https://bmclapi2.bangbang93.com"
+_MIRROR_RULES: tuple[tuple[str, str, str], ...] = (
+    ("piston-meta.mojang.com", "", ""),
+    ("piston-data.mojang.com", "", ""),
+    ("launchermeta.mojang.com", "", ""),
+    ("launcher.mojang.com", "", ""),
+    ("resources.download.minecraft.net", "", "/assets"),
+    ("libraries.minecraft.net", "", "/maven"),
+    ("maven.minecraftforge.net", "", "/maven"),
+    ("files.minecraftforge.net", "/maven", "/maven"),
+    ("maven.neoforged.net", "/releases", "/maven"),
+    ("meta.fabricmc.net", "", "/fabric-meta"),
+    ("maven.fabricmc.net", "", "/maven"),
+    ("meta.quiltmc.org", "", "/quilt-meta"),
+    ("maven.quiltmc.org", "/repository/release", "/maven"),
+)
+
+
+def mirror_url(url: str) -> str | None:
+    try:
+        parsed = urlsplit(url)
+        port = parsed.port
+    except ValueError:
+        return None
+    if parsed.scheme.lower() != "https" or port is not None:
+        return None
+    host = (parsed.hostname or "").lower()
+    for rule_host, from_prefix, to_prefix in _MIRROR_RULES:
+        if host != rule_host or not parsed.path.startswith(from_prefix):
+            continue
+        rest = parsed.path[len(from_prefix):]
+        if rest and not rest.startswith("/"):
+            continue
+        mirrored = f"{MIRROR_BASE}{to_prefix}{rest}"
+        if parsed.query:
+            mirrored += f"?{parsed.query}"
+        return mirrored
+    return None
+
+
+_TLS_CONTEXT_LOCK = threading.Lock()
+_TLS_CONTEXT: list[ssl.SSLContext | None] = []
+
+
+def _platform_tls_context() -> ssl.SSLContext | None:
+    """На Windows сертификаты проверяет сама система (truststore → CryptoAPI).
+
+    Python читает хранилище Windows напрямую и не видит корневые сертификаты,
+    которые система подгружает по требованию, а также корни антивирусов,
+    перехватывающих HTTPS. Отсюда «certificate verify failed» в каталогах
+    только на Windows.
+    """
+    if sys.platform != "win32":
+        return None
+    with _TLS_CONTEXT_LOCK:
+        if not _TLS_CONTEXT:
+            context: ssl.SSLContext | None = None
+            try:
+                import truststore
+
+                context = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            except Exception:
+                context = None
+            _TLS_CONTEXT.append(context)
+        return _TLS_CONTEXT[0]
+
+
+class _SourceUnavailable(LauncherError):
+    """Источник ответил окончательно (404/410): зеркало не поможет."""
 _RATE_LIMIT_NEXT_ALLOWED_AT: dict[str, float] = {}
 
 
@@ -85,17 +160,25 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
     ) -> socket.socket:
         _, port = address
         last_error: OSError | None = None
-        for pinned in self.pinned_addresses:
+        # IPv4 первым и короткий таймаут подключения на адрес: на Windows
+        # «полуживой» IPv6 иначе съедал полный таймаут на каждом AAAA-адресе.
+        ordered = sorted(self.pinned_addresses, key=lambda item: item.version)
+        connect_timeout = timeout
+        if len(ordered) > 1 and isinstance(timeout, (int, float)):
+            connect_timeout = min(float(timeout), _CONNECT_TIMEOUT_PER_ADDRESS)
+        for pinned in ordered:
             family = socket.AF_INET6 if pinned.version == 6 else socket.AF_INET
             sockaddr = (str(pinned), port, 0, 0) if family == socket.AF_INET6 else (str(pinned), port)
             connection: socket.socket | None = None
             try:
                 connection = socket.socket(family, socket.SOCK_STREAM)
-                if timeout is not socket._GLOBAL_DEFAULT_TIMEOUT:
-                    connection.settimeout(timeout)
+                if connect_timeout is not socket._GLOBAL_DEFAULT_TIMEOUT:
+                    connection.settimeout(connect_timeout)
                 if source_address:
                     connection.bind(source_address)
                 connection.connect(sockaddr)
+                if timeout is not socket._GLOBAL_DEFAULT_TIMEOUT:
+                    connection.settimeout(timeout)
                 return connection
             except OSError as exc:
                 last_error = exc
@@ -255,8 +338,11 @@ class HttpClient:
         request_observer: RequestObserver | None = None,
         proxy: str = "",
         cancellation: CancellationToken | None = None,
+        download_source: str = "auto",
     ) -> None:
         self.timeout = max(1, timeout)
+        source = str(download_source or "auto").strip().lower()
+        self.download_source = source if source in DOWNLOAD_SOURCES else "auto"
         self.retries = max(1, retries)
         self.user_agent = f"{APP_NAME}/{APP_VERSION}"
         self.download_observer = download_observer
@@ -270,13 +356,14 @@ class HttpClient:
 
     def _build_opener(self, redirect_validator: Callable[[str], None] | None = None):
         # Do not inherit HTTP(S)_PROXY from the desktop environment silently.
+        context = _platform_tls_context()
         if self.proxy_scheme in {"socks5", "socks5h"}:
             # через SOCKS DNS резолвит прокси, поэтому пиннинг адресов не применяется
             factory = make_socks5_factory(self.proxy)
             return build_opener(
                 ProxyHandler({}),
                 _SocksHTTPHandler(factory),
-                _SocksHTTPSHandler(factory),
+                _SocksHTTPSHandler(factory, context=context),
                 _SafeRedirectHandler(resolve_dns=False, validate_redirect=redirect_validator),
             )
         handlers: list[Any] = [
@@ -284,7 +371,9 @@ class HttpClient:
             _SafeRedirectHandler(resolve_dns=self.resolve_dns, validate_redirect=redirect_validator),
         ]
         if self.resolve_dns:
-            handlers.append(_PinnedHTTPSHandler())
+            handlers.append(_PinnedHTTPSHandler(context=context))
+        elif context is not None:
+            handlers.append(HTTPSHandler(context=context))
         return build_opener(*handlers)
 
     def _notify_request(self, event: str, url: str, attempt: int) -> None:
@@ -355,7 +444,57 @@ class HttpClient:
             # Logging must never make a verified download fail.
             return
 
+    def _candidates(self, url: str, method: str = "GET") -> list[tuple[str, bool]]:
+        if method.upper() != "GET" or self.download_source == "official":
+            return [(url, False)]
+        mirrored = mirror_url(url)
+        if not mirrored:
+            return [(url, False)]
+        if self.download_source == "mirror":
+            return [(mirrored, True), (url, False)]
+        return [(url, False), (mirrored, True)]
+
+    def _with_sources(self, url: str, method: str, call: Callable[[str, bool], Any]) -> Any:
+        candidates = self._candidates(url, method)
+        failures: list[str] = []
+        for candidate, is_mirror in candidates:
+            self.check_cancelled()
+            if is_mirror:
+                self._notify_request("mirror", candidate, 1)
+            try:
+                return call(candidate, is_mirror)
+            except LauncherError as exc:
+                self.check_cancelled()
+                definitive = isinstance(exc, _SourceUnavailable) and not is_mirror
+                if len(candidates) == 1 or definitive:
+                    raise
+                label = "зеркало" if is_mirror else "официальный сервер"
+                failures.append(f"{label} {urlsplit(candidate).hostname}: {exc}")
+        raise LauncherError(f"Не удалось получить {url} ни с одного источника: {'; '.join(failures)}")
+
     def request(
+        self,
+        url: str,
+        method: str = "GET",
+        data: bytes | None = None,
+        headers: dict[str, str] | None = None,
+        max_bytes: int | None = None,
+        redirect_validator: Callable[[str], None] | None = None,
+    ) -> bytes:
+        return self._with_sources(
+            url,
+            method,
+            lambda candidate, is_mirror: self._request_single(
+                candidate,
+                method=method,
+                data=data,
+                headers=headers,
+                max_bytes=max_bytes,
+                redirect_validator=None if is_mirror else redirect_validator,
+            ),
+        )
+
+    def _request_single(
         self,
         url: str,
         method: str = "GET",
@@ -413,7 +552,8 @@ class HttpClient:
                     self._notify_request("retry", url, attempt + 1)
                     self.wait(1.0 + attempt)
                     continue
-                raise LauncherError(f"HTTP {exc.code} при запросе {url}") from exc
+                error_type = _SourceUnavailable if exc.code in {404, 410} else LauncherError
+                raise error_type(f"HTTP {exc.code} при запросе {url}") from exc
             except (URLError, TimeoutError, OSError) as exc:
                 last_error = exc
                 if attempt + 1 < self.retries:
@@ -592,6 +732,35 @@ class HttpClient:
         headers: dict[str, str] | None = None,
         redirect_validator: Callable[[str], None] | None = None,
     ) -> bool:
+        return self._with_sources(
+            url,
+            "GET",
+            lambda candidate, is_mirror: self._download_single(
+                candidate,
+                destination,
+                sha1=sha1,
+                sha256=sha256,
+                sha512=sha512,
+                size=size,
+                progress=progress,
+                headers=headers,
+                redirect_validator=None if is_mirror else redirect_validator,
+            ),
+        )
+
+    def _download_single(
+        self,
+        url: str,
+        destination: Path,
+        *,
+        sha1: str | None = None,
+        sha256: str | None = None,
+        sha512: str | None = None,
+        size: int | None = None,
+        progress: Progress | None = None,
+        headers: dict[str, str] | None = None,
+        redirect_validator: Callable[[str], None] | None = None,
+    ) -> bool:
         pinned_addresses = _validate_url(url, resolve_dns=self.resolve_dns)
         self.check_cancelled()
         if size is not None and size > MAX_DOWNLOAD_BYTES:
@@ -697,7 +866,8 @@ class HttpClient:
                     self._notify_request("retry", url, attempt + 1)
                     self.wait(1.0 + attempt)
                     continue
-                raise LauncherError(f"HTTP {exc.code} при загрузке {url}") from exc
+                error_type = _SourceUnavailable if exc.code in {404, 410} else LauncherError
+                raise error_type(f"HTTP {exc.code} при загрузке {url}") from exc
             except IntegrityError as exc:
                 last_error = exc
                 # Повреждённая докачка (зеркало подмешало чужие байты)

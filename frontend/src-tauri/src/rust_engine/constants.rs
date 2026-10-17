@@ -2,7 +2,7 @@
 // (FRONTEND_BUILD_STAMP сверяется с bootstrap-ответом).
 pub const APP_ID: &str = "nivora-launcher";
 pub const APP_NAME: &str = "Nivora Launcher";
-pub const APP_VERSION: &str = "1.0.0";
+pub const APP_VERSION: &str = "1.0.3";
 pub const BUILD_STAMP: &str = "r32";
 
 // Собственный Azure public-client ID проекта (device-code flow).

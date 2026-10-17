@@ -75,6 +75,7 @@ class ModrinthProvider:
         project_type: str = "mod",
         *,
         sort_by: str = "relevance",
+        offset: int = 0,
     ) -> list[dict[str, Any]]:
         self._validate_project_type(project_type)
         sort_by = str(sort_by).strip().lower()
@@ -95,10 +96,16 @@ class ModrinthProvider:
             "index": sort_by,
             "facets": json.dumps(facets, separators=(",", ":")),
         }
+        offset = max(0, min(10_000, int(offset or 0)))
+        if offset:
+            params["offset"] = str(offset)
         if query.strip():
             params["query"] = query.strip()
         value = self.http.get_json(f"{self.base_url}/search?{urlencode(params)}")
         hits = value.get("hits", []) if isinstance(value, dict) else []
+        # Всего найдено — для постраничного каталога.
+        total = value.get("total_hits") if isinstance(value, dict) else None
+        self.last_total = int(total) if isinstance(total, int) and total >= 0 else None
         return [
             item
             for item in hits

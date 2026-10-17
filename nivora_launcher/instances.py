@@ -571,24 +571,35 @@ def _normalize_tags(value: Any) -> list[str]:
 def _discover_external_instance_candidates(home: Path | None = None) -> list[ExternalImportCandidate]:
     user_home = (home or Path.home()).expanduser()
     values: list[ExternalImportCandidate] = []
-    for root in (
+    prism_roots = [
         user_home / ".local/share/PrismLauncher/instances",
         user_home / ".var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/instances",
-    ):
-        values.extend(_discover_prism_family_instances(root, "Prism Launcher"))
-    for root in (
+    ]
+    multimc_roots = [
         user_home / ".local/share/MultiMC/instances",
         user_home / ".config/MultiMC/instances",
         user_home / ".config/multimc/instances",
-    ):
-        values.extend(_discover_prism_family_instances(root, "MultiMC"))
-    for root in (user_home / "Documents/curseforge/minecraft/Instances",):
-        values.extend(_discover_curseforge_instances(root))
-    for root in (
+    ]
+    curseforge_roots = [user_home / "Documents/curseforge/minecraft/Instances"]
+    official_roots = [
         user_home / ".minecraft",
         user_home / "snap/minecraft-launcher/common/.minecraft",
         user_home / ".var/app/com.mojang.Minecraft/data/minecraft",
-    ):
+    ]
+    appdata = os.environ.get("APPDATA", "").strip() if os.name == "nt" else ""
+    if appdata:
+        # Windows: лаунчеры живут в %APPDATA%, а не в домашнем каталоге.
+        prism_roots.append(Path(appdata) / "PrismLauncher" / "instances")
+        multimc_roots.append(Path(appdata) / "MultiMC" / "instances")
+        curseforge_roots.append(user_home / "curseforge" / "minecraft" / "Instances")
+        official_roots.insert(0, Path(appdata) / ".minecraft")
+    for root in prism_roots:
+        values.extend(_discover_prism_family_instances(root, "Prism Launcher"))
+    for root in multimc_roots:
+        values.extend(_discover_prism_family_instances(root, "MultiMC"))
+    for root in curseforge_roots:
+        values.extend(_discover_curseforge_instances(root))
+    for root in official_roots:
         candidate = _discover_official_launcher_instance(root)
         if candidate is not None:
             values.append(candidate)

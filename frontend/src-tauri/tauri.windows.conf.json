@@ -3,6 +3,14 @@
   "bundle": {
     "resources": {
       "resources/backend/nivora-launcher-backend.exe": "backend/nivora-launcher-backend.exe"
+    },
+    "windows": {
+      "nsis": {
+        "template": "windows/installer.nsi",
+        "installMode": "currentUser",
+        "languages": ["Russian", "English"],
+        "displayLanguageSelector": false
+      }
     }
   }
 }

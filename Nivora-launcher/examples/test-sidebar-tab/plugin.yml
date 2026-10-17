@@ -1,0 +1,13 @@
+id: test-sidebar-tab
+name: Test Sidebar Tab
+version: 1.0.0
+api_version: 1
+entrypoint: main.js
+author: Nivora Launcher test fixture
+description: Adds a static Test Tab entry to the launcher sidebar.
+icon: plug
+category: Example
+permissions:
+  - ui:compose
+sidebar_tab:
+  label: Test Tab

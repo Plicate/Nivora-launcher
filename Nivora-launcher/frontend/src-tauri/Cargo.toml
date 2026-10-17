@@ -1,0 +1,35 @@
+[package]
+name = "nivora-launcher"
+version = "1.0.1"
+description = "Nivora Launcher desktop shell"
+authors = ["Nivora Launcher contributors"]
+edition = "2021"
+
+[lib]
+name = "nivora_launcher_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = "0.10"
+libc = "0.2"
+regex = "1"
+base64 = "0.22"
+uuid = { version = "1", default-features = false, features = ["v5"] }
+url = "2"
+sha1 = "0.10"
+# Подписи плагинов (Ed25519): verify/sign/generate — как cryptography в Python.
+ed25519-dalek = "2"
+ureq = { version = "2", features = ["gzip", "socks-proxy", "json"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+# windows-sys нужен только под #[cfg(windows)]-код, но отдельная секция
+# [target.'cfg(windows)'.dependencies] ломает проброс DEP_TAURI_DEV в
+# build-script на текущем cargo; на Linux крейт компилируется пустым.
+windows-sys = { version = "0.59", features = ["Win32_Security_Credentials", "Win32_Foundation", "Win32_NetworkManagement_IpHelper", "Win32_System_Diagnostics_Debug", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Kernel", "Win32_System_SystemServices", "Win32_System_Threading", "Win32_System_IO", "Win32_System_ProcessStatus", "Win32_System_Time", "Win32_Storage_FileSystem", "Win32_UI_WindowsAndMessaging"] }
+tauri = { version = "2", features = ["protocol-asset", "tray-icon"] }
+tauri-plugin-process = "2"
+tauri-plugin-updater = "2"
+tauri-plugin-global-shortcut = "2"

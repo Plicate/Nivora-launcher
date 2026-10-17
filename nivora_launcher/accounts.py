@@ -17,7 +17,7 @@ from typing import Any, Callable
 from .config import ConfigStore
 from .errors import AuthenticationError, LauncherError
 from .net import HttpClient
-from .platform_support import open_path, set_private_fd
+from .platform_support import open_path, set_private_fd, set_private_path
 
 if TYPE_CHECKING:
     from .operations import CancellationToken
@@ -109,11 +109,11 @@ class AccountStore:
             if account.kind == "microsoft":
                 legacy_tokens = bool(item.get("access_token") or item.get("refresh_token"))
                 if legacy_tokens:
-                    _store_account_tokens(account)
+                    _store_account_tokens(account, self.path.parent)
                     records[records.index(item)] = account.to_dict()
                     changed = True
                 else:
-                    tokens = _load_account_tokens(account.account_id)
+                    tokens = _load_account_tokens(account.account_id, self.path.parent)
                     account.access_token = tokens.get("access_token", "")
                     account.refresh_token = tokens.get("refresh_token", "")
             accounts.append(account)
@@ -138,7 +138,7 @@ class AccountStore:
     def save(self, account: Account) -> None:
         records = self._read()
         if account.kind == "microsoft":
-            _store_account_tokens(account)
+            _store_account_tokens(account, self.path.parent)
         replacement = account.to_dict()
         for index, item in enumerate(records):
             if item.get("account_id") == account.account_id:
@@ -158,7 +158,13 @@ class AccountStore:
             return False
         _write_private_json(self.path, updated)
         if any(item.get("account_id") == account_id and item.get("kind") == "microsoft" for item in records):
-            _clear_account_tokens(account_id)
+            _remove_file_tokens(self.path.parent, account_id)
+            try:
+                _clear_account_tokens(account_id)
+            except AuthenticationError:
+                # Без secret-tool токены могли жить только в резервном файле.
+                if os.name == "nt" or shutil.which("secret-tool"):
+                    raise
         return True
 
     def set_alias(self, account_id: str, alias: str) -> Account:
@@ -195,15 +201,41 @@ class AccountStore:
         return [Account.from_dict(item) for item in records]
 
 
+def validate_nickname(value: str) -> str:
+    """Ник Minecraft: 3–16 символов, только латиница, цифры и «_».
+
+    Недопустимые символы — ошибка, а не молчаливая обрезка: раньше через
+    isalnum() проходила и кириллица.
+    """
+    value = str(value)
+    if not value:
+        raise LauncherError("Введите ник")
+    invalid: list[str] = []
+    for character in value:
+        if not (character.isascii() and (character.isalnum() or character == "_")) and character not in invalid:
+            invalid.append(character)
+    if invalid:
+        shown = [
+            "«пробел»" if character == " " else "«пробельный символ»" if character.isspace() else f"«{character}»"
+            for character in invalid[:6]
+        ]
+        if len(invalid) > 6:
+            shown.append("…")
+        raise LauncherError(f"Ник содержит недопустимые символы: {', '.join(shown)}. Разрешены только латинские буквы, цифры и _")
+    if len(value) < 3:
+        raise LauncherError("Ник должен быть не короче 3 символов")
+    if len(value) > 16:
+        raise LauncherError("Ник должен быть не длиннее 16 символов")
+    return value
+
+
 class OfflineDebugAccount:
     def __init__(self, config: ConfigStore, store: AccountStore) -> None:
         self.config = config
         self.store = store
 
     def create(self, username: str) -> Account:
-        safe_name = "".join(char for char in username.strip() if char.isalnum() or char in "_-")[:16]
-        if not safe_name:
-            raise LauncherError("Имя debug-аккаунта пустое")
+        safe_name = validate_nickname(username)
         account = Account(
             account_id="offline-debug",
             kind="offline",
@@ -341,6 +373,11 @@ class MicrosoftAuthenticator:
         if not force_refresh and account.expires_at > time.time() + 60 and account.access_token:
             return account
         if not account.refresh_token:
+            if not account.access_token:
+                store = "диспетчере учётных данных Windows" if os.name == "nt" else "Secret Service (gnome-keyring/KWallet)"
+                raise AuthenticationError(
+                    f"Токены Microsoft-аккаунта не найдены в {store}. Войдите заново; если ошибка повторяется — хранилище паролей недоступно."
+                )
             raise AuthenticationError("Microsoft-токен истёк. Повторите login microsoft")
         msa = self._refresh_msa(account.refresh_token)
         refreshed = self._finish_microsoft_login(msa, self.config.settings.client_id)
@@ -500,11 +537,85 @@ def _account_secret_attributes(account_id: str) -> list[str]:
     return ["service", "trial-launcher-microsoft", "account-id", account_id]
 
 
-def _load_account_tokens(account_id: str) -> dict[str, str]:
+# Резервный файл токенов — формат общий с rust_engine/accounts.rs. Нужен, когда
+# системное хранилище недоступно или временное: Secret Service без
+# разблокированной связки «login» кладёт секреты в session-коллекцию, и после
+# перезапуска токен Microsoft пропадал. Файл приватный (0600 / ACL пользователя).
+TOKEN_FILE = "microsoft-tokens.json"
+
+
+def _token_file(directory: Path) -> Path:
+    return directory / TOKEN_FILE
+
+
+def _read_file_tokens(directory: Path | None) -> dict[str, Any]:
+    if directory is None:
+        return {}
+    path = _token_file(directory)
+    try:
+        if path.is_symlink() or not path.is_file() or path.stat().st_size > 4 * 1024 * 1024:
+            return {}
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _write_file_tokens(directory: Path, tokens: dict[str, Any]) -> None:
+    path = _token_file(directory)
+    if not tokens:
+        if path.exists() and not path.is_symlink():
+            path.unlink()
+        return
+    _write_private_json(path, tokens)
+    set_private_path(path)
+
+
+def _store_file_tokens(directory: Path, account_id: str, payload: dict[str, str]) -> None:
+    _account_secret_attributes(account_id)
+    tokens = _read_file_tokens(directory)
+    tokens[account_id] = payload
+    _write_file_tokens(directory, tokens)
+
+
+def _remove_file_tokens(directory: Path | None, account_id: str) -> None:
+    if directory is None:
+        return
+    tokens = _read_file_tokens(directory)
+    if tokens.pop(account_id, None) is not None:
+        _write_file_tokens(directory, tokens)
+
+
+def _secret_is_persistent(account_id: str, payload: str) -> bool:
+    if os.name == "nt":
+        return _windows_load_token_payload(account_id) == payload
+    try:
+        search = _run_secret_tool(["search", "--all", *_account_secret_attributes(account_id)])
+    except Exception:  # noqa: BLE001 — нет search: судим только по lookup
+        search = None
+    if search is not None and search.returncode == 0 and "/collection/session" in (search.stdout or ""):
+        return False
+    try:
+        lookup = _run_secret_tool(["lookup", *_account_secret_attributes(account_id)])
+    except (AuthenticationError, OSError, subprocess.SubprocessError):
+        return False
+    return lookup.returncode == 0 and lookup.stdout.rstrip("\n") == payload
+
+
+def _load_account_tokens(account_id: str, directory: Path | None = None) -> dict[str, str]:
+    tokens = _load_keyring_tokens(account_id)
+    if tokens.get("access_token") or tokens.get("refresh_token"):
+        return tokens
+    stored = _read_file_tokens(directory).get(account_id)
+    if isinstance(stored, dict):
+        return {"access_token": str(stored.get("access_token", "")), "refresh_token": str(stored.get("refresh_token", ""))}
+    return tokens
+
+
+def _load_keyring_tokens(account_id: str) -> dict[str, str]:
     if os.name == "nt":
         try:
-            keyring = _windows_keyring()
-            raw = keyring.get_password("trial-launcher-microsoft", account_id)
+            raw = _windows_load_token_payload(account_id)
             value = json.loads(raw) if raw else {}
         except (AuthenticationError, ValueError, TypeError):
             return {}
@@ -534,7 +645,7 @@ def _load_account_tokens(account_id: str) -> dict[str, str]:
     }
 
 
-def _store_account_tokens(account: Account) -> None:
+def _store_account_tokens(account: Account, directory: Path | None = None) -> None:
     if account.kind != "microsoft" or not account.access_token:
         raise AuthenticationError("Microsoft access token отсутствует; повторите вход")
     payload = json.dumps(
@@ -542,13 +653,25 @@ def _store_account_tokens(account: Account) -> None:
         ensure_ascii=False,
         separators=(",", ":"),
     )
+    if directory is None:
+        _store_keyring_tokens(account, payload)
+        return
+    try:
+        _store_keyring_tokens(account, payload)
+        persistent = _secret_is_persistent(account.account_id, payload)
+    except AuthenticationError:
+        persistent = False
+    if persistent:
+        _remove_file_tokens(directory, account.account_id)
+    else:
+        _store_file_tokens(directory, account.account_id, {"access_token": account.access_token, "refresh_token": account.refresh_token})
+
+
+def _store_keyring_tokens(account: Account, payload: str) -> None:
     if os.name == "nt":
-        try:
-            _windows_keyring().set_password("trial-launcher-microsoft", account.account_id, payload)
-        except AuthenticationError:
-            raise
-        except Exception as exc:
-            raise AuthenticationError("Не удалось сохранить Microsoft-токен в диспетчере учётных данных Windows") from exc
+        _account_secret_attributes(account.account_id)
+        if not _windows_write_chunked(_windows_credential_target(account.account_id), account.account_id, payload):
+            raise AuthenticationError("Не удалось сохранить Microsoft-токен в диспетчере учётных данных Windows")
         return
     try:
         # Secret Service allows duplicate items with the same attributes on
@@ -569,14 +692,12 @@ def _store_account_tokens(account: Account) -> None:
 
 def _clear_account_tokens(account_id: str) -> None:
     if os.name == "nt":
-        try:
-            keyring = _windows_keyring()
-            if keyring.get_password("trial-launcher-microsoft", account_id) is not None:
-                keyring.delete_password("trial-launcher-microsoft", account_id)
-        except AuthenticationError:
-            raise
-        except Exception as exc:
-            raise AuthenticationError("Не удалось удалить Microsoft-токен из диспетчера учётных данных Windows") from exc
+        _account_secret_attributes(account_id)
+        for service in (WINDOWS_CREDENTIAL_SERVICE, WINDOWS_LEGACY_CREDENTIAL_SERVICE):
+            _windows_delete_chunked(f"{service}:{account_id}")
+        _windows_credential_delete(f"{account_id}@{WINDOWS_CREDENTIAL_SERVICE}")
+        if _windows_credential_read(WINDOWS_CREDENTIAL_SERVICE, expected_user=account_id) is not None:
+            _windows_credential_delete(WINDOWS_CREDENTIAL_SERVICE)
         return
     try:
         result = _run_secret_tool(["clear", *_account_secret_attributes(account_id)])
@@ -636,6 +757,186 @@ def _run_secret_tool(arguments: list[str], *, input_text: str | None = None):
         check=False,
         env=environment,
     )
+
+
+# Windows Credential Manager. Формат обязан совпадать с Rust-движком
+# (rust_engine/accounts.rs, windows_keyring): вход Microsoft выполняет Rust и
+# пишет токен в цель «trial-launcher-microsoft:<account_id>» (UTF-16LE), а игру
+# запускает Python. Раньше Python читал через пакет keyring (цели
+# «trial-launcher-microsoft» / «<id>@trial-launcher-microsoft»), не видел
+# свежий токен и сразу после входа сообщал «Microsoft-токен истёк».
+WINDOWS_CREDENTIAL_SERVICE = "trial-launcher-microsoft"
+WINDOWS_LEGACY_CREDENTIAL_SERVICE = "nivora-launcher-microsoft"
+_CRED_TYPE_GENERIC = 1
+_CRED_PERSIST_LOCAL_MACHINE = 2
+
+
+def _windows_credential_target(account_id: str) -> str:
+    return f"{WINDOWS_CREDENTIAL_SERVICE}:{account_id}"
+
+
+# Диспетчер учётных данных хранит не больше 2560 байт на секрет, а токены
+# Minecraft + Microsoft в UTF-16 обычно длиннее — CredWriteW отказывал, и вход
+# на Windows не сохранялся. Длинный пейлоад пишется частями «<target>:partN»,
+# в основной записи — маркер «nivora-chunked:N» (как в rust_engine/accounts.rs).
+_CHUNK_MARKER = "nivora-chunked:"
+_CHUNK_CHARS = 1000
+_MAX_CHUNKS = 32
+
+
+def _split_secret(payload: str) -> list[str]:
+    if len(payload) <= _CHUNK_CHARS:
+        return [payload]
+    return [payload[index : index + _CHUNK_CHARS] for index in range(0, len(payload), _CHUNK_CHARS)]
+
+
+def _chunk_count(value: str | None) -> int | None:
+    if not value or not value.startswith(_CHUNK_MARKER):
+        return None
+    try:
+        count = int(value[len(_CHUNK_MARKER):].strip())
+    except ValueError:
+        return None
+    return count if 1 <= count <= _MAX_CHUNKS else None
+
+
+def _windows_read_chunked(target: str) -> str | None:
+    main = _windows_credential_read(target)
+    count = _chunk_count(main)
+    if count is None:
+        return main
+    parts: list[str] = []
+    for index in range(count):
+        part = _windows_credential_read(f"{target}:part{index}")
+        if not part:
+            return None
+        parts.append(part)
+    return "".join(parts)
+
+
+def _windows_delete_chunked(target: str) -> None:
+    count = _chunk_count(_windows_credential_read(target))
+    for index in range(count or 0):
+        _windows_credential_delete(f"{target}:part{index}")
+    _windows_credential_delete(target)
+
+
+def _windows_write_chunked(target: str, username: str, payload: str) -> bool:
+    _windows_delete_chunked(target)
+    parts = _split_secret(payload)
+    if len(parts) == 1:
+        return _windows_credential_write(target, username, payload)
+    if len(parts) > _MAX_CHUNKS:
+        return False
+    for index, part in enumerate(parts):
+        if not _windows_credential_write(f"{target}:part{index}", f"{username}:part{index}", part):
+            return False
+    return _windows_credential_write(target, username, f"{_CHUNK_MARKER}{len(parts)}")
+
+
+def _windows_credential_api():
+    import ctypes
+    from ctypes import wintypes
+
+    class FILETIME(ctypes.Structure):
+        _fields_ = [("dwLowDateTime", wintypes.DWORD), ("dwHighDateTime", wintypes.DWORD)]
+
+    class CREDENTIALW(ctypes.Structure):
+        _fields_ = [
+            ("Flags", wintypes.DWORD),
+            ("Type", wintypes.DWORD),
+            ("TargetName", wintypes.LPWSTR),
+            ("Comment", wintypes.LPWSTR),
+            ("LastWritten", FILETIME),
+            ("CredentialBlobSize", wintypes.DWORD),
+            ("CredentialBlob", ctypes.POINTER(ctypes.c_ubyte)),
+            ("Persist", wintypes.DWORD),
+            ("AttributeCount", wintypes.DWORD),
+            ("Attributes", ctypes.c_void_p),
+            ("TargetAlias", wintypes.LPWSTR),
+            ("UserName", wintypes.LPWSTR),
+        ]
+
+    advapi = ctypes.WinDLL("advapi32", use_last_error=True)
+    advapi.CredReadW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.POINTER(ctypes.POINTER(CREDENTIALW))]
+    advapi.CredReadW.restype = wintypes.BOOL
+    advapi.CredWriteW.argtypes = [ctypes.POINTER(CREDENTIALW), wintypes.DWORD]
+    advapi.CredWriteW.restype = wintypes.BOOL
+    advapi.CredDeleteW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD]
+    advapi.CredDeleteW.restype = wintypes.BOOL
+    advapi.CredFree.argtypes = [ctypes.c_void_p]
+    advapi.CredFree.restype = None
+    return ctypes, advapi, CREDENTIALW
+
+
+def _windows_credential_read(target: str, *, expected_user: str | None = None) -> str | None:
+    try:
+        ctypes, advapi, CREDENTIALW = _windows_credential_api()
+    except (ImportError, OSError, AttributeError):
+        return None
+    pointer = ctypes.POINTER(CREDENTIALW)()
+    if not advapi.CredReadW(target, _CRED_TYPE_GENERIC, 0, ctypes.byref(pointer)):
+        return None
+    try:
+        credential = pointer.contents
+        if expected_user is not None and (credential.UserName or "") != expected_user:
+            return None
+        size = int(credential.CredentialBlobSize)
+        blob = ctypes.string_at(credential.CredentialBlob, size) if size else b""
+    finally:
+        advapi.CredFree(pointer)
+    try:
+        return blob.decode("utf-16-le")
+    except UnicodeDecodeError:
+        return None
+
+
+def _windows_credential_write(target: str, username: str, payload: str) -> bool:
+    try:
+        ctypes, advapi, CREDENTIALW = _windows_credential_api()
+    except (ImportError, OSError, AttributeError):
+        return False
+    data = payload.encode("utf-16-le")
+    buffer = (ctypes.c_ubyte * max(1, len(data))).from_buffer_copy(data or b"\0")
+    credential = CREDENTIALW()
+    credential.Type = _CRED_TYPE_GENERIC
+    credential.TargetName = target
+    credential.CredentialBlobSize = len(data)
+    credential.CredentialBlob = ctypes.cast(buffer, ctypes.POINTER(ctypes.c_ubyte))
+    credential.Persist = _CRED_PERSIST_LOCAL_MACHINE
+    credential.UserName = username
+    return bool(advapi.CredWriteW(ctypes.byref(credential), 0))
+
+
+def _windows_credential_delete(target: str) -> None:
+    try:
+        _ctypes, advapi, _credential = _windows_credential_api()
+    except (ImportError, OSError, AttributeError):
+        return
+    advapi.CredDeleteW(target, _CRED_TYPE_GENERIC, 0)
+
+
+def _windows_load_token_payload(account_id: str) -> str:
+    _account_secret_attributes(account_id)
+    target = _windows_credential_target(account_id)
+    payload = _windows_read_chunked(target)
+    if payload:
+        return payload
+    # Старые места хранения: имя сервиса переходного периода (Rust) и формат
+    # пакета keyring (прежний Python). Найденный токен переносим в общий формат.
+    legacy = (
+        _windows_credential_read(f"{WINDOWS_LEGACY_CREDENTIAL_SERVICE}:{account_id}")
+        or _windows_credential_read(f"{account_id}@{WINDOWS_CREDENTIAL_SERVICE}")
+        or _windows_credential_read(WINDOWS_CREDENTIAL_SERVICE, expected_user=account_id)
+    )
+    if not legacy:
+        try:
+            legacy = _windows_keyring().get_password(WINDOWS_CREDENTIAL_SERVICE, account_id) or ""
+        except Exception:
+            legacy = ""
+    if legacy and _windows_write_chunked(target, account_id, legacy):
+        _windows_credential_delete(f"{WINDOWS_LEGACY_CREDENTIAL_SERVICE}:{account_id}")
+    return legacy
 
 
 def _windows_keyring():

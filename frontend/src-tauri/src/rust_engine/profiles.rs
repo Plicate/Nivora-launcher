@@ -16,7 +16,7 @@ const NAME_LIMIT: usize = 48;
 
 // Допустимые ключи пресета — в точности поля Settings. Список проверяется
 // паритет-скриптом на совпадение с dataclass-полями.
-const SETTINGS_FIELDS: [&str; 74] = [
+const SETTINGS_FIELDS: [&str; 77] = [
     "accent_color",
     "active_catalog_id",
     "active_launcher_profile_id",
@@ -25,6 +25,8 @@ const SETTINGS_FIELDS: [&str; 74] = [
     "animation_settings",
     "animations",
     "auto_refresh_metadata",
+    "auto_repair_enabled",
+    "auto_repair_muted",
     "backup_schedule",
     "catalog_api_url",
     "catalog_source",
@@ -45,6 +47,7 @@ const SETTINGS_FIELDS: [&str; 74] = [
     "density",
     "developer_mode",
     "download_retries",
+    "download_source",
     "download_timeout_seconds",
     "font_family",
     "game_dir",
@@ -358,6 +361,6 @@ mod tests {
         for key in ["game_dir", "client_id", "launcher_version"] {
             assert!(SETTINGS_FIELDS.contains(&key), "{key} должен быть в списке полей");
         }
-        assert_eq!(SETTINGS_FIELDS.len(), 74);
+        assert_eq!(SETTINGS_FIELDS.len(), 77);
     }
 }

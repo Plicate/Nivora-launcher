@@ -61,12 +61,128 @@ impl DetailedResponse {
     }
 }
 
+/// Откуда качать файлы Minecraft (Mojang, загрузчики).
+/// Auto — сначала официальные серверы, при сбое — зеркало;
+/// Official — только официальные; Mirror — сначала зеркало.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DownloadSource {
+    Auto,
+    Official,
+    Mirror,
+}
+
+impl DownloadSource {
+    pub fn parse(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "official" => Self::Official,
+            "mirror" | "bmclapi" => Self::Mirror,
+            _ => Self::Auto,
+        }
+    }
+}
+
+/// Зеркало BMCLAPI: отдаёт те же файлы по тем же путям. Целостность
+/// проверяется хешами из метаданных, поэтому подмена файла зеркалом
+/// не пройдёт проверку.
+const MIRROR_BASE: &str = "https://bmclapi2.bangbang93.com";
+
+/// (хост, префикс пути у оригинала, префикс пути у зеркала)
+const MIRROR_RULES: &[(&str, &str, &str)] = &[
+    ("piston-meta.mojang.com", "", ""),
+    ("piston-data.mojang.com", "", ""),
+    ("launchermeta.mojang.com", "", ""),
+    ("launcher.mojang.com", "", ""),
+    ("resources.download.minecraft.net", "", "/assets"),
+    ("libraries.minecraft.net", "", "/maven"),
+    ("maven.minecraftforge.net", "", "/maven"),
+    ("files.minecraftforge.net", "/maven", "/maven"),
+    ("maven.neoforged.net", "/releases", "/maven"),
+    ("meta.fabricmc.net", "", "/fabric-meta"),
+    ("maven.fabricmc.net", "", "/maven"),
+    ("meta.quiltmc.org", "", "/quilt-meta"),
+    ("maven.quiltmc.org", "/repository/release", "/maven"),
+];
+
+pub fn mirror_url(url: &str) -> Option<String> {
+    let parsed = url::Url::parse(url).ok()?;
+    if parsed.scheme() != "https" || parsed.port().is_some() {
+        return None;
+    }
+    let host = parsed.host_str()?.to_ascii_lowercase();
+    let path = parsed.path();
+    for (rule_host, from_prefix, to_prefix) in MIRROR_RULES {
+        if host != *rule_host {
+            continue;
+        }
+        let Some(rest) = path.strip_prefix(from_prefix) else { continue };
+        if !rest.is_empty() && !rest.starts_with('/') {
+            continue;
+        }
+        let mut mirrored = format!("{MIRROR_BASE}{to_prefix}{rest}");
+        if let Some(query) = parsed.query() {
+            mirrored.push('?');
+            mirrored.push_str(query);
+        }
+        return Some(mirrored);
+    }
+    None
+}
+
+struct Candidate {
+    url: String,
+    mirror: bool,
+}
+
+/// Ошибка одного источника: можно ли пробовать следующий источник.
+enum SourceError {
+    /// Отмена пользователем, нехватка места, ошибка записи на диск —
+    /// другой источник не поможет.
+    Fatal(String),
+    /// Источник не отдал файл (сеть, таймаут, 4xx/5xx, битый хеш).
+    Failed { message: String, status: Option<u16> },
+}
+
+/// Сначала IPv4, потом IPv6. На Windows «полуживой» IPv6 (адрес есть,
+/// маршрута нет) съедал таймаут подключения на каждом AAAA-адресе
+/// раньше, чем дело доходило до рабочего IPv4.
+struct PreferIpv4Resolver;
+
+impl ureq::Resolver for PreferIpv4Resolver {
+    fn resolve(&self, netloc: &str) -> std::io::Result<Vec<std::net::SocketAddr>> {
+        let mut addresses: Vec<std::net::SocketAddr> = netloc.to_socket_addrs()?.collect();
+        addresses.sort_by_key(|address| if address.is_ipv4() { 0 } else { 1 });
+        addresses.dedup();
+        Ok(addresses)
+    }
+}
+
+/// На Windows сертификаты проверяет сама система (CryptoAPI): она
+/// подгружает недостающие корневые сертификаты по требованию и знает
+/// о корпоративных/антивирусных корнях (Kaspersky, ESET, Avast
+/// перехватывают HTTPS). Встроенный в ureq список webpki-roots об этом
+/// не знает, и запросы падали с ошибкой TLS только на Windows.
+fn platform_tls_config() -> Option<Arc<rustls::ClientConfig>> {
+    if !cfg!(windows) {
+        return None;
+    }
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let verifier = rustls_platform_verifier::Verifier::new(provider.clone()).ok()?;
+    let config = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .ok()?
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(verifier))
+        .with_no_client_auth();
+    Some(Arc::new(config))
+}
+
 pub struct HttpClient {
     timeout: Duration,
     retries: u32,
     user_agent: String,
     proxy: String,
     agent: ureq::Agent,
+    source: DownloadSource,
     pub cancellation: Option<Arc<CancellationToken>>,
     download_observer: Option<DownloadObserver>,
     request_observer: Option<RequestObserver>,
@@ -80,10 +196,21 @@ impl HttpClient {
         cancellation: Option<Arc<CancellationToken>>,
     ) -> Result<Self, String> {
         let proxy = proxy.trim();
+        let idle = Duration::from_secs(timeout_seconds.max(1) as u64);
+        // Таймаут — на простой соединения (нет байтов N секунд), а не на
+        // весь запрос: общий дедлайн ureq (.timeout) обрывал любую загрузку
+        // дольше N секунд с «timed out reading response», как бы быстро
+        // ни шли данные. На медленных каналах это ломало установку
+        // client.jar, Java и крупных библиотек.
         let mut builder = ureq::AgentBuilder::new()
-            .timeout_connect(Duration::from_secs(10))
-            .timeout(Duration::from_secs(timeout_seconds.max(1) as u64))
+            .timeout_connect(Duration::from_secs(15))
+            .timeout_read(idle)
+            .timeout_write(idle)
+            .resolver(PreferIpv4Resolver)
             .redirects(0);
+        if let Some(tls) = platform_tls_config() {
+            builder = builder.tls_config(tls);
+        }
         if !proxy.is_empty() {
             // socks5h = SOCKS5 с remote-DNS; ureq различия не делает, DNS
             // и так резолвит прокси.
@@ -93,15 +220,35 @@ impl HttpClient {
             builder = builder.proxy(parsed);
         }
         Ok(Self {
-            timeout: Duration::from_secs(timeout_seconds.max(1) as u64),
+            timeout: idle,
             retries: retries.max(1),
             user_agent: format!("{}/{}", super::constants::APP_NAME, super::constants::APP_VERSION),
             proxy: proxy.to_owned(),
             agent: builder.build(),
+            source: DownloadSource::Auto,
             cancellation,
             download_observer: None,
             request_observer: None,
         })
+    }
+
+    pub fn set_download_source(&mut self, source: DownloadSource) {
+        self.source = source;
+    }
+
+    fn candidates(&self, url: &str, method: &str) -> Vec<Candidate> {
+        let original = Candidate { url: url.to_owned(), mirror: false };
+        if method != "GET" || self.source == DownloadSource::Official {
+            return vec![original];
+        }
+        let Some(mirrored) = mirror_url(url) else {
+            return vec![original];
+        };
+        let mirror = Candidate { url: mirrored, mirror: true };
+        match self.source {
+            DownloadSource::Mirror => vec![mirror, original],
+            _ => vec![original, mirror],
+        }
     }
 
     pub fn set_observers(&mut self, download: Option<DownloadObserver>, request: Option<RequestObserver>) {
@@ -243,26 +390,64 @@ impl HttpClient {
         max_bytes: Option<u64>,
         redirect_validator: Option<RedirectValidator<'_>>,
     ) -> Result<Vec<u8>, String> {
+        let candidates = self.candidates(url, method);
+        let mut failures: Vec<String> = Vec::new();
+        for candidate in &candidates {
+            if candidate.mirror {
+                self.notify_request("mirror", &candidate.url, 1);
+            }
+            // Белый список редиректов (например, только maven Forge) относится
+            // к официальному адресу; у зеркала свои CDN-узлы, а подлинность
+            // файлов подтверждают хеши.
+            let validator = if candidate.mirror { None } else { redirect_validator };
+            match self.request_from(&candidate.url, method, data, headers, max_bytes, validator) {
+                Ok(body) => return Ok(body),
+                Err(SourceError::Fatal(message)) => return Err(message),
+                Err(SourceError::Failed { message, status }) => {
+                    self.check_cancelled()?;
+                    // 404/410 от официального сервера — это ответ, а не сбой:
+                    // зеркало такого файла тоже не найдёт.
+                    let definitive = !candidate.mirror && matches!(status, Some(404) | Some(410));
+                    if candidates.len() == 1 || definitive {
+                        return Err(message);
+                    }
+                    failures.push(source_failure(&candidate.url, candidate.mirror, &message));
+                }
+            }
+        }
+        Err(format!("Не удалось получить {url} ни с одного источника: {}", failures.join("; ")))
+    }
+
+    fn request_from(
+        &self,
+        url: &str,
+        method: &str,
+        data: Option<&[u8]>,
+        headers: Option<&[(String, String)]>,
+        max_bytes: Option<u64>,
+        redirect_validator: Option<RedirectValidator<'_>>,
+    ) -> Result<Vec<u8>, SourceError> {
         let mut headers_vec: Vec<(String, String)> = vec![
             ("User-Agent".into(), self.user_agent.clone()),
             ("Accept".into(), "application/json".into()),
         ];
         headers_vec.extend(headers.unwrap_or(&[]).to_vec());
         let limit = max_bytes.unwrap_or(MAX_RESPONSE_BYTES);
+        let fatal = SourceError::Fatal;
         let mut last_error = String::new();
         for attempt in 1..=self.retries {
-            self.check_cancelled()?;
-            self.rate_limit_before(url)?;
+            self.check_cancelled().map_err(fatal)?;
+            self.rate_limit_before(url).map_err(fatal)?;
             self.notify_request("start", url, attempt);
             match self.open_once(url, method, data, &headers_vec, redirect_validator) {
                 Ok(response) => {
                     if let Some(declared) = declared_length(&response) {
                         if declared > limit {
-                            return Err("Ответ сервиса слишком большой".to_owned());
+                            return Err(fatal("Ответ сервиса слишком большой".to_owned()));
                         }
                     }
                     if response.body.len() as u64 > limit {
-                        return Err("Ответ сервиса слишком большой".to_owned());
+                        return Err(fatal("Ответ сервиса слишком большой".to_owned()));
                     }
                     if response.status == 429 {
                         let retry_after = response
@@ -273,20 +458,24 @@ impl HttpClient {
                         if attempt < self.retries {
                             self.rate_limit_after_429(url, retry_after);
                             self.notify_request("retry", url, attempt);
-                            self.wait(retry_after)?;
+                            self.wait(retry_after).map_err(fatal)?;
                             continue;
                         }
-                        return Err(format!(
-                            "HTTP 429: сервер временно ограничил запросы к {url}. Повторите позже."
-                        ));
+                        return Err(SourceError::Failed {
+                            message: format!("HTTP 429: сервер временно ограничил запросы к {url}. Повторите позже."),
+                            status: Some(429),
+                        });
                     }
                     if response.status >= 500 && attempt < self.retries {
                         self.notify_request("retry", url, attempt);
-                        self.wait(1.0 + attempt as f64)?;
+                        self.wait(1.0 + attempt as f64).map_err(fatal)?;
                         continue;
                     }
                     if response.status >= 400 {
-                        return Err(format!("HTTP {} при запросе {}", response.status, response.url));
+                        return Err(SourceError::Failed {
+                            message: format!("HTTP {} при запросе {}", response.status, response.url),
+                            status: Some(response.status),
+                        });
                     }
                     return Ok(response.body);
                 }
@@ -294,13 +483,16 @@ impl HttpClient {
                     last_error = error;
                     if attempt < self.retries {
                         self.notify_request("retry", url, attempt);
-                        self.wait(1.0 + attempt as f64)?;
+                        self.wait(1.0 + attempt as f64).map_err(fatal)?;
                         continue;
                     }
                 }
             }
         }
-        Err(format!("Сетевая ошибка при запросе {url}: {last_error}"))
+        Err(SourceError::Failed {
+            message: format!("Сетевая ошибка при запросе {url}: {last_error}"),
+            status: None,
+        })
     }
 
     pub fn request(
@@ -436,7 +628,7 @@ impl HttpClient {
         headers: Option<&[(String, String)]>,
         redirect_validator: Option<RedirectValidator<'_>>,
     ) -> Result<bool, String> {
-        validate_public_https_url(url)?;
+        url::Url::parse(url).map_err(|_| format!("Некорректный сетевой адрес: {url}"))?;
         self.check_cancelled()?;
         if let Some(size) = size {
             if size > MAX_DOWNLOAD_BYTES {
@@ -468,92 +660,232 @@ impl HttpClient {
 
         let temporary = destination.with_file_name(format!(".{}.part", file_name_of(destination)));
         reject_symlink_path(&temporary)?;
-        let _ = std::fs::remove_file(&temporary);
-        let mut last_error = String::new();
-        for attempt in 1..=self.retries {
+        let candidates = self.candidates(url, "GET");
+        let mut failures: Vec<String> = Vec::new();
+        for candidate in &candidates {
             self.check_cancelled()?;
-            self.notify_request("download", url, attempt);
-            let mut headers_vec: Vec<(String, String)> = vec![("User-Agent".into(), self.user_agent.clone())];
-            headers_vec.extend(headers.unwrap_or(&[]).to_vec());
-            match self.open_stream(url, &headers_vec, redirect_validator) {
-                Ok(mut stream) => {
-                    let total_size = stream.total_size.or(size);
-                    if let Some(total) = total_size {
-                        if total > MAX_DOWNLOAD_BYTES {
-                            return Err("Файл загрузки слишком большой".to_owned());
-                        }
-                    }
-                    let mut written: u64 = 0;
-                    let outcome = (|| -> Result<(), String> {
-                        let mut handle = File::create(&temporary)
-                            .map_err(|error| format!("Не удалось создать временный файл: {error}"))?;
-                        let mut buffer = [0u8; 1024 * 1024];
-                        loop {
-                            self.check_cancelled()?;
-                            let count = stream
-                                .reader
-                                .read(&mut buffer)
-                                .map_err(|error| format!("Обрыв загрузки: {error}"))?;
-                            if count == 0 {
-                                break;
-                            }
-                            written += count as u64;
-                            if written > MAX_DOWNLOAD_BYTES {
-                                return Err("Файл загрузки слишком большой".to_owned());
-                            }
-                            handle
-                                .write_all(&buffer[..count])
-                                .map_err(|error| format!("Не удалось записать файл: {error}"))?;
-                            if let Some(progress) = progress {
-                                progress(written, total_size);
-                            }
-                            self.notify_download("progress", url, destination, written, total_size);
-                        }
-                        Ok(())
-                    })();
-                    if let Err(error) = outcome {
-                        let _ = std::fs::remove_file(&temporary);
-                        return Err(error);
-                    }
-                    if !verify_file(&temporary, sha1, sha256, sha512, size) {
-                        let _ = std::fs::remove_file(&temporary);
-                        return Err(format!("Проверка хеша не пройдена: {url}"));
-                    }
-                    std::fs::rename(&temporary, destination)
-                        .map_err(|error| format!("Не удалось сохранить файл: {error}"))?;
-                    self.notify_download("complete", url, destination, written, total_size);
-                    return Ok(true);
-                }
-                Err(error) => {
+            if candidate.mirror {
+                self.notify_request("mirror", &candidate.url, 1);
+            }
+            let validator = if candidate.mirror { None } else { redirect_validator };
+            let outcome = self.download_from(
+                &candidate.url,
+                destination,
+                &temporary,
+                sha1,
+                sha256,
+                sha512,
+                size,
+                progress,
+                headers,
+                validator,
+            );
+            match outcome {
+                Ok(()) => return Ok(true),
+                Err(SourceError::Fatal(message)) => {
                     let _ = std::fs::remove_file(&temporary);
-                    last_error = error;
-                    if attempt < self.retries {
-                        self.notify_request("retry", url, attempt);
-                        self.wait(1.0 + attempt as f64)?;
-                        continue;
+                    return Err(message);
+                }
+                Err(SourceError::Failed { message, status }) => {
+                    let _ = std::fs::remove_file(&temporary);
+                    self.check_cancelled()?;
+                    let definitive = !candidate.mirror && matches!(status, Some(404) | Some(410));
+                    if candidates.len() == 1 || definitive {
+                        return Err(format!("Не удалось скачать {url}: {message}"));
                     }
+                    failures.push(source_failure(&candidate.url, candidate.mirror, &message));
                 }
             }
         }
-        Err(format!("Не удалось скачать {url}: {last_error}"))
+        Err(format!("Не удалось скачать {url} ни с одного источника: {}", failures.join("; ")))
     }
 
-    /// Ответ в виде потока — для download(); редиректы обрабатывает open_once.
+    /// Загрузка из одного источника с повторами. Оборванное соединение
+    /// не начинает файл заново: следующая попытка докачивает с места
+    /// обрыва через Range (если сервер его поддерживает).
+    #[allow(clippy::too_many_arguments)]
+    fn download_from(
+        &self,
+        url: &str,
+        destination: &Path,
+        temporary: &Path,
+        sha1: Option<&str>,
+        sha256: Option<&str>,
+        sha512: Option<&str>,
+        size: Option<u64>,
+        progress: Option<&Progress>,
+        headers: Option<&[(String, String)]>,
+        redirect_validator: Option<RedirectValidator<'_>>,
+    ) -> Result<(), SourceError> {
+        let fatal = SourceError::Fatal;
+        let _ = std::fs::remove_file(temporary);
+        let mut offset: u64 = 0;
+        let mut integrity_restarts = 0u32;
+        let mut last_error = String::new();
+        let mut last_status: Option<u16> = None;
+        let mut attempt: u32 = 0;
+        while attempt < self.retries {
+            attempt += 1;
+            self.check_cancelled().map_err(fatal)?;
+            self.rate_limit_before(url).map_err(fatal)?;
+            self.notify_request("download", url, attempt);
+            let mut headers_vec: Vec<(String, String)> = vec![
+                ("User-Agent".into(), self.user_agent.clone()),
+                // Без gzip: иначе счётчик байтов не совпадает с Range-смещением.
+                ("Accept-Encoding".into(), "identity".into()),
+            ];
+            headers_vec.extend(headers.unwrap_or(&[]).to_vec());
+            if offset > 0 {
+                headers_vec.push(("Range".into(), format!("bytes={offset}-")));
+            }
+            let mut stream = match self.open_stream(url, &headers_vec, redirect_validator) {
+                Ok(stream) => stream,
+                Err((status, message)) => {
+                    last_error = message;
+                    last_status = status;
+                    match status {
+                        Some(416) if offset > 0 => {
+                            // Сервер не принял докачку — начинаем файл заново,
+                            // попытку не засчитываем.
+                            let _ = std::fs::remove_file(temporary);
+                            offset = 0;
+                            attempt -= 1;
+                            continue;
+                        }
+                        Some(429) => {
+                            let delay = 2.0 + attempt as f64;
+                            self.rate_limit_after_429(url, delay);
+                            if attempt < self.retries {
+                                self.notify_request("retry", url, attempt);
+                                self.wait(delay).map_err(fatal)?;
+                            }
+                            continue;
+                        }
+                        // Остальные 4xx повторять бессмысленно — сразу к
+                        // следующему источнику.
+                        Some(code) if (400..500).contains(&code) && code != 408 => {
+                            return Err(SourceError::Failed { message: last_error, status });
+                        }
+                        _ => {
+                            if attempt < self.retries {
+                                self.notify_request("retry", url, attempt);
+                                self.wait(1.0 + attempt as f64).map_err(fatal)?;
+                            }
+                            continue;
+                        }
+                    }
+                }
+            };
+            let resumed = offset > 0 && stream.status == 206;
+            if offset > 0 && !resumed {
+                offset = 0;
+            }
+            let total_size = if resumed {
+                stream.total_size.map(|remaining| remaining + offset).or(size)
+            } else {
+                stream.total_size.or(size)
+            };
+            if let Some(total) = total_size {
+                if total > MAX_DOWNLOAD_BYTES {
+                    return Err(fatal("Файл загрузки слишком большой".to_owned()));
+                }
+            }
+            let mut handle = if resumed {
+                OpenOptions::new().append(true).open(temporary)
+            } else {
+                File::create(temporary)
+            }
+            .map_err(|error| fatal(format!("Не удалось создать временный файл {}: {error}", temporary.display())))?;
+            let mut written = offset;
+            let mut buffer = vec![0u8; 256 * 1024];
+            let mut interrupted: Option<String> = None;
+            loop {
+                self.check_cancelled().map_err(fatal)?;
+                let count = match stream.reader.read(&mut buffer) {
+                    Ok(count) => count,
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(error) => {
+                        interrupted = Some(format!("Обрыв загрузки: {error}"));
+                        break;
+                    }
+                };
+                if count == 0 {
+                    break;
+                }
+                written += count as u64;
+                if written > MAX_DOWNLOAD_BYTES {
+                    return Err(fatal("Файл загрузки слишком большой".to_owned()));
+                }
+                handle
+                    .write_all(&buffer[..count])
+                    .map_err(|error| fatal(format!("Не удалось записать файл {}: {error}", temporary.display())))?;
+                if let Some(progress) = progress {
+                    progress(written, total_size);
+                }
+                self.notify_download("progress", url, destination, written, total_size);
+            }
+            handle
+                .flush()
+                .map_err(|error| fatal(format!("Не удалось записать файл {}: {error}", temporary.display())))?;
+            drop(handle);
+            let expected = size.or(total_size);
+            if interrupted.is_none() {
+                if let Some(expected) = expected {
+                    if written < expected {
+                        interrupted = Some(format!("Соединение закрыто на {written} из {expected} байт"));
+                    }
+                }
+            }
+            if let Some(message) = interrupted {
+                last_error = message;
+                last_status = None;
+                // Сохранённая часть докачивается следующей попыткой.
+                offset = std::fs::metadata(temporary).map(|meta| meta.len()).unwrap_or(0);
+                if offset > MAX_DOWNLOAD_BYTES {
+                    offset = 0;
+                    let _ = std::fs::remove_file(temporary);
+                }
+                if attempt < self.retries {
+                    self.notify_request("retry", url, attempt);
+                    self.wait(1.0 + attempt as f64).map_err(fatal)?;
+                }
+                continue;
+            }
+            if !verify_file(temporary, sha1, sha256, sha512, size) {
+                let _ = std::fs::remove_file(temporary);
+                offset = 0;
+                last_error = format!("Проверка хеша не пройдена: {url}");
+                last_status = None;
+                // Битая докачка заслуживает одну чистую попытку с нуля.
+                if resumed && integrity_restarts == 0 {
+                    integrity_restarts += 1;
+                    continue;
+                }
+                return Err(SourceError::Failed { message: last_error, status: None });
+            }
+            replace_file(temporary, destination)
+                .map_err(|error| fatal(format!("Не удалось сохранить файл {}: {error}", destination.display())))?;
+            self.notify_download("complete", url, destination, written, total_size);
+            return Ok(());
+        }
+        Err(SourceError::Failed { message: last_error, status: last_status })
+    }
+
+    /// Ответ в виде потока — для download(); редиректы обрабатывает open_once_raw.
     fn open_stream(
         &self,
         url: &str,
         headers: &[(String, String)],
         redirect_validator: Option<RedirectValidator<'_>>,
-    ) -> Result<StreamResponse, String> {
-        validate_public_https_url(url)?;
-        self.check_cancelled()?;
-        let outcome = self.open_once_raw(url, "GET", None, headers, redirect_validator)?;
+    ) -> Result<StreamResponse, (Option<u16>, String)> {
+        let outcome = self
+            .open_once_raw(url, "GET", None, headers, redirect_validator)
+            .map_err(|error| (None, error))?;
         if outcome.status >= 400 {
-            return Err(format!("HTTP {} при запросе {}", outcome.status, url));
+            return Err((Some(outcome.status), format!("HTTP {} при загрузке {}", outcome.status, url)));
         }
         Ok(outcome)
     }
-
     fn open_once_raw(
         &self,
         url: &str,
@@ -620,10 +952,7 @@ struct StreamResponse {
     status: u16,
 }
 
-fn into_stream(response: ureq::Response, url: url::Url, status: u16) -> Result<StreamResponse, String> {
-    if status >= 400 {
-        return Err(format!("HTTP {status} при запросе {url}"));
-    }
+fn into_stream(response: ureq::Response, _url: url::Url, status: u16) -> Result<StreamResponse, String> {
     let total_size = response
         .header("content-length")
         .and_then(|value| value.trim().parse::<u64>().ok())
@@ -650,6 +979,31 @@ fn finish_response(response: ureq::Response, url: url::Url, status: u16) -> Resu
         url: url.to_string(),
         body,
     })
+}
+
+fn source_failure(url: &str, mirror: bool, message: &str) -> String {
+    let label = if mirror { "зеркало" } else { "официальный сервер" };
+    format!("{label} {}: {message}", url_host(url))
+}
+
+/// Замена файла с повтором: на Windows антивирус или индексатор успевает
+/// открыть только что записанный файл, и rename кратковременно получает
+/// «отказано в доступе».
+fn replace_file(source: &Path, destination: &Path) -> std::io::Result<()> {
+    let mut last_error = None;
+    for attempt in 0..8u32 {
+        match std::fs::rename(source, destination) {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                last_error = Some(error);
+                if !cfg!(windows) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(100 * (attempt as u64 + 1)));
+            }
+        }
+    }
+    Err(last_error.unwrap_or_else(|| std::io::Error::other("rename failed")))
 }
 
 fn declared_length(response: &DetailedResponse) -> Option<u64> {
@@ -691,7 +1045,11 @@ pub(crate) fn client_from_settings(settings: &Value, operation_id: &str) -> Resu
     } else {
         Some(Arc::new(super::operations::CancellationToken::new(operation_id)))
     };
-    Ok(Arc::new(HttpClient::new(timeout, retries, proxy, cancellation)?))
+    let mut client = HttpClient::new(timeout, retries, proxy, cancellation)?;
+    client.set_download_source(DownloadSource::parse(
+        settings.get("download_source").and_then(Value::as_str).unwrap_or("auto"),
+    ));
+    Ok(Arc::new(client))
 }
 
 pub fn file_hash(path: &Path, algorithm: &str) -> Result<String, String> {
@@ -877,6 +1235,7 @@ impl Clone for HttpClient {
             user_agent: self.user_agent.clone(),
             proxy: self.proxy.clone(),
             agent: self.agent.clone(),
+            source: self.source,
             cancellation: self.cancellation.clone(),
             download_observer: None,
             request_observer: None,
@@ -910,4 +1269,72 @@ pub fn atomic_json_write(path: &Path, value: &Value, private: bool) -> Result<()
     }
     std::fs::rename(&temporary, path).map_err(|error| format!("Не удалось сохранить файл: {error}"))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mirror_url_maps_known_hosts() {
+        assert_eq!(
+            mirror_url("https://piston-data.mojang.com/v1/objects/abc/client.jar").as_deref(),
+            Some("https://bmclapi2.bangbang93.com/v1/objects/abc/client.jar")
+        );
+        assert_eq!(
+            mirror_url("https://resources.download.minecraft.net/ab/abcdef").as_deref(),
+            Some("https://bmclapi2.bangbang93.com/assets/ab/abcdef")
+        );
+        assert_eq!(
+            mirror_url("https://maven.neoforged.net/releases/net/neoforged/x.jar").as_deref(),
+            Some("https://bmclapi2.bangbang93.com/maven/net/neoforged/x.jar")
+        );
+        assert_eq!(
+            mirror_url("https://meta.fabricmc.net/v2/versions/loader?x=1").as_deref(),
+            Some("https://bmclapi2.bangbang93.com/fabric-meta/v2/versions/loader?x=1")
+        );
+        assert!(mirror_url("https://api.modrinth.com/v2/search").is_none());
+        assert!(mirror_url("https://maven.neoforged.net/releasesX/a.jar").is_none());
+        assert!(mirror_url("https://piston-meta.mojang.com:8443/a.json").is_none());
+    }
+
+    #[test]
+    fn candidates_follow_download_source() {
+        let mut client = HttpClient::new(5, 1, "", None).unwrap();
+        let url = "https://libraries.minecraft.net/a/b.jar";
+        let urls = |client: &HttpClient, method: &str| -> Vec<(String, bool)> {
+            client.candidates(url, method).into_iter().map(|item| (item.url, item.mirror)).collect()
+        };
+        assert_eq!(
+            urls(&client, "GET"),
+            vec![(url.to_owned(), false), ("https://bmclapi2.bangbang93.com/maven/a/b.jar".to_owned(), true)]
+        );
+        client.set_download_source(DownloadSource::Mirror);
+        assert!(urls(&client, "GET")[0].1);
+        assert_eq!(urls(&client, "POST").len(), 1);
+        client.set_download_source(DownloadSource::Official);
+        assert_eq!(urls(&client, "GET").len(), 1);
+        assert_eq!(DownloadSource::parse("BMCLAPI"), DownloadSource::Mirror);
+        assert_eq!(DownloadSource::parse("weird"), DownloadSource::Auto);
+    }
+
+    /// Реальная сеть: `cargo test --lib net::tests::live -- --ignored`.
+    #[test]
+    #[ignore]
+    fn live_download_official_and_mirror() {
+        let url = "https://piston-data.mojang.com/v1/objects/0c3ec587af28e5a785c0b4a7b8a30f9a8f78f838/client.jar";
+        let sha1 = "0c3ec587af28e5a785c0b4a7b8a30f9a8f78f838";
+        for source in [DownloadSource::Official, DownloadSource::Mirror] {
+            let mut client = HttpClient::new(2, 3, "", None).unwrap();
+            client.set_download_source(source);
+            let directory = std::env::temp_dir().join(format!("nivora-live-{source:?}"));
+            let _ = std::fs::remove_dir_all(&directory);
+            let destination = directory.join("client.jar");
+            let started = Instant::now();
+            assert!(client.download(url, &destination, Some(sha1), None, None, None, None, None, None).unwrap());
+            eprintln!("{source:?}: {:?}", started.elapsed());
+            assert!(verify_file(&destination, Some(sha1), None, None, None));
+            let _ = std::fs::remove_dir_all(&directory);
+        }
+    }
 }

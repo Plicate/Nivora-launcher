@@ -29,7 +29,9 @@ def set_private_path(path: Path) -> None:
 
     try:
         restrict_to_current_user(path)
-    except (WindowsSandboxError, OSError, subprocess.SubprocessError):
+    except (WindowsSandboxError, OSError, subprocess.SubprocessError, AttributeError, ValueError):
+        # AttributeError: в урезанных окружениях (Wine, старые сборки Windows)
+        # нет части Win32 API — запуск игры из-за ACL срываться не должен.
         pass
 
 

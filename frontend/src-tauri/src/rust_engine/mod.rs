@@ -100,6 +100,10 @@ pub const NATIVE_OPS: &[&str] = &[
     "server_status",
     "mod_dependency_graph",
     "mod_removal_impact",
+    // Поиск источников импорта — только чтение пары каталогов. Через общий
+    // Python-воркер он вставал в очередь за долгими операциями, и кнопка
+    // «Импорт» бесконечно показывала «Ищу источники…».
+    "external_instances_scan",
 ];
 
 pub fn is_native(operation: &str) -> bool {
@@ -180,6 +184,7 @@ pub fn needs_worker(operation: &str, request: &Value) -> bool {
         "server_status" => Ok(ok_response(operation, server::server_status(request)?)),
         "mod_dependency_graph" => Ok(ok_response(operation, mod_dependencies::mod_dependency_graph(request)?)),
         "mod_removal_impact" => Ok(ok_response(operation, mod_dependencies::mod_removal_impact(request)?)),
+        "external_instances_scan" => Ok(ok_response(operation, instances::external_instances_scan(request)?)),
         "bedrock_runtime_status" => Ok(ok_response(operation, bedrock::runtime_status(request)?)),
         "bedrock_versions" => Ok(ok_response(operation, bedrock::versions(request)?)),
         "bedrock_setup_version" => Ok(ok_response(operation, bedrock::setup_version(request)?)),

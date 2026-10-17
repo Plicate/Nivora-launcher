@@ -2,6 +2,9 @@ import { convertFileSrc, invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import type {
   AccountInfo,
+  AutoRepairFix,
+  AutoRepairReport,
+  AutoRepairResult,
   AnimationSettings,
   AppState,
   BedrockContentItem,
@@ -85,7 +88,7 @@ const fallbackSettings: SettingsInfo = {
   game_dir: '~/.local/share/nivora-launcher/game',
   java_path: '',
   security_profile: 'strict',
-  security_permissions: ['files:instance', 'desktop:display', 'desktop:audio'],
+  security_permissions: ['network:game', 'files:instance', 'desktop:display', 'desktop:audio'],
   memory: '8GiB',
   memory_kib: 8 * 1024 * 1024,
   memory_total_kib: 16 * 1024 * 1024,
@@ -104,6 +107,8 @@ const fallbackSettings: SettingsInfo = {
   download_timeout_seconds: 30,
   download_retries: 5,
   confirm_destructive_actions: true,
+  auto_repair_enabled: true,
+  auto_repair_muted: [],
   show_activity_panel: true,
   show_toasts: true,
   minimize_on_launch: false,
@@ -117,6 +122,7 @@ const fallbackSettings: SettingsInfo = {
   launcher_profiles: [{ id: 'default', name: 'По умолчанию', memory: 'auto', java_path: '', graphics_mode: 'auto', account_id: 'auto', window_width: 1280, window_height: 720, fullscreen: false, quick_play_world: '', quick_play_server: '', jvm_arguments: [], game_arguments: [] }],
   active_launcher_profile_id: 'default',
   http_proxy: '',
+  download_source: 'auto',
   has_client_id: false,
   developer_mode: false,
   theme: 'dark',
@@ -244,7 +250,7 @@ function defaultMockInstanceSettings(): InstanceSettings {
     jvm_preset: 'none',
     console_colors: { error: '#ff657a', info: '#e6edf7', warning: '#f5c451' },
     security_profile: 'strict',
-    security_permissions: ['files:instance', 'desktop:display', 'desktop:audio'],
+    security_permissions: ['network:game', 'files:instance', 'desktop:display', 'desktop:audio'],
   }
 }
 
@@ -287,6 +293,8 @@ function requestTimeout(operation: string): number | undefined {
   if (operation === 'recording_start' || operation === 'recording_stop') return 45000
   if (operation === 'recording_status') return 15000
   if (operation === 'server_plugin_install' || operation === 'server_plugin_update' || operation === 'server_file_upload' || operation === 'server_upload_core' || operation === 'server_core_download' || operation === 'mods_update') return 10 * 60 * 1000
+  if (operation === 'world_import_chunk' || operation === 'world_import_begin' || operation === 'world_import_cancel' || operation === 'mods_remove_files') return 2 * 60 * 1000
+  if (operation === 'world_import_finish') return 20 * 60 * 1000
   if (operation === 'mod_audit_prepare') return 5 * 60 * 1000
   if (operation === 'mod_audit_accept') return 30 * 60 * 1000
   return undefined
@@ -583,6 +591,14 @@ async function mockRequest<T>(operation: string, payload: Record<string, unknown
     const instance = fallbackState.instances.find((item) => item.name === String(payload.instance_name || ''))
     if (!instance) throw new Error('Экземпляр не найден')
     return { version_id: instance.version_id, instance_dir: instance.path, instances: structuredClone(fallbackState.instances) } as T
+  }
+  if (operation === 'auto_repair_diagnose') return { instance_name: String(payload.instance_name || ''), exit_code: null, issues: [], muted_issues: [], manual: Boolean(payload.manual) } as T
+  if (operation === 'auto_repair_apply') throw new Error('Авто-починка доступна только в desktop launcher')
+  if (operation === 'auto_repair_mute') {
+    const kinds = Array.isArray(payload.kinds) ? payload.kinds.map(String) : []
+    const current = fallbackSettings.auto_repair_muted
+    fallbackSettings.auto_repair_muted = payload.muted === false ? current.filter((kind) => !kinds.includes(kind)) : [...new Set([...current, ...kinds])]
+    return { settings: structuredClone(fallbackSettings) } as T
   }
   if (operation === 'skins_list') return { skins: [] } as T
   if (operation === 'instance_log') return { lines: [], running: false, metrics: { timestamp: Date.now() / 1000, pid: 0, running: false, uptime_seconds: 0, ram_bytes: 0, cpu_percent: 0, storage_bytes: 0, players: 0, max_players: 0, tps: 0 } } as T
@@ -936,6 +952,16 @@ export const bridge = {
   removeInstanceAsset: (name: string, kind: string, path: string) =>
     request<InstanceDetails>('remove_instance_asset', { name, kind, path }),
   toggleMod: (name: string, path: string, enabled: boolean) => request<InstanceDetails>('toggle_mod', { name, path, enabled }),
+  modsRemoveFiles: (name: string, paths: string[]) =>
+    request<{ removed: string[]; failed: Array<{ path: string; error: string }>; details: InstanceDetails }>('mods_remove_files', { name, paths }),
+  worldImportBegin: (name: string, kind: 'archive' | 'folder', label: string) =>
+    request<{ upload_id: string; chunk_bytes: number }>('world_import_begin', { name, kind, label }),
+  worldImportChunk: (name: string, uploadId: string, path: string, offset: number, data: string) =>
+    request<{ bytes: number; files: number }>('world_import_chunk', { name, upload_id: uploadId, path, offset, data }),
+  worldImportFinish: (name: string, uploadId: string) =>
+    request<{ imported: string[]; details: InstanceDetails }>('world_import_finish', { name, upload_id: uploadId }),
+  worldImportCancel: (name: string, uploadId: string) =>
+    request<{ cancelled: boolean }>('world_import_cancel', { name, upload_id: uploadId }),
   modAuditPrepare: (instanceName: string, path: string, signal?: AbortSignal) =>
     request<ModAuditPrepareResult>('mod_audit_prepare', { instance_name: instanceName, path }, signal),
   modAuditAccept: (sessionId: string, signal?: AbortSignal) =>
@@ -969,12 +995,18 @@ export const bridge = {
     account?: string
     profile_id?: string
     no_assets?: boolean
-  }) => request<{ exit_code: number; logs: string[]; version_id: string; crash?: CrashReport }>('launch', payload),
+  }) => request<{ exit_code: number; logs: string[]; version_id: string; crash?: CrashReport; repair?: AutoRepairReport | null }>('launch', payload),
   launchInstance: (name: string, options: { world?: string; server?: string; account?: string; profile_id?: string } = {}) =>
-    request<{ exit_code: number; logs: string[]; version_id: string; crash?: CrashReport }>('launch_instance', { name, ...options }),
+    request<{ exit_code: number; logs: string[]; version_id: string; crash?: CrashReport; repair?: AutoRepairReport | null }>('launch_instance', { name, ...options }),
+  autoRepairDiagnose: (payload: { instance_name: string; exit_code?: number | null; error?: string; manual?: boolean }) =>
+    request<AutoRepairReport>('auto_repair_diagnose', payload),
+  autoRepairApply: (instanceName: string, fixes: AutoRepairFix[]) =>
+    request<{ instance_name: string; results: AutoRepairResult[]; instances: InstanceInfo[] }>('auto_repair_apply', { instance_name: instanceName, fixes }),
+  autoRepairMute: (kinds: string[], muted = true) =>
+    request<{ settings: SettingsInfo }>('auto_repair_mute', { kinds, muted }),
   openFolder: (path?: string) => request<{ opened: boolean }>('open_folder', { path }),
-  modsSearch: (payload: { query: string; instance_name?: string; game_version?: string; loader?: string; server_core?: string; project_type?: ProjectType; catalog_id?: string; sort_by?: CatalogSort }) =>
-    request<{ results: ModResult[]; instance_name: string; game_version: string; loader: string; server_core?: string; catalog_id?: string }>('mods_search', payload),
+  modsSearch: (payload: { query: string; instance_name?: string; game_version?: string; loader?: string; server_core?: string; project_type?: ProjectType; catalog_id?: string; sort_by?: CatalogSort; page?: number; limit?: number }) =>
+    request<{ results: ModResult[]; page?: number; page_size?: number; total?: number | null; has_more?: boolean; instance_name: string; game_version: string; loader: string; server_core?: string; catalog_id?: string }>('mods_search', payload),
   modsDetails: (payload: { project_id: string; instance_name?: string; game_version?: string; loader?: string; server_core?: string; project_type?: ProjectType; catalog_id?: string }) =>
     request<{ details: Record<string, unknown>; compatible_versions: { id: string; version_number: string; name: string; date_published: string; game_versions: string[]; loaders: string[] }[]; catalog_id: string }>('mods_details', payload),
   modsCheckUpdates: (instanceName: string, projectType: Exclude<ProjectType, 'plugin' | 'modpack'>, catalogId?: string) =>

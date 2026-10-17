@@ -1,0 +1,25 @@
+{
+  "name": "@nivora-launcher/plugin-sdk",
+  "version": "3.0.0",
+  "description": "Type-only API contracts for Nivora Launcher plugins",
+  "type": "module",
+  "types": "./api-v3.ts",
+  "exports": {
+    ".": {
+      "types": "./api-v3.ts"
+    },
+    "./v2": {
+      "types": "./api.ts"
+    },
+    "./v3": {
+      "types": "./api-v3.ts"
+    }
+  },
+  "files": [
+    "api.ts",
+    "api-v3.ts",
+    "README.md"
+  ],
+  "sideEffects": false,
+  "license": "GPL-3.0-only"
+}

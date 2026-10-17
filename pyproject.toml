@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nivora-launcher"
-version = "1.0.1"
+version = "1.0.3"
 description = "Nivora Launcher: a small universal Minecraft launcher"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -13,7 +13,7 @@ license = {text = "GPL-3.0-only"}
 authors = [{name = "Nivora Launcher contributors"}]
 
 [project.optional-dependencies]
-windows = ["keyring>=25.0", "pywin32>=306"]
+windows = ["keyring>=25.0", "pywin32>=306", "truststore>=0.9"]
 
 [project.scripts]
 nivora-launcher = "nivora_launcher.cli:main"

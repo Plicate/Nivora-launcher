@@ -9,6 +9,7 @@ import ModAuditDialog from './ModAuditDialog.vue'
 import NumericStepper from './NumericStepper.vue'
 import { bridge } from '../services/bridge'
 import { confirmDialog, promptDialog } from '../services/dialogs'
+import { diagnoseLaunchFailure, diagnoseManually, offerAutoRepair } from '../services/autoRepair'
 import type { BackupSchedule, CrashReport, InstanceAsset, InstanceConsoleColors, InstanceDetails, InstanceFile, InstanceInfo, InstanceLogArchive, InstanceSettings, ModDependencyGraph, ProjectType, ResourceUpdate, SecurityPermission, SecurityProfile, ServerMetrics, ServerSnapshot, WorldBackup } from '../types'
 import type { PluginInstanceRef } from '../../../plugins/api'
 
@@ -71,7 +72,7 @@ const securityProfileOptions: Array<{ value: SecurityProfile; label: string; met
 ]
 
 const securityPermissionOptions: Array<{ value: SecurityPermission; label: string; description: string; highRisk?: boolean }> = [
-  { value: 'network:game', label: 'Сеть игры', description: 'Доступ ко всем адресам, включая интернет и локальную сеть; включайте только для нужных сетевых функций', highRisk: true },
+  { value: 'network:game', label: 'Сеть игры', description: 'Доступ к серверам: интернет и локальная сеть. Без него игра не находит ни один сервер', highRisk: true },
   { value: 'files:instance', label: 'Файлы экземпляра', description: 'Запись в папку текущего экземпляра' },
   { value: 'desktop:display', label: 'Экран игры', description: 'Окно игры и GPU; X11/XWayland может раскрывать экран и ввод других окон. На Windows без него закрыты буфер обмена и чужие окна', highRisk: true },
   { value: 'desktop:audio', label: 'Звук игры', description: 'Подключение к PipeWire/PulseAudio и доступ к звуковым устройствам; на Windows звук отдельно не запрещается', highRisk: true },
@@ -172,7 +173,7 @@ const draft = reactive<InstanceSettings>({
   jvm_preset: 'none',
   console_colors: { ...defaultConsoleColors },
   security_profile: 'strict',
-  security_permissions: ['files:instance', 'desktop:display', 'desktop:audio'],
+  security_permissions: ['network:game', 'files:instance', 'desktop:display', 'desktop:audio'],
 })
 
 const activeAssets = computed<InstanceAsset[]>(() => {
@@ -747,6 +748,19 @@ const canExportModpack = computed(() => {
 })
 
 const repairBusy = ref(false)
+const diagnoseBusy = ref(false)
+async function diagnoseInstance(exitCode?: number | null) {
+  if (!props.instance || diagnoseBusy.value) return
+  diagnoseBusy.value = true
+  try {
+    await diagnoseManually(props.instance.name, exitCode)
+  } catch (error) {
+    emit('toast', errorMessage(error))
+  } finally {
+    diagnoseBusy.value = false
+  }
+}
+
 async function repairVersion() {
   if (!props.instance) return
   if (!(await confirmDialog('Пересоздать версию и модлоадер этого экземпляра? Моды, конфиги, миры и настройки не затрагиваются; файлы версии будут скачаны заново.', { confirmLabel: 'Восстановить' }))) return
@@ -827,6 +841,171 @@ async function toggleMod(asset: InstanceAsset) {
   } catch (error) {
     emit('toast', errorMessage(error))
   }
+}
+
+// ── Выделение модов и массовые действия ─────────────────────────────────
+const selectedModPaths = ref(new Set<string>())
+const modBulkBusy = ref(false)
+const installedModPaths = computed(() => (tab.value === 'mods' ? activeAssets.value.map((asset) => asset.path) : []))
+const selectedModCount = computed(() => installedModPaths.value.filter((path) => selectedModPaths.value.has(path)).length)
+const allModsSelected = computed(() => installedModPaths.value.length > 0 && selectedModCount.value === installedModPaths.value.length)
+
+function toggleModSelection(path: string) {
+  const next = new Set(selectedModPaths.value)
+  if (next.has(path)) next.delete(path)
+  else next.add(path)
+  selectedModPaths.value = next
+}
+
+function toggleSelectAllMods() {
+  selectedModPaths.value = allModsSelected.value ? new Set() : new Set(installedModPaths.value)
+}
+
+function selectedMods(): InstanceAsset[] {
+  return activeAssets.value.filter((asset) => asset.kind === 'mods' && selectedModPaths.value.has(asset.path))
+}
+
+async function removeSelectedMods() {
+  const targets = selectedMods()
+  if (!props.instance || !targets.length || modBulkBusy.value) return
+  if (running.value) {
+    emit('toast', 'Остановите игру перед удалением модов')
+    return
+  }
+  const preview = targets.slice(0, 5).map((asset) => `«${asset.display_name || asset.name}»`).join(', ') + (targets.length > 5 ? ` и ещё ${targets.length - 5}` : '')
+  if (props.confirmDestructive !== false && !(await confirmDialog(`Удалить выбранные моды (${targets.length}): ${preview}?`, { danger: true, confirmLabel: 'Удалить' }))) return
+  modBulkBusy.value = true
+  try {
+    const result = await bridge.modsRemoveFiles(props.instance.name, targets.map((asset) => asset.path))
+    details.value = result.details
+    selectedModPaths.value = new Set()
+    emit('changed')
+    emit('toast', result.failed.length ? `Удалено модов: ${result.removed.length}, не удалось: ${result.failed.length} (${result.failed[0].error})` : `Удалено модов: ${result.removed.length}`)
+  } catch (error) {
+    emit('toast', errorMessage(error))
+  } finally {
+    modBulkBusy.value = false
+  }
+}
+
+async function setSelectedModsEnabled(enabled: boolean) {
+  const targets = selectedMods().filter((asset) => (asset.enabled !== false) !== enabled)
+  if (!props.instance || !targets.length || modBulkBusy.value) return
+  modBulkBusy.value = true
+  let done = 0
+  const renamed = new Set<string>()
+  try {
+    for (const asset of targets) {
+      details.value = await bridge.toggleMod(props.instance.name, asset.path, enabled)
+      // Файл переименовывается (*.disabled) — выделение переносим на новое имя.
+      renamed.add(enabled ? asset.path.replace(/\.disabled$/, '') : `${asset.path}.disabled`)
+      done += 1
+    }
+    emit('toast', enabled ? `Включено модов: ${done}` : `Отключено модов: ${done}`)
+  } catch (error) {
+    emit('toast', `${errorMessage(error)} (обработано: ${done})`)
+  } finally {
+    selectedModPaths.value = new Set([...selectedModPaths.value].filter((path) => !targets.some((asset) => asset.path === path)).concat([...renamed]))
+    modBulkBusy.value = false
+  }
+}
+
+watch([tab, () => props.instance?.name], () => { selectedModPaths.value = new Set() })
+watch(details, () => {
+  // Удалённые/переименованные извне файлы не должны оставаться «выбранными».
+  const existing = new Set((details.value?.assets?.mods || []).map((asset) => asset.path))
+  if ([...selectedModPaths.value].some((path) => !existing.has(path))) {
+    selectedModPaths.value = new Set([...selectedModPaths.value].filter((path) => existing.has(path)))
+  }
+})
+
+// ── Импорт миров (архив или папка) ───────────────────────────────────────
+const worldArchiveInput = ref<HTMLInputElement | null>(null)
+const worldFolderInput = ref<HTMLInputElement | null>(null)
+const worldImportBusy = ref(false)
+const worldImportProgress = ref(0)
+const worldImportLabel = ref('')
+const WORLD_ARCHIVE_ACCEPT = '.zip,.tar,.gz,.tgz,.bz2,.tbz2,.xz,.txz'
+const WORLD_CHUNK_BYTES = 4 * 1024 * 1024
+
+watch(worldFolderInput, (element) => {
+  // webkitdirectory не описан в типах шаблона — выставляем атрибут напрямую.
+  if (element) {
+    element.setAttribute('webkitdirectory', '')
+    element.setAttribute('directory', '')
+  }
+})
+
+function selectWorldArchive() {
+  if (!worldImportBusy.value) worldArchiveInput.value?.click()
+}
+
+function selectWorldFolder() {
+  if (!worldImportBusy.value) worldFolderInput.value?.click()
+}
+
+async function uploadWorld(kind: 'archive' | 'folder', label: string, entries: Array<{ path: string; file: File }>) {
+  if (!props.instance || !entries.length) return
+  if (running.value) {
+    emit('toast', 'Остановите игру перед импортом мира')
+    return
+  }
+  const instanceName = props.instance.name
+  const total = entries.reduce((sum, entry) => sum + entry.file.size, 0) || 1
+  let sent = 0
+  let uploadId = ''
+  worldImportBusy.value = true
+  worldImportProgress.value = 0
+  worldImportLabel.value = kind === 'archive' ? `Загружаю архив «${label}»…` : `Загружаю папку «${label}»…`
+  try {
+    uploadId = (await bridge.worldImportBegin(instanceName, kind, label)).upload_id
+    for (const entry of entries) {
+      let offset = 0
+      do {
+        const piece = entry.file.slice(offset, offset + WORLD_CHUNK_BYTES)
+        const bytes = new Uint8Array(await piece.arrayBuffer())
+        await bridge.worldImportChunk(instanceName, uploadId, entry.path, offset, toBase64(bytes))
+        offset += bytes.length
+        sent += bytes.length
+        worldImportProgress.value = Math.min(99, Math.round((sent / total) * 100))
+      } while (offset < entry.file.size)
+    }
+    worldImportLabel.value = kind === 'archive' ? 'Распаковываю и ищу миры…' : 'Переношу мир в saves/…'
+    const result = await bridge.worldImportFinish(instanceName, uploadId)
+    uploadId = ''
+    if (props.instance?.name === instanceName) details.value = result.details
+    emit('changed')
+    emit('toast', result.imported.length === 1 ? `Мир «${result.imported[0]}» добавлен` : `Добавлено миров: ${result.imported.length} (${result.imported.join(', ')})`)
+  } catch (error) {
+    emit('toast', errorMessage(error))
+    if (uploadId) void bridge.worldImportCancel(instanceName, uploadId).catch(() => undefined)
+  } finally {
+    worldImportBusy.value = false
+    worldImportProgress.value = 0
+    worldImportLabel.value = ''
+  }
+}
+
+async function importWorldArchive(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ''
+  if (!file) return
+  await uploadWorld('archive', file.name, [{ path: file.name, file }])
+}
+
+async function importWorldFolder(event: Event) {
+  const input = event.target as HTMLInputElement
+  const files = Array.from(input.files || [])
+  input.value = ''
+  if (!files.length) return
+  const entries = files.map((file) => ({ path: (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name, file }))
+  const label = entries[0].path.split('/')[0] || 'Мир'
+  if (!entries.some((entry) => /(^|\/)level\.dat$/i.test(entry.path))) {
+    emit('toast', 'В выбранной папке нет level.dat — выберите папку мира (или saves/ с мирами)')
+    return
+  }
+  await uploadWorld('folder', label, entries)
 }
 
 const modAuditDialog = ref<InstanceType<typeof ModAuditDialog> | null>(null)
@@ -1227,6 +1406,7 @@ async function launch(options: { world?: string; server?: string } = {}) {
     if (result.exit_code !== 0) {
       await props.crash?.(eventInstance, 'Minecraft exited with a non-zero status.', result.exit_code)
       if (result.crash) lastCrash.value = result.crash
+      offerAutoRepair(result.repair)
     }
     if (!liveLogCount) {
       liveLogRevision += 1
@@ -1237,7 +1417,10 @@ async function launch(options: { world?: string; server?: string } = {}) {
     liveLogRevision += 1
     logs.value.push(errorMessage(error))
     if (logs.value.length > MAX_SESSION_LOG_LINES) logs.value.splice(0, logs.value.length - MAX_SESSION_LOG_LINES)
-    if (launchRequested && !isCancelled(error)) await props.crash?.(eventInstance, errorMessage(error))
+    if (launchRequested && !isCancelled(error)) {
+      await props.crash?.(eventInstance, errorMessage(error))
+      void diagnoseLaunchFailure(launchTarget.name, errorMessage(error))
+    }
     emit('toast', errorMessage(error))
   } finally {
     loading.value = false
@@ -1448,7 +1631,7 @@ function openSettings() {
   void nextTick(() => workspaceRoot.value?.scrollIntoView({ behavior: 'smooth', block: 'start' }))
 }
 
-defineExpose({ openConsoleIfOverview, openSettings, stop, ensureLoaded })
+defineExpose({ openConsoleIfOverview, openSettings, stop, ensureLoaded, launch })
 </script>
 
 <template>
@@ -1507,6 +1690,7 @@ defineExpose({ openConsoleIfOverview, openSettings, stop, ensureLoaded })
             <button v-if="running" class="button button--outline" type="button" @click="stop"><Icon name="stop" :size="14" />Остановить</button>
             <button v-else class="button button--accent" type="button" :disabled="loading" @click="launch()"><Icon name="play" :size="15" />{{ loading ? 'Запускаю…' : 'Запустить игру' }}</button>
             <button class="button button--quiet" type="button" :disabled="repairBusy || running" @click="repairVersion"><Icon name="refresh" :size="14" />{{ repairBusy ? 'Восстанавливаю…' : 'Восстановить версию' }}</button>
+            <button class="button button--quiet" type="button" :disabled="diagnoseBusy || running" @click="diagnoseInstance()"><Icon name="shield" :size="14" />{{ diagnoseBusy ? 'Проверяю…' : 'Проверить и починить' }}</button>
             <button class="button button--quiet" type="button" @click="selectTab('snapshots')"><Icon name="archive" :size="14" />Снапшоты</button>
           </div>
         </section>
@@ -1629,18 +1813,30 @@ defineExpose({ openConsoleIfOverview, openSettings, stop, ensureLoaded })
           <div class="workspace-card-heading"><div><h3>Установленные {{ activeAssetLabel }}</h3><span class="muted">{{ tab === 'datapacks' ? 'По мирам экземпляра' : 'Файлы этого экземпляра' }}</span></div><div class="workspace-card-actions"><button v-if="canCheckResourceUpdates" class="button button--small button--quiet" type="button" :disabled="checkingUpdates || running" @click="checkResourceUpdates"><Icon name="refresh" :size="14" />{{ checkingUpdates ? 'Проверяю…' : 'Проверить обновления' }}</button><button v-if="tab !== 'datapacks'" class="button button--small button--outline" type="button" :disabled="importing" @click="selectFiles"><Icon name="upload" :size="14" />{{ importing ? 'Импорт…' : 'Импортировать' }}</button><button v-if="tab === 'mods' || tab === 'datapacks'" class="button button--small button--accent" type="button" @click="emit('browse-mods')"><Icon name="search" :size="14" />Каталог</button><button v-if="tab === 'mods'" class="button button--small button--quiet" type="button" @click="openDependencyGraph"><Icon name="globe" :size="14" />Зависимости</button></div></div>
           <div v-if="updateResults.length" class="instance-resource-updates"><article v-for="update in updateResults" :key="`${update.world_name || ''}:${update.path}`" class="instance-resource-update"><span><strong>{{ update.name }}</strong><small>{{ update.current_version || 'Установленная версия' }} → {{ update.version }}<template v-if="update.world_title"> · {{ update.world_title }}</template></small></span><button class="button button--small button--accent" type="button" :disabled="running || Boolean(updatingResourceId)" @click="updateResource(update)"><Icon name="refresh" :size="13" />{{ updatingResourceId === (update.path || update.project_id) ? 'Обновляю…' : 'Обновить' }}</button></article></div>
         <input ref="fileInput" class="workspace-file-input" type="file" multiple :accept="assetAccept" @change="importFiles" />
+          <div v-if="tab === 'mods' && activeAssets.length" class="workspace-mod-bulkbar">
+            <button class="button button--small button--quiet" type="button" :disabled="modBulkBusy" @click="toggleSelectAllMods"><Icon :name="allModsSelected ? 'close' : 'check'" :size="13" />{{ allModsSelected ? 'Снять выделение' : 'Выделить все' }}</button>
+            <span class="muted">Выбрано: {{ selectedModCount }} из {{ installedModPaths.length }}</span>
+            <span class="workspace-mod-bulkbar-actions">
+              <button class="button button--small button--quiet" type="button" :disabled="!selectedModCount || modBulkBusy || running" @click="setSelectedModsEnabled(true)">Включить</button>
+              <button class="button button--small button--quiet" type="button" :disabled="!selectedModCount || modBulkBusy || running" @click="setSelectedModsEnabled(false)">Отключить</button>
+              <button class="button button--small button--danger" type="button" :disabled="!selectedModCount || modBulkBusy || running" @click="removeSelectedMods"><Icon name="trash" :size="13" />{{ modBulkBusy ? 'Работаю…' : `Удалить выбранные${selectedModCount ? ` (${selectedModCount})` : ''}` }}</button>
+            </span>
+          </div>
           <div v-if="activeAssets.length" class="workspace-assets">
-            <div v-for="asset in activeAssets" :key="asset.path" class="workspace-asset" :class="{ 'workspace-asset--disabled': asset.kind === 'mods' && asset.enabled === false }"><span class="workspace-asset-copy"><span class="asset-icon"><img v-if="assetIconSource(asset) && !failedAssetIcons.has(asset.path)" :src="assetIconSource(asset)" alt="" loading="lazy" @error="markAssetIconFailed(asset.path)" /><Icon v-else :name="assetFallbackIcon(asset)" :size="16" /></span><span><strong>{{ asset.display_name || asset.name }}</strong><small><template v-if="asset.version">{{ asset.version }} · </template>{{ asset.author || assetProvider(asset) }}<template v-if="asset.author"> · {{ assetProvider(asset) }}</template> · {{ formatSize(asset.size) }}<template v-if="asset.kind === 'mods'"> · {{ asset.enabled === false ? 'отключён' : 'включён' }}</template></small></span></span><span class="workspace-asset-actions"><button v-if="asset.kind === 'mods'" class="button button--small button--quiet" type="button" @click="toggleMod(asset)">{{ asset.enabled === false ? 'Включить' : 'Отключить' }}</button><button v-if="asset.kind === 'mods'" class="icon-button" type="button" aria-label="Проверить безопасность мода" v-tooltip="'Проверить безопасность'" @click="auditMod(asset)"><Icon name="shield" :size="15" /></button><button class="icon-button" type="button" aria-label="Удалить" @click="removeAsset(asset)"><Icon name="trash" :size="15" /></button></span></div>
+            <div v-for="asset in activeAssets" :key="asset.path" class="workspace-asset" :class="{ 'workspace-asset--disabled': asset.kind === 'mods' && asset.enabled === false, 'workspace-asset--selected': asset.kind === 'mods' && selectedModPaths.has(asset.path) }"><input v-if="asset.kind === 'mods'" class="workspace-asset-check" type="checkbox" :checked="selectedModPaths.has(asset.path)" :disabled="modBulkBusy" :aria-label="`Выбрать ${asset.display_name || asset.name}`" @change="toggleModSelection(asset.path)" /><span class="workspace-asset-copy"><span class="asset-icon"><img v-if="assetIconSource(asset) && !failedAssetIcons.has(asset.path)" :src="assetIconSource(asset)" alt="" loading="lazy" @error="markAssetIconFailed(asset.path)" /><Icon v-else :name="assetFallbackIcon(asset)" :size="16" /></span><span><strong>{{ asset.display_name || asset.name }}</strong><small><template v-if="asset.version">{{ asset.version }} · </template>{{ asset.author || assetProvider(asset) }}<template v-if="asset.author"> · {{ assetProvider(asset) }}</template> · {{ formatSize(asset.size) }}<template v-if="asset.kind === 'mods'"> · {{ asset.enabled === false ? 'отключён' : 'включён' }}</template></small></span></span><span class="workspace-asset-actions"><button v-if="asset.kind === 'mods'" class="button button--small button--quiet" type="button" @click="toggleMod(asset)">{{ asset.enabled === false ? 'Включить' : 'Отключить' }}</button><button v-if="asset.kind === 'mods'" class="icon-button" type="button" aria-label="Проверить безопасность мода" v-tooltip="'Проверить безопасность'" @click="auditMod(asset)"><Icon name="shield" :size="15" /></button><button class="icon-button" type="button" aria-label="Удалить" @click="removeAsset(asset)"><Icon name="trash" :size="15" /></button></span></div>
         </div>
         <span v-else class="muted workspace-empty">Пока ничего не установлено.</span>
       </div>
 
       <div v-else-if="tab === 'worlds'" key="worlds" class="workspace-card">
-        <div class="workspace-card-heading"><h3>Миры</h3><span class="muted">saves/</span></div>
+        <div class="workspace-card-heading"><div><h3>Миры</h3><span class="muted">saves/ · архив распакуется автоматически, найденные миры попадут в saves/</span></div><div class="workspace-card-actions"><button class="button button--small button--outline" type="button" :disabled="worldImportBusy || running" @click="selectWorldArchive"><Icon name="archive" :size="14" />Импорт архива</button><button class="button button--small button--outline" type="button" :disabled="worldImportBusy || running" @click="selectWorldFolder"><Icon name="folder" :size="14" />Импорт папки</button></div></div>
+        <input ref="worldArchiveInput" class="workspace-file-input" type="file" :accept="WORLD_ARCHIVE_ACCEPT" @change="importWorldArchive" />
+        <input ref="worldFolderInput" class="workspace-file-input" type="file" multiple @change="importWorldFolder" />
+        <div v-if="worldImportBusy" class="workspace-world-import" aria-live="polite"><span><span class="status-dot status-dot--busy" />{{ worldImportLabel }}</span><strong>{{ worldImportProgress }}%</strong><span class="workspace-world-import-bar"><span :style="{ width: `${worldImportProgress}%` }" /></span></div>
         <div v-if="details.worlds.length" class="workspace-assets">
           <div v-for="world in details.worlds" :key="world.id" class="workspace-asset workspace-asset--world"><span class="workspace-world-copy"><img v-if="world.icon" :src="world.icon" alt="" class="world-icon" /><span><strong>{{ world.name }}</strong><small>{{ formatSize(world.size) }} · {{ formatDate(world.last_played) }}</small></span></span><button class="button button--small button--accent" type="button" :disabled="loading" @click="launchWorld(world.id)"><Icon name="play" :size="13" />Играть</button></div>
         </div>
-        <span v-else class="muted workspace-empty">Миров пока нет.</span>
+        <span v-else class="muted workspace-empty">Миров пока нет. Импортируйте архив (.zip, .tar.gz…) или папку сохранения.</span>
       </div>
 
       <div v-else-if="tab === 'servers'" key="servers" class="workspace-card">
@@ -1731,7 +1927,7 @@ defineExpose({ openConsoleIfOverview, openSettings, stop, ensureLoaded })
              <label class="field field--wide"><span>Аргументы игры <small>по одному на строку</small></span><textarea :value="draft.game_arguments.join('\n')" rows="2" @change="setDraftArguments('game_arguments', $event)" placeholder="--width 1280" /></label>
           </div>
           <section class="instance-security-panel">
-             <div class="workspace-card-heading"><div><h3>Безопасность экземпляра</h3><span class="muted">Разрешения действуют для всей JVM. Игровая сеть выключена по умолчанию; включите её для сетевой игры.</span></div><span class="security-profile-badge" :class="`security-profile-badge--${draft.security_profile}`">{{ draft.security_profile }}</span></div>
+             <div class="workspace-card-heading"><div><h3>Безопасность экземпляра</h3><span class="muted">Разрешения действуют для всей JVM. Сеть игры включена по умолчанию — без неё не работают серверы; выключите её только для недоверенных сборок.</span></div><span class="security-profile-badge" :class="`security-profile-badge--${draft.security_profile}`">{{ draft.security_profile }}</span></div>
             <div class="workspace-form-grid">
               <div class="field"><span>Security profile</span><CustomSelect v-model="draft.security_profile" :options="securityProfileOptions" /></div>
             </div>
@@ -1758,6 +1954,7 @@ defineExpose({ openConsoleIfOverview, openSettings, stop, ensureLoaded })
         <strong>{{ lastCrash.title }}</strong>
         <small v-if="lastCrash.exit_code !== null && lastCrash.exit_code !== 0">Код выхода: {{ lastCrash.exit_code }}</small>
       </div>
+      <button class="button button--small button--outline" type="button" :disabled="diagnoseBusy || running" @click="diagnoseInstance(lastCrash?.exit_code ?? 1)"><Icon name="shield" :size="13" />Починить…</button>
       <button class="icon-button" type="button" aria-label="Закрыть" @click="lastCrash = undefined"><Icon name="close" :size="14" /></button>
     </div>
     <ul class="crash-banner-hints">

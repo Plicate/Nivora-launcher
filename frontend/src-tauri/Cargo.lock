@@ -2092,12 +2092,14 @@ checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
 
 [[package]]
 name = "nivora-launcher"
-version = "1.0.1"
+version = "1.0.3"
 dependencies = [
  "base64 0.22.1",
  "ed25519-dalek",
  "libc",
  "regex",
+ "rustls",
+ "rustls-platform-verifier",
  "serde_json",
  "sha1",
  "sha2",

@@ -145,10 +145,9 @@ class SecurityBoundaryTests(unittest.TestCase):
         self.assertEqual(dns_queries, [(hostname, 443)])
         self.assertEqual(
             attempted_peers,
-            [
-                (socket.AF_INET6, ("2606:4700:4700::1111", 443, 0, 0)),
-                (socket.AF_INET, ("93.184.216.34", 443)),
-            ],
+            # IPv4 пробуется первым: на Windows «полуживой» IPv6 иначе
+            # съедал таймаут подключения на каждом AAAA-адресе.
+            [(socket.AF_INET, ("93.184.216.34", 443))],
         )
         self.assertEqual(tls_hostnames, [hostname])
         self.assertIn(f"Host: {hostname}".encode(), request_buffer)

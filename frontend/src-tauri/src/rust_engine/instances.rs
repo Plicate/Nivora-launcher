@@ -547,8 +547,8 @@ fn instance_security_defaults() -> Value {
     json!({
         "java_path": "",
         "security_profile": "strict",
-        "security_permissions": ["files:instance", "desktop:display", "desktop:audio"],
-        "security_policy_version": 3,
+        "security_permissions": ["network:game", "files:instance", "desktop:display", "desktop:audio"],
+        "security_policy_version": 4,
     })
 }
 
@@ -902,27 +902,55 @@ fn lowercase_suffix(path: &Path) -> String {
 
 // ------------------------------------------------------------- Импорт извне ----
 
+/// Каталог %APPDATA% (Windows). На Linux пусто — там всё лежит в HOME.
+fn windows_appdata() -> Option<PathBuf> {
+    if !cfg!(windows) {
+        return None;
+    }
+    std::env::var_os("APPDATA").filter(|value| !value.is_empty()).map(PathBuf::from)
+}
+
+pub(crate) fn external_instances_scan(_request: &Value) -> Result<Value, String> {
+    let config = ConfigStore::load()?;
+    let store = InstanceStore::new(&config)?;
+    let candidates: Vec<Value> = store.list_import_candidates().iter().map(ExternalImportCandidate::public).collect();
+    Ok(json!({ "candidates": candidates }))
+}
+
 fn discover_external_instance_candidates(home: &Path) -> Vec<ExternalImportCandidate> {
     let mut values: Vec<ExternalImportCandidate> = Vec::new();
-    for root in [
+    let appdata = windows_appdata();
+    let mut prism_roots = vec![
         home.join(".local/share/PrismLauncher/instances"),
         home.join(".var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/instances"),
-    ] {
-        values.extend(discover_prism_family_instances(&root, "Prism Launcher"));
-    }
-    for root in [
+    ];
+    let mut multimc_roots = vec![
         home.join(".local/share/MultiMC/instances"),
         home.join(".config/MultiMC/instances"),
         home.join(".config/multimc/instances"),
-    ] {
-        values.extend(discover_prism_family_instances(&root, "MultiMC"));
-    }
-    values.extend(discover_curseforge_instances(&home.join("Documents/curseforge/minecraft/Instances")));
-    for root in [
+    ];
+    let mut curseforge_roots = vec![home.join("Documents/curseforge/minecraft/Instances")];
+    let mut official_roots = vec![
         home.join(".minecraft"),
         home.join("snap/minecraft-launcher/common/.minecraft"),
         home.join(".var/app/com.mojang.Minecraft/data/minecraft"),
-    ] {
+    ];
+    if let Some(appdata) = appdata.as_ref() {
+        prism_roots.push(appdata.join("PrismLauncher").join("instances"));
+        multimc_roots.push(appdata.join("MultiMC").join("instances"));
+        curseforge_roots.push(home.join("curseforge").join("minecraft").join("Instances"));
+        official_roots.insert(0, appdata.join(".minecraft"));
+    }
+    for root in prism_roots {
+        values.extend(discover_prism_family_instances(&root, "Prism Launcher"));
+    }
+    for root in multimc_roots {
+        values.extend(discover_prism_family_instances(&root, "MultiMC"));
+    }
+    for root in curseforge_roots {
+        values.extend(discover_curseforge_instances(&root));
+    }
+    for root in official_roots {
         if let Some(candidate) = discover_official_launcher_instance(&root) {
             values.push(candidate);
         }

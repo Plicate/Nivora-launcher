@@ -197,6 +197,53 @@ export interface CrashReport {
   excerpt: string[]
 }
 
+export type AutoRepairAction =
+  | 'disable_mods'
+  | 'install_dependencies'
+  | 'set_memory'
+  | 'set_java'
+  | 'reset_jvm_arguments'
+  | 'repair_version'
+  | 'backup_configs'
+  | 'set_graphics_mode'
+  | 'update_loader'
+  | 'set_account'
+  | 'login_microsoft'
+  | 'set_security'
+
+export interface AutoRepairFix {
+  id: string
+  action: AutoRepairAction
+  label: string
+  steps: string[]
+  params: Record<string, unknown>
+  recommended: boolean
+}
+
+export interface AutoRepairIssue {
+  id: string
+  title: string
+  detail: string
+  evidence: string[]
+  fixes: AutoRepairFix[]
+  manual: string
+}
+
+export interface AutoRepairReport {
+  instance_name: string
+  exit_code: number | null
+  issues: AutoRepairIssue[]
+  muted_issues: string[]
+  manual?: boolean
+  disabled?: boolean
+}
+
+export interface AutoRepairResult {
+  id: string
+  ok: boolean
+  message: string
+}
+
 export interface ModDependencyGraph {
   nodes: Array<{ id: string; file: string; display_name: string; version: string; enabled: boolean; source: string; loader: string; dependencies: Array<{ id: string; constraint: string; optional: boolean }> }>
   edges: Array<{ from: string; to: string; optional: boolean; constraint: string }>
@@ -348,6 +395,9 @@ export interface SettingsInfo {
   download_timeout_seconds: number
   download_retries: number
   confirm_destructive_actions: boolean
+  auto_repair_enabled: boolean
+  auto_repair_muted: string[]
+  auto_repair_kinds?: Array<{ id: string; title: string }>
   show_activity_panel: boolean
   show_toasts: boolean
   minimize_on_launch: boolean
@@ -361,6 +411,7 @@ export interface SettingsInfo {
   launcher_profiles: LauncherProfile[]
   active_launcher_profile_id: string
   http_proxy: string
+  download_source?: 'auto' | 'official' | 'mirror'
   has_client_id: boolean
   developer_mode: boolean
   theme: ThemeMode

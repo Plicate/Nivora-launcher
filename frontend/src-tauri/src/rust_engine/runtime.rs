@@ -12,6 +12,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::config::ConfigStore;
+use super::platform_support::canonical_path;
 use super::constants::JAVA_RUNTIME_MANIFEST_URL;
 use super::net::{atomic_json_write, HttpClient};
 
@@ -502,7 +503,7 @@ fn is_executable(path: &Path) -> bool {
 }
 
 fn resolve_path(path: &Path) -> PathBuf {
-    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    canonical_path(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn expand_user(value: &str) -> PathBuf {
@@ -696,7 +697,9 @@ pub(crate) fn validate_java_path(value: &Path, allow_directory: bool) -> Result<
     if allow_directory && candidate.is_dir() {
         candidate = candidate.join("bin").join(java_binary_name());
     }
-    let resolved = fs::canonicalize(&candidate)
+    // Без verbatim-префикса \\?\: JVM, запущенная по такому пути, получает
+    // java.home вида \\?\C:\… и ломает загрузку модулей у Forge/NeoForge.
+    let resolved = canonical_path(&candidate)
         .map_err(|_| format!("Java executable не найден: {}", candidate.display()))?;
     let allowed: [&str; 2] = if cfg!(windows) { ["java.exe", "javaw.exe"] } else { ["java", "javaw"] };
     let name_ok = resolved
@@ -825,7 +828,7 @@ mod tests {
         let root = temp_root("valid");
         let java = make_java(&root);
         let resolved = validate_java_path(&java, false).unwrap();
-        assert_eq!(resolved, fs::canonicalize(&java).unwrap());
+        assert_eq!(resolved, canonical_path(&java).unwrap());
         // Каталог JDK с allow_directory подставляет bin/java.
         assert_eq!(validate_java_path(&root.join("jdk"), true).unwrap(), resolved);
     }

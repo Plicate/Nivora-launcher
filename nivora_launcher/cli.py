@@ -209,7 +209,11 @@ def _dispatch(args: argparse.Namespace) -> int:
         return _plugin_command(args)
 
     config = ConfigStore()
-    http = HttpClient(download_observer=_DownloadLogger())
+    http = HttpClient(
+        download_observer=_DownloadLogger(),
+        proxy=config.settings.http_proxy,
+        download_source=config.settings.download_source,
+    )
     accounts = AccountStore(config)
     repository = VersionRepository(config, http)
     installer = MinecraftInstaller(config, repository=repository, http=http)

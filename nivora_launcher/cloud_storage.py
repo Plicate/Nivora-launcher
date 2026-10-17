@@ -80,6 +80,8 @@ _RESTORABLE_SETTINGS = frozenset(
         "download_timeout_seconds",
         "download_retries",
         "confirm_destructive_actions",
+        "auto_repair_enabled",
+        "auto_repair_muted",
         "show_activity_panel",
         "show_toasts",
         "minimize_on_launch",

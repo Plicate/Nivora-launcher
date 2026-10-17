@@ -511,7 +511,7 @@ class SecurityRegressionTests(unittest.TestCase):
                 workspace = InstanceWorkspace(config, InstanceStore(config))
                 first = workspace.settings("escape-poc")
                 self.assertEqual(first["security_profile"], "strict")
-                self.assertNotIn("network:game", first["security_permissions"])
+                self.assertNotIn("files:host-write", first["security_permissions"])
                 self.assertNotIn("security_profile", json.loads(settings_path.read_text(encoding="utf-8")))
 
                 settings_path.write_text(
@@ -562,8 +562,8 @@ class SecurityRegressionTests(unittest.TestCase):
 
                 self.assertIn("desktop:display", settings["security_permissions"])
                 self.assertIn("desktop:audio", settings["security_permissions"])
-                self.assertNotIn("network:game", settings["security_permissions"])
-                self.assertEqual(protected["security_policy_version"], 3)
+                self.assertIn("network:game", settings["security_permissions"])
+                self.assertEqual(protected["security_policy_version"], 4)
 
     def test_strict_loader_command_is_sandboxed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -698,6 +698,32 @@ class SecurityRegressionTests(unittest.TestCase):
                     )
                 self.assertIsNone(warning)
                 self.assertIn(list(expected), [command[index : index + len(expected)] for index in range(len(command))])
+
+    def test_strict_mounts_distro_java_config_from_etc_only(self) -> None:
+        from nivora_launcher import security as security_module
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            java_home = root / "jvm"
+            (java_home / "lib" / "security").mkdir(parents=True)
+            etc_java = root / "etc-java"
+            (etc_java / "security").mkdir(parents=True)
+            (etc_java / "security" / "java.security").write_text("x", encoding="utf-8")
+            (java_home / "conf").symlink_to("/etc/java-17-openjdk")
+            (java_home / "lib" / "security" / "cacerts").symlink_to("/etc/ssl/certs/java/cacerts")
+            (java_home / "lib" / "evil").symlink_to("/etc/shadow")
+
+            targets = security_module._java_system_config_targets(java_home)
+            self.assertIn(Path("/etc/java-17-openjdk"), targets)
+            self.assertIn(Path("/etc/ssl/certs/java/cacerts"), targets)
+            self.assertNotIn(Path("/etc/shadow"), targets)
+
+    def test_new_instance_defaults_allow_game_network(self) -> None:
+        from nivora_launcher.instance_workspace import INSTANCE_SECURITY_DEFAULTS
+        from nivora_launcher.security import normalize_security_permissions
+
+        self.assertIn("network:game", INSTANCE_SECURITY_DEFAULTS["security_permissions"])
+        self.assertIn("network:game", normalize_security_permissions(None))
 
     def test_loader_installer_redirect_stays_on_official_maven(self) -> None:
         _validate_loader_installer_url("https://maven.minecraftforge.net/net/minecraftforge/forge/a.jar")

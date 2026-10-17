@@ -40,6 +40,7 @@
 - плановые бэкапы миров: глобальное расписание и переопределение на экземпляр (интервал, число копий, локально или на WebDAV), список бэкапов с восстановлением и удалением;
 - теги и заметки экземпляров: теги отображаются в списке, фильтрация по тегу одним кликом, заметки видны прямо в строке экземпляра;
 - краш-отчёты: анализатор лога после аварийного выхода игры и сервера называет вероятную причину, даёт советы и предлагает удалить конкретные моды, если лог указывает на них;
+- авто-починка: после краша или неудачного запуска клиента лаунчер разбирает лог, `crash-reports/` и папку `mods` и открывает окно с проблемой и способами починки (недостающие зависимости, несовместимые моды, моды для другого загрузчика, дубликаты, ошибки Mixin, битые jar и конфиги, память, Java, аргументы JVM, файлы версии, графика, недавно добавленные моды). Можно починить, отказаться или нажать «Больше не показывать»; включение и список проблем — в Настройки → Авто-починка. Моды не удаляются, а отключаются, конфиги переносятся в `.nivora-repair-backups/`;
 - дерево зависимостей модов: локальный разбор `fabric.mod.json`/`mods.toml`/manifest JAR показывает связи модов и помечает, что сломается при удалении выбранного мода;
 - экспорт экземпляра как modpack `.mrpack` (Modrinth-формат): ненулевые профили, каталогизированные моды и overrides;
 - системные метрики лаунчера в стиле Afterburner: CPU по ядрам, RAM, GPU, диски и температуры — в топбаре и в оверлее.
@@ -391,6 +392,7 @@ A Minecraft launcher with a modern Tauri/Vue interface and a diagnostics CLI. De
 - scheduled world backups: a global schedule and per-instance overrides (interval, copy count, local or WebDAV), a backup list with restore and delete;
 - instance tags and notes: tags show in the list, one-click filtering by tag, notes visible right in the instance row;
 - crash reports: after a game or server crash a log analyzer names the likely cause, gives advice and offers to remove specific mods when the log points at them;
+- auto-repair: after a client crash or failed launch the launcher inspects the log, `crash-reports/` and the `mods` folder and opens a window with the problem and ways to fix it (missing dependencies, incompatible mods, mods for another loader, duplicates, Mixin failures, broken jars and configs, memory, Java, JVM arguments, version files, graphics, recently added mods). You can repair, decline or choose “Don't show again”; the switch and the list of problems live in Settings → Auto-repair. Mods are disabled rather than deleted, configs are moved to `.nivora-repair-backups/`;
 - a mod dependency tree: local parsing of `fabric.mod.json`/`mods.toml`/JAR manifests shows mod relationships and marks what breaks when the selected mod is removed;
 - instance export as a `.mrpack` modpack (the Modrinth format): non-default profiles, cataloged mods and overrides;
 - Afterburner-style system metrics in the launcher: per-core CPU, RAM, GPU, disks and temperatures — in the top bar and in the overlay.

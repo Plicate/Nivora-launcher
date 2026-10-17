@@ -16,9 +16,9 @@ test('fresh install shows setup and has not completed the tour', () => {
 })
 
 test('the setup stages follow the requested order and resume the unfinished tour', () => {
-  assert.deepEqual(FIRST_RUN_SETUP_STAGES.map((step) => step.phase), ['welcome', 'account', 'basics', 'finish'])
-  assert.deepEqual(FIRST_RUN_SETUP_STAGES.map((step) => step.label), ['Приветствие', 'Добавляем аккаунт', 'Базовая настройка', 'Завершение'])
-  assert.equal(initialFirstRunPhase({ setupCompleted: false, tourCompleted: false }), 'welcome')
+  assert.deepEqual(FIRST_RUN_SETUP_STAGES.map((step) => step.phase), ['language', 'welcome', 'account', 'basics', 'finish'])
+  assert.deepEqual(FIRST_RUN_SETUP_STAGES.map((step) => step.label), ['Язык интерфейса', 'Приветствие', 'Добавляем аккаунт', 'Базовая настройка', 'Завершение'])
+  assert.equal(initialFirstRunPhase({ setupCompleted: false, tourCompleted: false }), 'language')
   assert.equal(initialFirstRunPhase({ setupCompleted: true, tourCompleted: false }), 'tour')
   assert.equal(initialFirstRunPhase({ setupCompleted: true, tourCompleted: true }), null)
 })

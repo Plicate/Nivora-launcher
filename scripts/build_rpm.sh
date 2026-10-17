@@ -81,7 +81,17 @@ if [ ! -f src-tauri/icons/32x32.png ]; then
 fi
 
 log "Собираю Tauri (rpm; первая сборка компилирует все зависимости — это надолго)"
-npm run tauri -- build --bundles rpm
+# Подписанные updater-артефакты создаём только при наличии ключа
+# (как в build_windows_exe.sh): без TAURI_SIGNING_PRIVATE_KEY tauri build
+# падает на «A public key has been found, but no private key», потому что в
+# tauri.conf.json есть pubkey апдейтера. Локальной rpm-сборке артефакты
+# не нужны — самообновление на Linux работает только через AppImage.
+if [ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
+  TAURI_CONFIG_ARGS=()
+else
+  TAURI_CONFIG_ARGS=(--config '{"bundle":{"createUpdaterArtifacts":false}}')
+fi
+npm run tauri -- build --bundles rpm "${TAURI_CONFIG_ARGS[@]}"
 cd "$PROJECT_ROOT"
 
 # --- 3. Артефакт ---------------------------------------------------------------

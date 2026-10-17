@@ -22,6 +22,8 @@ import LoaderBadge from './components/LoaderBadge.vue'
 import PluginCenter from './components/PluginCenter.vue'
 import PluginViewRenderer from './components/PluginViewRenderer.vue'
 import SkinPreview from './components/SkinPreview.vue'
+import SkinThumb3D from './components/SkinThumb3D.vue'
+import CapeThumb from './components/CapeThumb.vue'
 import ThemeGallery from './components/ThemeGallery.vue'
 import ThemeStudio from './components/ThemeStudio.vue'
 import { check as checkForAppUpdate } from '@tauri-apps/plugin-updater'
@@ -37,6 +39,9 @@ import { useModalFocus } from './services/modalFocus'
 import { initialFirstRunPhase, readFirstRunExperience, writeFirstRunExperience, type FirstRunExperienceState, type FirstRunPhase } from './services/firstRunExperience'
 import { createWallpaperRenderer } from './services/wallpaper'
 import DialogHost from './components/DialogHost.vue'
+import AutoRepairDialog from './components/AutoRepairDialog.vue'
+import { diagnoseLaunchFailure, offerAutoRepair } from './services/autoRepair'
+import { nicknameError } from './services/nickname'
 import GameOverlay from './components/GameOverlay.vue'
 import type {
   PluginEventName,
@@ -53,6 +58,7 @@ import type {
 import type { RuntimePluginManifest } from './plugins/runtimeManifest'
 import type {
   AccountInfo,
+  SettingsInfo,
   ActivityState,
   AnimationSettings,
   AnimationStyle,
@@ -211,7 +217,7 @@ const initialState: AppState = {
     game_dir: '',
     java_path: '',
     security_profile: 'strict',
-    security_permissions: ['files:instance', 'desktop:display', 'desktop:audio'],
+    security_permissions: ['network:game', 'files:instance', 'desktop:display', 'desktop:audio'],
     memory: '8GiB',
     memory_kib: 8 * 1024 * 1024,
     memory_total_kib: 16 * 1024 * 1024,
@@ -229,7 +235,10 @@ const initialState: AppState = {
     metadata_refresh_hours: 6,
     download_timeout_seconds: 30,
     download_retries: 5,
+    download_source: 'auto',
     confirm_destructive_actions: true,
+    auto_repair_enabled: true,
+    auto_repair_muted: [],
     show_activity_panel: true,
     show_toasts: true,
     minimize_on_launch: false,
@@ -376,6 +385,7 @@ watch(firstRunPhase, (phase) => {
 })
 const groupActionBusy = ref(false)
 const externalImportBusy = ref(false)
+const externalImportScanning = ref(false)
 const loadingVersions = ref(false)
 const versionError = ref('')
 const loadingChoices = ref(false)
@@ -426,7 +436,7 @@ const selectedAccount = ref('auto')
 watch(selectedAccount, (accountId) => {
   void broadcastPluginEvent('account.changed', { account_id: accountId === 'auto' ? null : accountId })
 })
-const instanceWorkspaceRef = ref<{ openConsoleIfOverview: () => boolean; openSettings: () => void; stop: () => Promise<void>; ensureLoaded?: () => Promise<void> } | null>(null)
+const instanceWorkspaceRef = ref<{ openConsoleIfOverview: () => boolean; openSettings: () => void; stop: () => Promise<void>; ensureLoaded?: () => Promise<void>; launch?: () => Promise<void> } | null>(null)
 const bedrockWorkspaceRef = ref<{ ensureLoaded: () => Promise<void>; applyPendingVersion: (edition: 'release' | 'preview', version: string) => void; refreshAccountStatus?: () => Promise<void> } | null>(null)
 const serverWorkspaceRef = ref<{ openSettings: () => void; stop: () => Promise<void> } | null>(null)
 const instanceWorkspaceFocus = ref<'overview' | 'settings' | 'console'>('overview')
@@ -435,6 +445,7 @@ const javaSelection = ref('auto')
 const memoryValue = ref(8)
 const memoryUnit = ref<MemoryUnit>('GiB')
 const accountName = ref('Player')
+const accountNameError = computed(() => (accountName.value ? nicknameError(accountName.value) : ''))
 const modQuery = ref('')
 const modProjectType = ref<ProjectType>('mod')
 const modSortMode = ref<CatalogSort>('relevance')
@@ -454,6 +465,8 @@ const skinProfileLoading = ref(false)
 const skinProfileError = ref('')
 const selectedSkinId = ref('')
 const skinModel = ref<'classic' | 'slim'>('classic')
+// Предпросмотр плаща как элитр (как в Prism Launcher).
+const skinElytraPreview = ref(false)
 const currentSkinModel = ref<'classic' | 'slim'>('classic')
 const selectedCapeId = ref('')
 const capeActionBusy = ref(false)
@@ -529,7 +542,10 @@ const settingsDraft = reactive({
   metadata_refresh_hours: 6,
   download_timeout_seconds: 30,
   download_retries: 5,
+  download_source: 'auto',
   confirm_destructive_actions: true,
+  auto_repair_enabled: true,
+  auto_repair_muted: [] as string[],
   show_activity_panel: true,
   show_toasts: true,
   minimize_on_launch: false,
@@ -3063,7 +3079,10 @@ function applyState(next: AppState, preserveAppearance = false) {
     metadata_refresh_hours: next.settings.metadata_refresh_hours || 6,
     download_timeout_seconds: next.settings.download_timeout_seconds || 30,
     download_retries: next.settings.download_retries || 5,
+    download_source: next.settings.download_source || 'auto',
     confirm_destructive_actions: next.settings.confirm_destructive_actions !== false,
+    auto_repair_enabled: next.settings.auto_repair_enabled !== false,
+    auto_repair_muted: Array.isArray(next.settings.auto_repair_muted) ? [...next.settings.auto_repair_muted] : [],
     show_activity_panel: next.settings.show_activity_panel !== false,
     show_toasts: next.settings.show_toasts !== false,
     minimize_on_launch: next.settings.minimize_on_launch === true,
@@ -3617,6 +3636,11 @@ function openCreateBedrock() {
   void loadBedrockCreationVersions()
 }
 
+const downloadSourceOptions: SelectOption[] = [
+  { value: 'auto', label: 'Авто: официальные серверы, при сбое — зеркало' },
+  { value: 'mirror', label: 'Сначала зеркало BMCLAPI' },
+  { value: 'official', label: 'Только официальные серверы' },
+]
 const bedrockCreationEditionOptions: SelectOption[] = [
   { value: 'release', label: 'Обычная версия', meta: 'Стабильный выпуск' },
   { value: 'preview', label: 'Preview', meta: 'Тестовые сборки' },
@@ -3927,7 +3951,13 @@ async function createServer() {
 }
 
 async function createOfflineAccount(): Promise<boolean> {
-  if (!accountName.value.trim() || busy.value) return false
+  if (busy.value) return false
+  const invalid = nicknameError(accountName.value)
+  if (invalid) {
+    if (firstRunPhase.value === 'account') firstRunError.value = invalid
+    showToast(invalid)
+    return false
+  }
   busy.value = true
   try {
     const result = await bridge.createOfflineAccount(accountName.value)
@@ -3949,9 +3979,13 @@ async function createOfflineAccount(): Promise<boolean> {
   }
 }
 
+// Вход идёт нативной операцией и не должен ждать общий busy: тот держится
+// всю игровую сессию (и навсегда, если запуск завис), из-за чего кнопка
+// «Войти через Microsoft» переставала нажиматься.
+const loginBusy = ref(false)
 async function loginMicrosoft(): Promise<boolean> {
-  if (busy.value || !state.settings.has_client_id) return false
-  busy.value = true
+  if (loginBusy.value || !state.settings.has_client_id) return false
+  loginBusy.value = true
   openActivity('Вход через Microsoft', 'Откроется device-code авторизация.')
   startMicrosoftStatusPolling()
   try {
@@ -3970,7 +4004,7 @@ async function loginMicrosoft(): Promise<boolean> {
     return false
   } finally {
     stopMicrosoftStatusPolling()
-    busy.value = false
+    loginBusy.value = false
   }
 }
 
@@ -4000,9 +4034,9 @@ function selectFirstRunAccount(accountId: string) {
 }
 
 async function addFirstRunOfflineAccount(name: string) {
-  if (!name.trim() || busy.value) return
+  if (busy.value) return
   firstRunError.value = ''
-  accountName.value = name.trim()
+  accountName.value = name
   if (await createOfflineAccount()) firstRunPhase.value = 'basics'
 }
 
@@ -4142,7 +4176,10 @@ async function saveSettings(): Promise<boolean> {
       metadata_refresh_hours: settingsDraft.metadata_refresh_hours,
       download_timeout_seconds: settingsDraft.download_timeout_seconds,
       download_retries: settingsDraft.download_retries,
+      download_source: settingsDraft.download_source,
       confirm_destructive_actions: settingsDraft.confirm_destructive_actions,
+      auto_repair_enabled: settingsDraft.auto_repair_enabled,
+      auto_repair_muted: [...settingsDraft.auto_repair_muted],
       show_activity_panel: settingsDraft.show_activity_panel,
       show_toasts: settingsDraft.show_toasts,
        minimize_on_launch: settingsDraft.minimize_on_launch,
@@ -4355,6 +4392,37 @@ async function launchBedrockExisting(instance: InstanceInfo) {
   }
 }
 
+// «Больше не показывать» в окне авто-починки сохраняет настройку сразу —
+// черновик и снимок сохранённого синхронизируем, чтобы не всплыло «есть
+// несохранённые изменения».
+function applyAutoRepairSettings(next: SettingsInfo) {
+  const muted = Array.isArray(next.auto_repair_muted) ? [...next.auto_repair_muted] : []
+  state.settings.auto_repair_muted = muted
+  settingsDraft.auto_repair_muted = [...muted]
+  if (savedSettingsSnapshot) savedSettingsSnapshot.settings.auto_repair_muted = [...muted]
+  refreshSettingsSaveState()
+}
+
+function autoRepairKindMuted(kind: string): boolean {
+  return settingsDraft.auto_repair_muted.includes(kind)
+}
+
+function toggleAutoRepairKind(kind: string, enabled: boolean) {
+  const rest = settingsDraft.auto_repair_muted.filter((item) => item !== kind)
+  settingsDraft.auto_repair_muted = enabled ? rest : [...rest, kind]
+}
+
+async function relaunchAfterRepair(instanceName: string) {
+  await refreshBootstrap()
+  const instance = state.instances.find((item) => item.name === instanceName)
+  if (!instance) return
+  if (instanceWorkspaceRef.value && selectedInstance.value?.name === instanceName && currentView.value === 'instance-settings') {
+    await instanceWorkspaceRef.value.launch?.()
+    return
+  }
+  await launchExisting(instance)
+}
+
 async function launchExisting(instance: InstanceInfo) {
   if (instance.running) {
     selectedInstanceName.value = instance.name
@@ -4405,6 +4473,7 @@ async function launchExisting(instance: InstanceInfo) {
     await notifyPluginAfterExit(eventInstance, result.exit_code)
     if (result.exit_code !== 0) await notifyPluginCrash(eventInstance, 'Minecraft exited with a non-zero status.', result.exit_code)
     if (result.crash) lastLaunchCrash.value = result.crash
+    if (result.exit_code !== 0) offerAutoRepair(result.repair)
     finishActivity(result.exit_code === 0 ? 'Игра завершила работу.' : 'Игра завершилась с ошибкой.', result.logs)
     if (result.exit_code !== 0) {
       instanceWorkspaceFocus.value = 'overview'
@@ -4415,7 +4484,10 @@ async function launchExisting(instance: InstanceInfo) {
     activity.logs.push(errorMessage(error))
     if (launchRequested && !isCancelled(error)) await notifyPluginCrash(eventInstance, errorMessage(error))
     finishActivity(isCancelled(error) ? 'Остановлено пользователем.' : 'Не удалось запустить игру.')
-    if (!isCancelled(error)) showToast(errorMessage(error))
+    if (!isCancelled(error)) {
+      showToast(errorMessage(error))
+      if (launchRequested) void diagnoseLaunchFailure(instance.name, errorMessage(error))
+    }
   } finally {
     stopActivityLogPolling()
     busy.value = false
@@ -4608,8 +4680,14 @@ function externalImportChoice(candidate: ExternalInstanceCandidate): { value: st
 async function importExternalInstances() {
   if (externalImportBusy.value) return
   externalImportBusy.value = true
+  externalImportScanning.value = true
   try {
-    const result = await bridge.externalInstances()
+    let result: { candidates: ExternalInstanceCandidate[] }
+    try {
+      result = await bridge.externalInstances()
+    } finally {
+      externalImportScanning.value = false
+    }
     const candidates = result.candidates || []
     if (!candidates.length) {
       showToast('Поддерживаемые экземпляры Prism/MultiMC/CurseForge/официального лаунчера не найдены')
@@ -4641,6 +4719,7 @@ async function importExternalInstances() {
     showToast(errorMessage(error))
   } finally {
     externalImportBusy.value = false
+    externalImportScanning.value = false
   }
 }
 
@@ -4699,7 +4778,104 @@ function catalogTargetInstance() {
   return instance && instance.kind === 'client' && instance.game_edition !== 'bedrock' ? instance : null
 }
 
-async function searchMods() {
+// ── Постраничный каталог и выбор нескольких проектов ────────────────────
+const CATALOG_PAGE_SIZE = 20
+const CATALOG_MAX_PAGES = 500
+const modPage = ref(0)
+const modTotal = ref<number | null>(null)
+const modHasMore = ref(false)
+const modPageCount = computed(() => {
+  const known = modTotal.value !== null ? Math.ceil(modTotal.value / CATALOG_PAGE_SIZE) : modPage.value + (modHasMore.value ? 2 : 1)
+  return Math.max(1, Math.min(CATALOG_MAX_PAGES, known))
+})
+/** Номера страниц для пагинатора; -1 — разрыв «…». */
+const modPagerPages = computed(() => {
+  const last = modPageCount.value - 1
+  const current = modPage.value
+  const pages = new Set<number>([0, last])
+  for (let page = current - 2; page <= current + 2; page += 1) if (page >= 0 && page <= last) pages.add(page)
+  const sorted = [...pages].sort((left, right) => left - right)
+  const result: number[] = []
+  for (const page of sorted) {
+    if (result.length && page - result[result.length - 1] > 1) result.push(-1)
+    result.push(page)
+  }
+  return result
+})
+const catalogSelection = ref(new Map<string, ModResult>())
+const catalogBulkProgress = ref('')
+const catalogSelectable = computed(() => {
+  const instance = selectedInstance.value
+  if (currentView.value !== 'mods' || !instance) return false
+  if (modProjectType.value === 'modpack' || modProjectType.value === 'datapack') return false
+  if (modProjectType.value === 'plugin') return instance.kind === 'server' && !instance.running
+  return instance.kind === 'client' && instance.game_edition !== 'bedrock'
+})
+
+function catalogKey(mod: ModResult): string {
+  return mod.project_id || mod.id || ''
+}
+
+function toggleCatalogSelection(mod: ModResult) {
+  const key = catalogKey(mod)
+  if (!key) return
+  const next = new Map(catalogSelection.value)
+  if (next.has(key)) next.delete(key)
+  else next.set(key, mod)
+  catalogSelection.value = next
+}
+
+function selectCatalogPage() {
+  const next = new Map(catalogSelection.value)
+  for (const mod of modResults.value) {
+    const key = catalogKey(mod)
+    if (key && !mod.installed) next.set(key, mod)
+  }
+  catalogSelection.value = next
+}
+
+function clearCatalogSelection() {
+  catalogSelection.value = new Map()
+}
+
+async function installSelectedMods() {
+  const targets = [...catalogSelection.value.values()].filter((mod) => !mod.installed)
+  if (!targets.length || modBusy.value || !catalogSelectable.value) return
+  const projectType = modProjectType.value
+  let installed = 0
+  const failed: string[] = []
+  for (const [index, mod] of targets.entries()) {
+    catalogBulkProgress.value = `Устанавливаю ${index + 1} из ${targets.length}: ${mod.title || mod.name || catalogKey(mod)}`
+    const ok = await installModIntoTarget(mod, undefined, projectType, { quiet: true })
+    const key = catalogKey(mod)
+    if (ok) {
+      installed += 1
+      // Отметку «установлено» видно и на других страницах выдачи.
+      const visible = modResults.value.find((item) => catalogKey(item) === key)
+      if (visible && visible !== mod) visible.installed = true
+      const next = new Map(catalogSelection.value)
+      next.delete(key)
+      catalogSelection.value = next
+    } else {
+      failed.push(mod.title || mod.name || key)
+    }
+  }
+  catalogBulkProgress.value = ''
+  showToast(failed.length ? `Установлено: ${installed} из ${targets.length}. Не удалось: ${failed.slice(0, 3).join(', ')}${failed.length > 3 ? '…' : ''}` : `Установлено проектов: ${installed}`)
+}
+
+watch([() => selectedInstance.value?.name, modProjectType, activeCatalogId, currentView], () => clearCatalogSelection())
+
+function goToCatalogPage(page: number) {
+  if (page < 0 || page === modPage.value || modBusy.value) return
+  void searchMods(page).then(() => {
+    document.querySelector(`[data-page-view="${currentView.value}"]`)?.scrollIntoView({ block: 'start', behavior: 'smooth' })
+  })
+}
+
+async function searchMods(pageArgument: unknown = 0) {
+  // Обработчики шаблона передают сюда событие клика — это «первая страница».
+  const page = typeof pageArgument === 'number' && Number.isFinite(pageArgument) ? Math.max(0, Math.min(CATALOG_MAX_PAGES - 1, Math.floor(pageArgument))) : 0
   ensureCatalogForView(currentView.value)
   ensureCompatibleInstanceForCatalog()
   const requestId = ++modSearchRequestId
@@ -4734,6 +4910,8 @@ async function searchMods() {
         project_type: projectType,
         catalog_id: activeCatalogId.value,
         sort_by: modSortMode.value,
+        page,
+        limit: CATALOG_PAGE_SIZE,
       })
     )
     if (
@@ -4744,8 +4922,11 @@ async function searchMods() {
       || instanceName !== searchInstanceName()
     ) return
     modResults.value = result.results
+    modPage.value = result.page ?? page
+    modTotal.value = typeof result.total === 'number' ? result.total : null
+    modHasMore.value = Boolean(result.has_more)
     modSearchPerformed.value = true
-    finishActivity(`Найдено проектов: ${modResults.value.length}`)
+    finishActivity(modTotal.value !== null ? `Найдено проектов: ${modTotal.value} · страница ${modPage.value + 1} из ${modPageCount.value}` : `Страница ${modPage.value + 1}: проектов ${modResults.value.length}`)
   } catch (error) {
     if (requestId !== modSearchRequestId) return
     modError.value = errorMessage(error)
@@ -4792,11 +4973,12 @@ async function installMod(mod: ModResult) {
   await installModIntoTarget(mod, undefined, projectType)
 }
 
-async function installModIntoTarget(mod: ModResult, worldName?: string, projectType = modProjectType.value) {
+async function installModIntoTarget(mod: ModResult, worldName?: string, projectType = modProjectType.value, options: { quiet?: boolean } = {}): Promise<boolean> {
   const instance = selectedInstance.value
-  if (!instance) return
+  if (!instance) return false
   const projectId = mod.project_id || mod.id
-  if (!projectId) return
+  if (!projectId) return false
+  let succeeded = false
   modBusy.value = true
   modInstallId.value = projectId
   modAction.value = 'install'
@@ -4836,7 +5018,8 @@ async function installModIntoTarget(mod: ModResult, worldName?: string, projectT
     mod.installed = true
     mod.file_name = result.file_name || mod.file_name
     finishActivity('Ресурс установлен.', [`Файл: ${result.file_name}`, `Экземпляр: ${instance.name}`])
-    showToast('Ресурс установлен в экземпляр')
+    if (!options.quiet) showToast('Ресурс установлен в экземпляр')
+    succeeded = true
   } catch (error) {
     activity.logs.push(errorMessage(error))
     finishActivity(isCancelled(error) ? 'Установка остановлена.' : 'Установка ресурса остановлена.')
@@ -4847,6 +5030,7 @@ async function installModIntoTarget(mod: ModResult, worldName?: string, projectT
     modInstallProgress.value = 0
     modInstallDetail.value = ''
   }
+  return succeeded
 }
 
 async function removeMod(mod: ModResult) {
@@ -5238,6 +5422,7 @@ onBeforeUnmount(() => {
 <template>
   <GameOverlay v-if="overlayMode || inAppOverlayOpen" />
   <DialogHost v-else />
+  <AutoRepairDialog v-if="!overlayMode" @toast="showToast" @settings="applyAutoRepairSettings" @repaired="refreshBootstrap()" @relaunch="relaunchAfterRepair" @login="loginMicrosoft()" />
   <div v-if="!overlayMode" ref="appShellRef" class="app-shell">
         <div v-if="buildStampMismatch" class="build-mismatch-banner" role="alert">
           <Icon name="info" :size="16" />
@@ -5307,7 +5492,7 @@ onBeforeUnmount(() => {
        <div class="page-scroll">
            <div class="page-transition" :class="{ 'page-transition--animate': pageTransitionPulse }">
                <section data-page-view="instances" class="page-content">
-                <div class="section-intro library-intro"><div><span class="eyebrow">Библиотека</span><h2>Экземпляры</h2><p>Профили игры и серверы Minecraft.</p></div><div class="section-intro-actions"><button class="button button--quiet" type="button" :disabled="externalImportBusy" @click="importExternalInstances"><Icon name="upload" :size="16" />{{ externalImportBusy ? 'Ищу источники…' : 'Импорт' }}</button><button class="button button--outline" type="button" @click="openCreateServer"><Icon name="server" :size="16" />Новый сервер</button><button class="button button--accent" type="button" @click="openCreateInstance"><Icon name="plus" :size="16" />Новый экземпляр</button></div></div>
+                <div class="section-intro library-intro"><div><span class="eyebrow">Библиотека</span><h2>Экземпляры</h2><p>Профили игры и серверы Minecraft.</p></div><div class="section-intro-actions"><button class="button button--quiet" type="button" :disabled="externalImportBusy" @click="importExternalInstances"><Icon name="upload" :size="16" />{{ externalImportScanning ? 'Ищу источники…' : 'Импорт' }}</button><button class="button button--outline" type="button" @click="openCreateServer"><Icon name="server" :size="16" />Новый сервер</button><button class="button button--accent" type="button" @click="openCreateInstance"><Icon name="plus" :size="16" />Новый экземпляр</button></div></div>
                 <div v-if="homeWidgetViews.length" class="plugin-home-widgets">
                   <article v-for="entry in homeWidgetViews" :key="`${entry.pluginId}:${entry.view.id}`" class="plugin-home-widget panel">
                     <div class="panel-heading"><div><span class="eyebrow">Плагин</span><h2>{{ entry.view.title }}</h2></div><span class="tag">{{ entry.pluginName }}</span></div>
@@ -5409,8 +5594,8 @@ onBeforeUnmount(() => {
               </section>
 
                <section data-page-view="accounts" class="page-content">
-              <div class="section-intro"><div><span class="eyebrow">Профили доступа</span><h2>Аккаунты</h2><p>Выбирайте, от чьего имени будет запускаться игра.</p></div><button class="button button--outline" type="button" :disabled="busy || state.settings.login_source !== 'microsoft' || !state.settings.has_client_id" @click="loginMicrosoft"><Icon name="accounts" :size="17" />Войти через Microsoft</button></div>
-             <div class="account-layout"><section class="panel account-panel"><div class="panel-heading"><div><span class="eyebrow">Подключённые</span><h2>Профили</h2></div><span class="count-badge">{{ state.accounts.length }}</span></div><p v-if="!state.settings.has_client_id" class="inline-error">Microsoft-вход не настроен в этой сборке. Вводить ID в настройках не нужно; для входа понадобится сборка с настроенным Microsoft OAuth.</p><div v-if="state.accounts.length" class="account-list"><article v-for="account in state.accounts" :key="account.account_id" class="account-row"><span class="avatar avatar--blue">{{ account.display_name.slice(0, 1).toUpperCase() }}</span><div class="account-copy"><strong>{{ account.display_name }} <span v-if="account.is_default" class="default-mark">по умолчанию</span></strong><span>{{ account.kind === 'microsoft' ? 'Microsoft account' : 'Offline debug account' }}</span></div><span class="account-status"><i />{{ account.kind === 'microsoft' ? 'Подключён' : 'Локальный' }}</span><div class="account-actions"><button class="icon-button" type="button" aria-label="Настройки профиля" @click="accountMenuId = accountMenuId === account.account_id ? '' : account.account_id"><Icon name="settings" :size="16" /></button><div v-if="accountMenuId === account.account_id" class="account-menu"><button type="button" :disabled="account.kind !== 'microsoft'" @click="openSkinSettings(account)"><Icon name="skin" :size="14" />Настроить скин</button><button type="button" @click="accountAction(account, 'default')"><Icon name="star" :size="14" />Сделать по умолчанию</button><button type="button" @click="accountAction(account, 'up')"><Icon name="arrow-up" :size="14" />Переместить выше</button><button type="button" @click="accountAction(account, 'down')"><Icon name="arrow-down" :size="14" />Переместить ниже</button><button class="account-menu-danger" type="button" @click="accountAction(account, 'delete')"><Icon name="trash" :size="14" />Удалить аккаунт</button></div></div></article></div><div v-else class="empty-mini empty-mini--roomy"><span class="empty-orb"><Icon name="accounts" :size="19" /></span><strong>Аккаунтов пока нет</strong><span>Создайте локальный аккаунт или войдите через Microsoft.</span></div></section><section class="panel create-account-panel"><span class="eyebrow">Быстрое создание</span><h2>Локальный профиль</h2><p>Подходит для одиночного тестирования и разработки модпаков. Онлайн-серверы недоступны.</p><label class="field"><span>Имя игрока</span><input v-model="accountName" maxlength="16" placeholder="Player" /></label><button class="button button--accent button--large" type="button" :disabled="busy" @click="createOfflineAccount"><Icon name="plus" :size="18" />Создать offline-профиль</button></section></div>
+              <div class="section-intro"><div><span class="eyebrow">Профили доступа</span><h2>Аккаунты</h2><p>Выбирайте, от чьего имени будет запускаться игра.</p></div><button class="button button--outline" type="button" :disabled="loginBusy || state.settings.login_source !== 'microsoft' || !state.settings.has_client_id" @click="loginMicrosoft"><Icon name="accounts" :size="17" />Войти через Microsoft</button></div>
+             <div class="account-layout"><section class="panel account-panel"><div class="panel-heading"><div><span class="eyebrow">Подключённые</span><h2>Профили</h2></div><span class="count-badge">{{ state.accounts.length }}</span></div><p v-if="!state.settings.has_client_id" class="inline-error">Microsoft-вход не настроен в этой сборке. Вводить ID в настройках не нужно; для входа понадобится сборка с настроенным Microsoft OAuth.</p><div v-if="state.accounts.length" class="account-list"><article v-for="account in state.accounts" :key="account.account_id" class="account-row"><span class="avatar avatar--blue">{{ account.display_name.slice(0, 1).toUpperCase() }}</span><div class="account-copy"><strong>{{ account.display_name }} <span v-if="account.is_default" class="default-mark">по умолчанию</span></strong><span>{{ account.kind === 'microsoft' ? 'Microsoft account' : 'Offline debug account' }}</span></div><span class="account-status"><i />{{ account.kind === 'microsoft' ? 'Подключён' : 'Локальный' }}</span><div class="account-actions"><button class="icon-button" type="button" aria-label="Настройки профиля" @click="accountMenuId = accountMenuId === account.account_id ? '' : account.account_id"><Icon name="settings" :size="16" /></button><div v-if="accountMenuId === account.account_id" class="account-menu"><button type="button" :disabled="account.kind !== 'microsoft'" @click="openSkinSettings(account)"><Icon name="skin" :size="14" />Настроить скин</button><button type="button" @click="accountAction(account, 'default')"><Icon name="star" :size="14" />Сделать по умолчанию</button><button type="button" @click="accountAction(account, 'up')"><Icon name="arrow-up" :size="14" />Переместить выше</button><button type="button" @click="accountAction(account, 'down')"><Icon name="arrow-down" :size="14" />Переместить ниже</button><button class="account-menu-danger" type="button" @click="accountAction(account, 'delete')"><Icon name="trash" :size="14" />Удалить аккаунт</button></div></div></article></div><div v-else class="empty-mini empty-mini--roomy"><span class="empty-orb"><Icon name="accounts" :size="19" /></span><strong>Аккаунтов пока нет</strong><span>Создайте локальный аккаунт или войдите через Microsoft.</span></div></section><section class="panel create-account-panel"><span class="eyebrow">Быстрое создание</span><h2>Локальный профиль</h2><p>Подходит для одиночного тестирования и разработки модпаков. Онлайн-серверы недоступны.</p><label class="field"><span>Имя игрока <small>3–16 символов: латиница, цифры и _</small></span><input v-model="accountName" maxlength="16" placeholder="Player" autocomplete="nickname" spellcheck="false" :aria-invalid="Boolean(accountNameError)" :class="{ 'input--invalid': accountNameError }" @keydown.enter.prevent="createOfflineAccount" /></label><p v-if="accountNameError" class="inline-error" role="alert">{{ accountNameError }}</p><button class="button button--accent button--large" type="button" :disabled="busy || Boolean(nicknameError(accountName))" @click="createOfflineAccount"><Icon name="plus" :size="18" />Создать offline-профиль</button></section></div>
              <section v-if="skinPanelOpen && skinAccountId" class="panel skin-settings-panel">
                <div class="panel-heading">
                  <div><span class="eyebrow">MICROSOFT PROFILE</span><h2>Настройка скина</h2><p>Профиль: {{ state.accounts.find((account) => account.account_id === skinAccountId)?.display_name }}</p></div>
@@ -5419,23 +5604,26 @@ onBeforeUnmount(() => {
                 <div v-if="skinProfileLoading" class="skin-profile-status" role="status"><span class="skin-profile-spinner" />Загружаю скины и плащи из профиля Minecraft…</div>
                 <div v-else-if="skinProfileError" class="skin-profile-status skin-profile-status--error" role="alert"><span>Не удалось получить профиль: {{ skinProfileError }}</span><button class="button button--quiet" type="button" @click="loadSkinProfile()"><Icon name="refresh" :size="14" />Повторить</button></div>
                 <div class="skin-settings-layout">
-                  <div class="skin-preview-3d"><SkinPreview v-if="currentView === 'accounts'" :image="skinPreviewImage" :model="currentSkinModel" :cape="Boolean(selectedCape?.url)" :cape-image="selectedCape?.url || ''" /><span class="muted">{{ skinProfileLoading ? 'Загружаю профиль Minecraft…' : selectedLocalSkin ? 'Предпросмотр выбранного скина' : activeRemoteSkin ? 'Текущий скин Minecraft' : 'Активный скин не задан' }} · {{ currentSkinModel === 'slim' ? 'стройные руки' : 'широкие руки' }}</span></div>
+                  <div class="skin-preview-3d"><SkinPreview v-if="currentView === 'accounts'" :image="skinPreviewImage" :model="currentSkinModel" :cape="Boolean(selectedCape?.url)" :cape-image="selectedCape?.url || ''" :elytra="skinElytraPreview" /><span class="muted">{{ skinProfileLoading ? 'Загружаю профиль Minecraft…' : selectedLocalSkin ? 'Предпросмотр выбранного скина' : activeRemoteSkin ? 'Текущий скин Minecraft' : 'Активный скин не задан' }} · {{ currentSkinModel === 'slim' ? 'стройные руки' : 'широкие руки' }}</span></div>
                   <div class="skin-controls">
                      <div class="field"><span>Модель рук</span><div class="segmented-control"><button type="button" :class="{ active: skinModel === 'classic' }" @click="selectSkinModel('classic')">Широкие</button><button type="button" :class="{ active: skinModel === 'slim' }" @click="selectSkinModel('slim')">Стройные</button></div></div>
+                     <label class="workspace-check skin-elytra-toggle"><input v-model="skinElytraPreview" type="checkbox" :disabled="!selectedCape?.url" /><span><strong>Предпросмотр элитр</strong><small>{{ selectedCape?.url ? 'Показать текстуру плаща на крыльях элитр' : 'Выберите плащ, чтобы увидеть элитры' }}</small></span></label>
+                     <div v-if="selectedCape?.url" class="skin-cape-front"><CapeThumb :image="selectedCape.url" /><span><strong>{{ selectedCape.name || selectedCape.alias || 'Плащ' }}</strong><small>Лицевая сторона плаща</small></span></div>
                   </div>
                 </div>
                 <div class="skin-library">
                   <div class="skin-library-heading"><div><h3>Скины</h3><p>Текущий скин аккаунта и локальная библиотека.</p></div></div>
                   <div class="skin-library-grid">
                     <button v-if="activeRemoteSkin" class="skin-library-item skin-library-account-item" :class="{ active: !selectedSkinId }" type="button" @click="selectCurrentSkin">
-                      <img v-if="activeRemoteSkin.url" :src="activeRemoteSkin.url" alt="" />
+                      <span v-if="activeRemoteSkin.url" class="skin-library-model"><SkinThumb3D :image="activeRemoteSkin.url" :model="activeRemoteSkin.variant?.toUpperCase() === 'SLIM' ? 'slim' : 'classic'" :cape-image="activeCape?.url || ''" /></span>
                       <span v-else class="skin-library-avatar-placeholder"><Icon name="skin" :size="18" /></span>
                       <span>{{ skinProfileData?.name || 'Текущий скин' }}</span>
                       <small>Профиль Minecraft · {{ activeRemoteSkin.variant?.toUpperCase() === 'SLIM' ? 'стройные руки' : 'широкие руки' }}</small>
                       <span class="skin-library-current-badge">Экипирован</span>
                     </button>
                     <div v-for="skin in skinResults" :key="skin.skin_id" class="skin-library-item" :class="{ active: selectedSkinId === skin.skin_id }" @click="selectSkin(skin)">
-                      <img v-if="skin.image" :src="skin.image" alt="" />
+                      <span v-if="skin.image" class="skin-library-model"><SkinThumb3D :image="skin.image" :model="skin.model === 'slim' ? 'slim' : 'classic'" /></span>
+                      <span v-else class="skin-library-avatar-placeholder"><Icon name="skin" :size="18" /></span>
                       <span>{{ skin.name }}</span>
                       <small>{{ skin.model === 'slim' ? 'стройные' : 'широкие' }}</small>
                       <button v-if="selectedSkinId === skin.skin_id" class="button button--small button--accent" type="button" @click.stop="applySelectedSkin(skin)">Установить</button>
@@ -5448,7 +5636,7 @@ onBeforeUnmount(() => {
                   <div class="skin-library-heading"><div><h3>Плащи аккаунта</h3><p>Показываются плащи из профиля Minecraft. Если Mojang не вернул идентификатор плаща, его можно только просмотреть.</p></div><span class="skin-cape-count">{{ availableCapes.length }}</span></div>
                   <div v-if="availableCapes.length" class="skin-cape-grid">
                     <button v-for="cape in availableCapes" :key="cape.id || `${cape.alias || cape.name || 'cape'}-${cape.url || cape.state || ''}`" class="skin-cape-card" :class="{ active: (cape.id && selectedCapeId === cape.id) || (!cape.id && selectedCape === cape) }" type="button" :disabled="capeActionBusy || !cape.id" @click="selectCape(cape.id || '')">
-                      <span class="skin-cape-art"><img v-if="cape.url" :src="cape.url" alt="" /><Icon v-else name="skin" :size="20" /></span>
+                      <span class="skin-cape-art"><CapeThumb v-if="cape.url" :image="cape.url" /><Icon v-else name="skin" :size="20" /></span>
                       <span class="skin-cape-name">{{ cape.name || cape.alias || 'Плащ Minecraft' }}</span>
                       <small>{{ !cape.id ? 'Только предпросмотр' : selectedCapeId === cape.id ? 'Выбран' : cape.state?.toUpperCase() === 'ACTIVE' ? 'Надет в Minecraft' : 'Доступен в профиле' }}</small>
                     </button>
@@ -5497,8 +5685,17 @@ onBeforeUnmount(() => {
                  <div v-else class="inline-error">Работа без экземпляра: результаты можно просматривать, но установка отключена до выбора совместимого профиля.</div>
                <p v-if="modError" class="inline-error">{{ modError }}</p>
             </section>
+              <div v-if="catalogSelectable && modResults.length" class="catalog-bulkbar">
+                <button class="button button--small button--quiet" type="button" :disabled="modBusy" @click="selectCatalogPage"><Icon name="check" :size="13" />Выбрать все на странице</button>
+                <span class="muted">{{ catalogBulkProgress || (catalogSelection.size ? `Выбрано: ${catalogSelection.size} (выбор сохраняется между страницами)` : 'Отметьте проекты, чтобы установить их разом') }}</span>
+                <span class="catalog-bulkbar-actions">
+                  <button v-if="catalogSelection.size" class="button button--small button--quiet" type="button" :disabled="modBusy" @click="clearCatalogSelection">Снять выделение</button>
+                  <button class="button button--small button--accent" type="button" :disabled="modBusy || !catalogSelection.size" @click="installSelectedMods"><Icon name="download" :size="13" />{{ catalogBulkProgress ? 'Устанавливаю…' : `Установить выбранные${catalogSelection.size ? ` (${catalogSelection.size})` : ''}` }}</button>
+                </span>
+              </div>
               <div v-if="modResults.length" class="mod-grid">
-                <article v-for="mod in modResults" :key="mod.project_id || mod.id" class="mod-card">
+                <article v-for="mod in modResults" :key="mod.project_id || mod.id" class="mod-card" :class="{ 'mod-card--selected': catalogSelection.has(catalogKey(mod)) }">
+                  <label v-if="catalogSelectable && !mod.installed" class="mod-card-select" :title="catalogSelection.has(catalogKey(mod)) ? 'Убрать из выбранных' : 'Выбрать для установки'"><input type="checkbox" :checked="catalogSelection.has(catalogKey(mod))" :disabled="modBusy" :aria-label="`Выбрать ${mod.title || mod.name}`" @change="toggleCatalogSelection(mod)" /></label>
                   <div class="mod-icon"><img v-if="mod.icon_url" :src="mod.icon_url" alt="" @error="onModIconError(mod)" /><Icon v-else name="mods" :size="24" /></div>
                  <div class="mod-card-copy">
                    <h3>{{ mod.title || mod.name }}</h3>
@@ -5512,7 +5709,8 @@ onBeforeUnmount(() => {
                  </div>
                </article>
              </div>
-             <div v-else class="empty-card empty-card--short">
+             <nav v-if="modResults.length && (modPage > 0 || modHasMore)" class="catalog-pager" aria-label="Страницы каталога"><button class="button button--small button--quiet" type="button" :disabled="modBusy || modPage === 0" @click="goToCatalogPage(modPage - 1)">‹ Назад</button><template v-for="(item, index) in modPagerPages" :key="`page-${index}-${item}`"><span v-if="item < 0" class="catalog-pager-info">…</span><button v-else class="button button--small catalog-pager-page" :class="item === modPage ? 'button--accent' : 'button--quiet'" type="button" :disabled="modBusy" :aria-current="item === modPage ? 'page' : undefined" @click="goToCatalogPage(item)">{{ item + 1 }}</button></template><button class="button button--small button--quiet" type="button" :disabled="modBusy || !modHasMore" @click="goToCatalogPage(modPage + 1)">Вперёд ›</button><span class="catalog-pager-info">{{ modTotal !== null ? `Найдено: ${modTotal.toLocaleString()}` : `Страница ${modPage + 1}` }}</span></nav>
+             <div v-if="!modResults.length" class="empty-card empty-card--short">
                <span class="empty-orb empty-orb--large"><Icon name="search" :size="27" /></span>
                 <h3>{{ modError ? 'Каталог недоступен' : modBusy ? 'Ищу проекты…' : !selectedInstance ? 'Выберите экземпляр' : !modSearchPerformed ? 'Начните поиск' : 'Ничего не найдено' }}</h3>
                  <p>{{ modError || (modBusy ? 'Подбираю совместимые проекты для выбранной версии.' : !selectedInstance ? 'Каталог будет искать и устанавливать файлы в контекст выбранного экземпляра.' : !modSearchPerformed ? 'Введите название проекта или нажмите «Показать всё».' : 'Попробуйте изменить запрос или выбрать другой тип ресурса.') }}</p>
@@ -5530,7 +5728,8 @@ onBeforeUnmount(() => {
                   <p v-if="modError" class="inline-error">{{ modError }}</p>
                 </section>
                   <div v-if="modResults.length" class="mod-grid"><article v-for="mod in modResults" :key="mod.project_id || mod.id" class="mod-card"><div class="mod-icon"><img v-if="mod.icon_url" :src="mod.icon_url" alt="" @error="onModIconError(mod)" /><Icon v-else name="archive" :size="24" /></div><div class="mod-card-copy"><h3>{{ mod.title || mod.name }}</h3><p>{{ mod.description || 'Описание не предоставлено.' }}</p><div class="mod-card-footer"><span class="mod-downloads">{{ mod.downloads ? `${mod.downloads.toLocaleString()} загрузок` : 'Модпак' }}</span><button class="button button--small button--quiet" type="button" :aria-label="`Подробности: ${mod.title || mod.name}`" @click="openCatalogDetails(mod)"><Icon name="info" :size="14" />Информация</button><button class="button button--small button--accent mod-install-button" type="button" :disabled="busy || modBusy || (selectedLoader !== 'vanilla' && loadingChoices)" @click="createModpackInstance(mod)"><Icon name="plus" :size="14" />Создать экземпляр</button></div></div></article></div>
-                <div v-else class="empty-card empty-card--short"><span class="empty-orb empty-orb--large"><Icon name="archive" :size="27" /></span><h3>{{ modError ? 'Каталог недоступен' : modBusy ? 'Ищу модпаки…' : !modSearchPerformed ? 'Начните поиск' : 'Ничего не найдено' }}</h3><p>{{ modError || (modBusy ? 'Подбираю сборки для выбранной версии.' : !modSearchPerformed ? 'Введите название сборки или нажмите «Показать всё».' : 'Попробуйте другой запрос или источник.') }}</p></div>
+                <nav v-if="modResults.length && (modPage > 0 || modHasMore)" class="catalog-pager" aria-label="Страницы каталога"><button class="button button--small button--quiet" type="button" :disabled="modBusy || modPage === 0" @click="goToCatalogPage(modPage - 1)">‹ Назад</button><template v-for="(item, index) in modPagerPages" :key="`page-${index}-${item}`"><span v-if="item < 0" class="catalog-pager-info">…</span><button v-else class="button button--small catalog-pager-page" :class="item === modPage ? 'button--accent' : 'button--quiet'" type="button" :disabled="modBusy" :aria-current="item === modPage ? 'page' : undefined" @click="goToCatalogPage(item)">{{ item + 1 }}</button></template><button class="button button--small button--quiet" type="button" :disabled="modBusy || !modHasMore" @click="goToCatalogPage(modPage + 1)">Вперёд ›</button><span class="catalog-pager-info">{{ modTotal !== null ? `Найдено: ${modTotal.toLocaleString()}` : `Страница ${modPage + 1}` }}</span></nav>
+                <div v-if="!modResults.length" class="empty-card empty-card--short"><span class="empty-orb empty-orb--large"><Icon name="archive" :size="27" /></span><h3>{{ modError ? 'Каталог недоступен' : modBusy ? 'Ищу модпаки…' : !modSearchPerformed ? 'Начните поиск' : 'Ничего не найдено' }}</h3><p>{{ modError || (modBusy ? 'Подбираю сборки для выбранной версии.' : !modSearchPerformed ? 'Введите название сборки или нажмите «Показать всё».' : 'Попробуйте другой запрос или источник.') }}</p></div>
               </section>
 
               <section data-page-view="plugins" class="page-content">
@@ -5641,6 +5840,7 @@ onBeforeUnmount(() => {
                <nav class="settings-section-nav" aria-label="Разделы настроек">
                  <button type="button" @click="scrollSettingsSection('settings-system')">Среда запуска</button>
                  <button type="button" @click="scrollSettingsSection('settings-behavior')">Поведение</button>
+                 <button type="button" @click="scrollSettingsSection('settings-auto-repair')">Авто-починка</button>
                  <button type="button" @click="scrollSettingsSection('settings-hotkeys')">Горячие клавиши</button>
                  <button type="button" @click="scrollSettingsSection('settings-overlay')">Оверлей</button>
                  <button type="button" @click="scrollSettingsSection('settings-metrics')">Метрики</button>
@@ -5711,11 +5911,29 @@ onBeforeUnmount(() => {
                    </div>
                  </section>
 
+                 <section id="settings-auto-repair" class="panel settings-card">
+                   <div class="panel-heading"><div><span class="eyebrow">После краша</span><h2>Авто-починка</h2></div></div>
+                   <div class="settings-form">
+                     <p class="field-help field--wide">Если игра упала или не запустилась, лаунчер разберёт лог, отчёт о краше и папку mods и предложит способ починки. Ничего не меняется без вашего согласия.</p>
+                     <div class="settings-toggle-grid">
+                       <label class="workspace-check"><input v-model="settingsDraft.auto_repair_enabled" type="checkbox" /><span><strong>Предлагать починку после краша</strong><small>Показывать окно с проблемой и вариантами исправления</small></span></label>
+                     </div>
+                     <div class="field field--wide auto-repair-kinds">
+                       <span>Какие проблемы предлагать чинить <small>Снятые галочки — то, для чего нажали «Больше не показывать»</small></span>
+                       <div class="settings-toggle-grid">
+                         <label v-for="kind in state.settings.auto_repair_kinds || []" :key="kind.id" class="workspace-check"><input type="checkbox" :checked="!autoRepairKindMuted(kind.id)" :disabled="!settingsDraft.auto_repair_enabled" @change="toggleAutoRepairKind(kind.id, ($event.target as HTMLInputElement).checked)" /><span><strong>{{ kind.title }}</strong></span></label>
+                       </div>
+                       <button v-if="settingsDraft.auto_repair_muted.length" class="button button--small button--outline" type="button" @click="settingsDraft.auto_repair_muted = []"><Icon name="undo" :size="13" />Снова показывать всё</button>
+                     </div>
+                   </div>
+                 </section>
+
                  <section id="settings-downloads" class="panel settings-card">
                    <div class="panel-heading"><div><span class="eyebrow">Сеть и журналы</span><h2>Загрузки и metadata</h2></div></div>
                    <div class="settings-form">
                      <div class="field"><span>Обновление metadata, часы</span><NumericStepper v-model="settingsDraft.metadata_refresh_hours" :min="1" :max="168" aria-label="Обновление metadata" /></div>
                      <div class="field"><span>Timeout загрузки, секунд</span><NumericStepper v-model="settingsDraft.download_timeout_seconds" :min="5" :max="120" aria-label="Timeout загрузки" /></div>
+                     <div class="field field--wide"><span>Источник файлов Minecraft <small>Mojang, Forge, NeoForge, Fabric, Quilt</small></span><CustomSelect v-model="settingsDraft.download_source" :options="downloadSourceOptions" /><small class="field-help">Если официальный сервер не отвечает или обрывает загрузку, файл берётся с зеркала. Подлинность всех файлов проверяется по хешам.</small></div>
                      <div class="field"><span>Повторные попытки загрузки</span><NumericStepper v-model="settingsDraft.download_retries" :min="1" :max="6" aria-label="Повторные попытки загрузки" /></div>
                      <div class="field"><span>Хранить логи, дней <small>0 = без лимита</small></span><NumericStepper v-model="settingsDraft.keep_logs_days" :min="0" :max="365" aria-label="Хранение логов" /></div>
                      <div class="settings-toggle-grid">
