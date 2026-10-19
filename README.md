@@ -87,7 +87,7 @@ checks for new versions on its own.
 ## Building from source
 
 ```bash
-git clone <repo> nivora-launcher && cd nivora-launcher
+git clone https://github.com/vedrooou0/Nivora-launcher.git nivora-launcher && cd nivora-launcher
 
 # Windows (from WSL/a Linux cross environment, or from Windows)
 bash scripts/build_windows_exe.sh
