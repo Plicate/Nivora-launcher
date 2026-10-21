@@ -1,7 +1,4 @@
-// Плагины: инвентаризация, установка ZIP-архивов, манифесты plugin.yml (legacy)
-// и plugin.json (v2/v3 с подписями), grants разрешений, namespace-хранилища
-// (storage/config/files). database() и sqlite-authorizer из Python не портированы:
-// SQLite-доступ плагинов — территория QuickJS-рантайма, не хранилища.
+// плагины: инвентаризация, установка ZIP-архивов, манифесты plugin.yml (legacy)
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -18,10 +15,10 @@ use super::plugin_security::{canonical_json_bytes, parse_strict_json, PluginTrus
 
 pub(crate) const PLUGIN_MANIFEST: &str = "plugin.yml";
 pub(crate) const PLUGIN_V2_MANIFEST: &str = "plugin.json";
-const PLUGIN_MAX_MANIFEST_BYTES: usize = 64 * 1024;
-const PLUGIN_MAX_ARCHIVE_BYTES: usize = 64 * 1024 * 1024;
-const PLUGIN_MAX_UNPACKED_BYTES: usize = 128 * 1024 * 1024;
-const PLUGIN_MAX_FILES: usize = 4096;
+pub(crate) const PLUGIN_MAX_MANIFEST_BYTES: usize = 64 * 1024;
+pub(crate) const PLUGIN_MAX_ARCHIVE_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const PLUGIN_MAX_UNPACKED_BYTES: usize = 128 * 1024 * 1024;
+pub(crate) const PLUGIN_MAX_FILES: usize = 4096;
 const PLUGIN_RUNTIME_MAX_SOURCE_BYTES: usize = 4 * 1024 * 1024;
 const PLUGIN_PERMISSION_FILE: &str = "plugin-permissions.json";
 const PLUGIN_PERMISSION_SCHEMA: i64 = 1;
@@ -236,8 +233,6 @@ const V3_EXTRA_FIELDS: &[&str] = &[
     "host_requirements",
 ];
 
-// ---------------------- мелкие утилиты ----------------------
-
 fn sha256_hex(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(data);
@@ -255,7 +250,7 @@ fn py_str(value: &Value) -> String {
     }
 }
 
-/// Правда Python: пустая строка/список/объект/0/None — ложь.
+/// правда Python: пустая строка/список/объект/0/None — ложь.
 fn py_truthy(value: &Value) -> bool {
     match value {
         Value::Null => false,
@@ -287,8 +282,6 @@ fn text_fits(value: &str, limit: usize) -> bool {
     char_len(value) <= limit
 }
 
-/// Печатым считаем всё кроме управления и пробелов-разделителей (кроме ' '):
-/// приближение str.isprintable из Python.
 fn py_printable(value: &str) -> bool {
     value.chars().all(|character| !character.is_control() && (character == ' ' || !character.is_whitespace()))
 }
@@ -368,8 +361,6 @@ fn sorted_set(values: &[String]) -> Vec<String> {
 fn default_permission_record() -> Value {
     json!({"grants": [], "untrusted_execution_hash": ""})
 }
-
-// ---------------------- хранилище плагинов ----------------------
 
 pub(crate) struct PluginStore {
     pub(crate) root: PathBuf,
@@ -663,7 +654,7 @@ impl PluginStore {
             return Err("id plugin.yml не совпадает с каталогом".to_owned());
         }
         if path_exists(&v2_path) {
-            // Недостижимо (plugin.json перехвачен выше), сохранено как в Python.
+            // недостижимо (plugin.json перехвачен выше), сохранено как в Python.
             return Err("Каталог содержит конфликтующие plugin.yml и plugin.json".to_owned());
         }
         let entrypoint = value.get("entrypoint").and_then(Value::as_str).unwrap_or_default().to_owned();
@@ -924,8 +915,6 @@ impl PluginStore {
         }))
     }
 
-    // Python: Path(__file__).resolve().parent.parent. Здесь исполняемый файл —
-    // единственный аналог «каталога лаунчера» в дистрибутиве Tauri.
     pub(crate) fn launcher_root(&self) -> Result<PathBuf, String> {
         let executable = std::env::current_exe().map_err(|_| "Не удалось определить корень лаунчера".to_owned())?;
         let resolved = fs::canonicalize(&executable).unwrap_or(executable);
@@ -1355,7 +1344,10 @@ impl PluginStore {
     }
 }
 
-// ---------------------- инвентаризация ----------------------
+pub fn plugin_list(_request: &Value) -> Result<Value, String> {
+    let config = ConfigStore::load()?;
+    Ok(json!({ "plugins": PluginStore::new(&config)?.list()? }))
+}
 
 pub(crate) fn discover_plugins(root: &Path) -> Result<Vec<Value>, String> {
     let trust_store = PluginTrustStore::new(&root.parent().unwrap_or(Path::new(".")).join("plugin-trust"))?;
@@ -1399,7 +1391,7 @@ fn discover_plugins_inner(root: &Path, trust_store: &PluginTrustStore, permissio
         if !has_legacy {
             continue;
         }
-        // Битые legacy-манифесты молча пропускаем — как в Python.
+        // битые legacy-манифесты молча пропускаем — как в Python.
         let outcome = (|| -> Result<Value, String> {
             if path_size(&legacy_path).unwrap_or(0) > PLUGIN_MAX_MANIFEST_BYTES as u64 {
                 return Err(String::new());
@@ -1431,8 +1423,6 @@ fn discover_plugins_inner(root: &Path, trust_store: &PluginTrustStore, permissio
     }
     Ok(result)
 }
-
-// ---------------------- plugin.yml ----------------------
 
 pub(crate) fn parse_plugin_yml(text: &str) -> Result<Map<String, Value>, String> {
     if text.len() > PLUGIN_MAX_MANIFEST_BYTES {
@@ -1480,7 +1470,7 @@ pub(crate) fn parse_plugin_yml(text: &str) -> Result<Map<String, Value>, String>
                 if !value.is_empty() {
                     fields.insert(key.to_owned(), yaml_scalar(value)?);
                 } else {
-                    // Вставка дочернего узла отложена до pop: пока фрейм на вершине
+                    // вставка дочернего узла отложена до pop: пока фрейм на вершине
                     // стека, пишут только в него, а порядок ключей как в Python.
                     let child = if next_is_list(&lines, number) {
                         YamlNode::List(Vec::new())
@@ -1577,7 +1567,7 @@ fn yaml_scalar(value: &str) -> Result<Value, String> {
         _ => {}
     }
     if YAML_INT_RE.is_match(value) {
-        // Целые шире i64 оставляем строкой — JSON-числа в manifest-контрактах не шире i64.
+        // целые шире i64 оставляем строкой — JSON-числа в manifest-контрактах не шире i64.
         if let Ok(parsed) = value.parse::<i64>() {
             return Ok(json!(parsed));
         }
@@ -1598,8 +1588,6 @@ fn yaml_scalar(value: &str) -> Result<Value, String> {
     Ok(json!(value))
 }
 
-// ---------------------- манифесты ----------------------
-
 fn static_json_manifest(root: &Path) -> Result<Option<Value>, String> {
     let path = root.join(PLUGIN_V2_MANIFEST);
     if path_is_symlink(&path) || !path_is_file(&path) || path_size(&path).unwrap_or(0) > PLUGIN_MAX_MANIFEST_BYTES as u64 {
@@ -1618,7 +1606,7 @@ fn static_json_manifest(root: &Path) -> Result<Option<Value>, String> {
     if api_version.trim() != "1" {
         return Ok(None);
     }
-    // Ошибки валидации пробивают наружу (как LauncherError в Python) и ломают list().
+    // ошибки валидации пробивают наружу (как LauncherError в Python) и ломают list().
     Ok(Some(validate_manifest(&parsed)?))
 }
 
@@ -1814,7 +1802,7 @@ fn validate_v2_or_v3(value: &Value, api_version: &str) -> Result<Value, String> 
     }
 
     let validated = validate_manifest(value)?;
-    // Сравнение как в Python — с нормализованной строкой: нестроговой id не совпадёт.
+    // сравнение как в Python — с нормализованной строкой: нестроговой id не совпадёт.
     if value.get("id").and_then(Value::as_str) != validated.get("id").and_then(Value::as_str) {
         return Err("plugin.json id and entrypoint must use their normalized forms".to_owned());
     }
@@ -1886,8 +1874,6 @@ fn validate_v2_or_v3(value: &Value, api_version: &str) -> Result<Value, String> 
     result.insert("api_version".to_owned(), json!(api_version));
     Ok(Value::Object(result))
 }
-
-// ---------------------- примитивы схемы plugin.json ----------------------
 
 fn schema_text<'a>(value: &'a Value, label: &str, maximum: usize, allow_empty: bool) -> Result<&'a str, String> {
     let invalid = || format!("{label} must be text of at most {maximum} characters");
@@ -2514,8 +2500,6 @@ fn validate_v2_commands(value: &Value) -> Result<(), String> {
     Ok(())
 }
 
-// ---------------------- разрешения плагинов ----------------------
-
 fn read_permission_state(path: &Path) -> Result<Value, String> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
@@ -2599,7 +2583,7 @@ fn write_permission_state(path: &Path, value: &Value) -> Result<(), String> {
     atomic_json_write(path, value, true).map_err(|_| "Could not save plugin permission grants".to_owned())
 }
 
-/// Чтение с O_NOFOLLOW и fchmod 0600 — замена set_private_fd из platform_support.
+/// чтение с O_NOFOLLOW и fchmod 0600 — замена set_private_fd из platform_support.
 fn read_private_file(path: &Path, max_bytes: usize) -> Result<Option<Vec<u8>>, String> {
     #[cfg(unix)]
     {
@@ -2656,9 +2640,7 @@ fn open_private_file(path: &Path) -> Result<File, std::io::Error> {
     }
 }
 
-// ---------------------- пакеты plugin.json ----------------------
-
-fn parse_v2_manifest_bytes(content: &[u8]) -> Result<Value, String> {
+pub(crate) fn parse_v2_manifest_bytes(content: &[u8]) -> Result<Value, String> {
     if content.len() > PLUGIN_MAX_MANIFEST_BYTES {
         return Err("plugin.json exceeds the manifest size limit".to_owned());
     }
@@ -2775,8 +2757,6 @@ fn walk_v2_package(
     }
     entries.sort_by(|a, b| a.0.cmp(&b.0));
 
-    // os.walk делит записи по stat-following; symlink-каталоги попадают в каталоги
-    // и ловятся lstat-проверкой ниже.
     let mut kept_directories: Vec<PathBuf> = Vec::new();
     for (name, path) in &entries {
         let follows_dir = fs::metadata(path).map(|metadata| metadata.is_dir()).unwrap_or(false);
@@ -2913,7 +2893,7 @@ fn reject_v2_runtime_paths(root: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn verify_unsigned_v2_integrity(manifest: &Value, file_bytes: &BTreeMap<String, Vec<u8>>) -> Result<(), String> {
+pub(crate) fn verify_unsigned_v2_integrity(manifest: &Value, file_bytes: &BTreeMap<String, Vec<u8>>) -> Result<(), String> {
     let integrity = manifest.get("integrity");
     let valid_shape = integrity
         .and_then(Value::as_object)
@@ -3182,8 +3162,6 @@ fn execution_block_reason(
     None
 }
 
-// ---------------------- пути и файловые операции ----------------------
-
 fn enabled_state(directory: &Path) -> bool {
     let path = directory.join(".enabled");
     path_exists(&path) && !path_is_symlink(&path)
@@ -3277,7 +3255,7 @@ fn safe_child(root: &Path, relative_path: &str) -> Result<PathBuf, String> {
             return Err("Символьные ссылки в файлах плагина запрещены".to_owned());
         }
     }
-    // Компоненты уже проверены lstat-ом, поэтому лексический путь равен canonical.
+    // компоненты уже проверены lstat-ом, поэтому лексический путь равен canonical.
     let root_resolved = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
     let target = root_resolved.join(parts.join("/"));
     if !within(&target, &root_resolved) {
@@ -3293,7 +3271,7 @@ fn archive_member_path(root: &Path, member_name: &str) -> Result<PathBuf, Instal
         return Err(InstallFail::User("Архив плагина содержит небезопасный путь".to_owned()));
     }
     let candidate = root.join(parts.join("/"));
-    // Path.resolve() в Python не строгий: несуществующие компоненты достраиваются
+    // path.resolve() в Python не строгий: несуществующие компоненты достраиваются
     // лексически (staging/storage ещё не создан на момент проверки).
     let root_resolved = resolve_non_strict(root);
     let parent_resolved = resolve_non_strict(candidate.parent().unwrap_or(root));
@@ -3305,8 +3283,6 @@ fn archive_member_path(root: &Path, member_name: &str) -> Result<PathBuf, Instal
     Ok(candidate)
 }
 
-// Аналог Path.resolve(strict=False): существующие компоненты разворачиваются
-// через canonicalize (включая symlinks), остальные достраиваются лексически.
 fn resolve_non_strict(path: &Path) -> PathBuf {
     if let Ok(resolved) = fs::canonicalize(path) {
         return resolved;
@@ -3345,8 +3321,6 @@ fn assert_no_symlink_chain(path: &Path, root: &Path) -> Result<(), String> {
         current = current.parent().expect("проверено выше").to_path_buf();
     }
 }
-
-// ---------------------- config.yml ----------------------
 
 fn validate_config_key(key: &str) -> Result<(), String> {
     if !CONFIG_KEY_RE.is_match(key.trim()) {
@@ -3411,10 +3385,8 @@ fn yaml_dump_scalar(value: &Value) -> String {
     }
 }
 
-// ---------------------- ошибки установки ----------------------
-
 enum InstallFail {
-    /// LauncherError из Python — текст передаётся пользователю как есть.
+    /// launcherError из Python — текст передаётся пользователю как есть.
     User(String),
     /// OSError/BadZipFile — обёртка «Не удалось установить плагин: …».
     Os(String),
@@ -3498,8 +3470,6 @@ mod tests {
         )
     }
 
-    // ---------------------- plugin.yml ----------------------
-
     #[test]
     fn parse_plugin_yml_builds_nested_structure() {
         let text = "---\nid: demo-plugin\nname: Demo\nnetwork_hosts:\n  - Example.COM.\n  - example.com\nsidebar:\n  label: 'текст с ''кавычками'''\nflags:\n  yes: yes\n  count: 42\n  ratio: 2.5\n  empty: ~\ninline: [1, \"two\"]\n";
@@ -3512,7 +3482,7 @@ mod tests {
         assert_eq!(parsed["flags"]["ratio"], json!(2.5));
         assert_eq!(parsed["flags"]["empty"], json!(null));
         assert_eq!(parsed["inline"], json!([1, "two"]));
-        // Комментарий за значением отбрасывается.
+        // комментарий за значением отбрасывается.
         let with_comment = parse_plugin_yml("id: demo # идентификатор\nname: 'Demo # не комментарий'\n").unwrap();
         assert_eq!(with_comment["id"], json!("demo"));
         assert_eq!(with_comment["name"], json!("Demo # не комментарий"));
@@ -3541,8 +3511,6 @@ mod tests {
         let too_large = format!("id: {}\n", "a".repeat(PLUGIN_MAX_MANIFEST_BYTES));
         assert_eq!(parse_plugin_yml(&too_large).unwrap_err(), "plugin.yml слишком большой");
     }
-
-    // ---------------------- validate_manifest ----------------------
 
     #[test]
     fn validate_manifest_normalizes_legacy_manifest() {
@@ -3616,8 +3584,6 @@ mod tests {
             assert_eq!(validate_manifest(&value).unwrap_err(), expected, "значение: {value}");
         }
     }
-
-    // ---------------------- схема v2/v3 ----------------------
 
     #[test]
     fn validate_v2_manifest_accepts_minimal_unsigned_package() {
@@ -3730,7 +3696,7 @@ mod tests {
             "plugin.json.ui.views[].slot is unsupported"
         );
 
-        // Глубина дерева ограничена десятью уровнями.
+        // глубина дерева ограничена десятью уровнями.
         let mut node = json!({"type": "text", "text": "x"});
         for _ in 0..12 {
             node = json!({"type": "card", "children": [node]});
@@ -3745,8 +3711,6 @@ mod tests {
             "plugin.json UI tree exceeds its depth or node limit"
         );
     }
-
-    // ---------------------- store ----------------------
 
     #[test]
     fn legacy_plugin_lifecycle_in_store() {
@@ -3892,7 +3856,7 @@ mod tests {
         assert_eq!(plugin["execution_allowed"], json!(false));
         assert_eq!(plugin["execution_blocked_reason"], json!("local-untrusted-execution-not-approved"));
 
-        // Без согласия даже включить нельзя.
+        // без согласия даже включить нельзя.
         assert_eq!(
             store.set_enabled("demo-plugin", true).unwrap_err(),
             "Для unsigned-плагина требуется явное согласие на локальный untrusted-запуск"
@@ -3913,7 +3877,7 @@ mod tests {
         let info = store.runtime_info("demo-plugin").unwrap();
         assert_eq!(info["sandbox_profile"], json!("quickjs-legacy"));
         assert!(info["capabilities"].as_array().unwrap().iter().any(|item| item == &json!("ui.composition.v2")));
-        // В списке плагинов digest не отдаётся — только в runtime_source/runtime_info.
+        // в списке плагинов digest не отдаётся — только в runtime_source/runtime_info.
         assert_eq!(source["package_sha256"], info["package_sha256"]);
 
         let grants = store.set_permission_grants("demo-plugin", &json!(["storage:workspace"])).unwrap();
@@ -3969,8 +3933,6 @@ mod tests {
         assert_eq!(enabled["execution_allowed"], json!(true));
         assert_eq!(enabled["trust"], json!("verified"));
 
-        // Подменённое содержимое файла при исходной подписи не пройдёт integrity:
-        // манифест не переподписываем — hash файла в integrity перестаёт совпадать.
         let tampered = zip_bytes(&[
             ("plugin.json", signed_manifest.to_string().into_bytes()),
             ("main.js", b"export default 'evil'".to_vec()),
@@ -4057,7 +4019,7 @@ mod tests {
         assert_eq!(store.read_storage("demo-plugin", "state").unwrap(), json!({"keep": true}));
         assert!(!store.root.join("demo-plugin").join(".install-").exists());
 
-        // Повторная установка без replace отклоняется.
+        // повторная установка без replace отклоняется.
         assert_eq!(
             store.install_archive(&replacement, false, false).unwrap_err(),
             "Плагин уже установлен: demo-plugin"

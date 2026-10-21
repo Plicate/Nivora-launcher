@@ -254,7 +254,7 @@ onMounted(async () => {
     const result = await bridge.cloudStatus()
     applyStatus(result.status)
   } catch {
-    // The settings form remains usable when the desktop bridge is unavailable.
+    // the settings form remains usable when the desktop bridge is unavailable.
   }
 })
 </script>

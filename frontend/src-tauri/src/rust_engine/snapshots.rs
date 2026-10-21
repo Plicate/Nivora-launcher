@@ -1,6 +1,4 @@
-// Снапшоты содержимого экземпляра: ZIP-архивы категорий (mods, saves, …)
-// с json-манифестами в .nivora-launcher-snapshots. Лимиты защищают от
-// zip-бомб и путей наружу каталога.
+// снапшоты содержимого экземпляра: ZIP-архивы категорий (mods, saves, …)
 use regex::Regex;
 use serde_json::{json, Value};
 use std::collections::HashSet;
@@ -62,8 +60,6 @@ impl SnapshotStore {
         Ok(path)
     }
 
-    /// Манифесты свежими первыми; каждой записи дозаписываются archive,
-    /// category и target.
     pub(crate) fn list(&self, category: &str) -> Result<Vec<Value>, String> {
         let target = self.target(category)?;
         let target_name = file_name_of(&target);
@@ -105,7 +101,7 @@ impl SnapshotStore {
                 continue;
             }
             let archive = directory.join(&archive_name);
-            // Сравнение родителя отсекает «../outside.zip» и вложенные пути.
+            // сравнение родителя отсекает «../outside.zip» и вложенные пути.
             if archive.parent() != Some(directory.as_path()) || is_symlink(&archive) || !archive.is_file() {
                 continue;
             }
@@ -232,8 +228,6 @@ impl SnapshotStore {
         Ok(archive)
     }
 
-    /// Удаление просроченных и лишних снапшотов; список берём один раз,
-    /// порядок list() — от свежих к старым.
     fn cleanup(&self, category: &str, retention_hours: i64, max_count: i64) -> Result<(), String> {
         let now = epoch_seconds();
         let values = self.list(category)?;
@@ -327,7 +321,7 @@ fn extract_archive(archive_path: &Path, temporary: &Path) -> Result<(), String> 
     let file = File::open(archive_path).map_err(|_| "Архив снапшота повреждён".to_owned())?;
     let mut archive = zip::ZipArchive::new(file).map_err(|_| "Архив снапшота повреждён".to_owned())?;
     let mut seen: HashSet<String> = HashSet::new();
-    // Заявленные и фактические байты копим раздельно: заголовок может врать.
+    // заявленные и фактические байты копим раздельно: заголовок может врать.
     let mut declared_total: u64 = 0;
     let mut written_total: u64 = 0;
     for index in 0..archive.len() {
@@ -369,7 +363,7 @@ fn extract_archive(archive_path: &Path, temporary: &Path) -> Result<(), String> 
                 break;
             }
             written += count as u64;
-            // Заявленный size может врать — считаем фактические байты.
+            // заявленный size может врать — считаем фактические байты.
             if written > SNAPSHOT_MAX_FILE_BYTES || written_total + written > SNAPSHOT_MAX_UNPACKED_BYTES {
                 return Err("Распакованный снапшот слишком большой".to_owned());
             }
@@ -380,7 +374,7 @@ fn extract_archive(archive_path: &Path, temporary: &Path) -> Result<(), String> 
     Ok(())
 }
 
-/// Очистить цель и перенести туда содержимое временного каталога.
+/// очистить цель и перенести туда содержимое временного каталога.
 fn replace_directory_contents(root: &Path, target: &Path, temporary: &Path) -> Result<(), String> {
     debug_assert!(target.starts_with(root) && temporary.starts_with(root));
     fs::create_dir_all(target).map_err(|error| format!("{error}"))?;
@@ -406,7 +400,7 @@ fn replace_directory_contents(root: &Path, target: &Path, temporary: &Path) -> R
 
 fn archive_parts(member_name: &str) -> Result<Vec<String>, String> {
     let value = member_name.replace('\\', "/");
-    // Пустые и «.»-фрагменты схлопываются, как у pathlib.PurePath.parts.
+    // пустые и «.»-фрагменты схлопываются, как у pathlib.PurePath.parts.
     let parts: Vec<String> = value
         .split('/')
         .filter(|part| !part.is_empty() && *part != ".")
@@ -463,7 +457,7 @@ fn epoch_seconds() -> f64 {
         .unwrap_or(0.0)
 }
 
-/// Псевдослучайные 8 hex-символов (у uuid в сборке только v5).
+/// псевдослучайные 8 hex-символов (у uuid в сборке только v5).
 fn unique_suffix() -> u32 {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -518,7 +512,7 @@ mod tests {
         assert_eq!(listed[0]["target"], json!("mods"));
         assert!(store.latest("mods").unwrap().is_some());
 
-        // Ломаем мир и восстанавливаем: содержимое обязано вернуться.
+        // ломаем мир и восстанавливаем: содержимое обязано вернуться.
         fs::remove_file(root.join("mods").join("a.jar")).unwrap();
         fs::write(root.join("mods").join("junk.jar"), b"junk").unwrap();
         let snapshot_id = manifest["id"].as_str().unwrap().to_owned();
@@ -620,9 +614,6 @@ mod tests {
         assert_eq!(error, "Снапшот содержит небезопасный путь");
         assert!(!root.parent().unwrap().join("escape.txt").exists());
 
-        // Дубликаты путей в архиве тоже отвергаются. zip не даёт записать
-        // два одинаковых имени, поэтому дубликат — через «./»-префикс:
-        // после нормализации это тот же путь.
         let duplicate_id = "1700000001-cafebabe";
         let duplicate_path = snapshot_dir.join(format!("plugins-{duplicate_id}.zip"));
         {

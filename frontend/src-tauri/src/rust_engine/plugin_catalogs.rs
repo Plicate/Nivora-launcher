@@ -1,4 +1,4 @@
-// Каталоги серверных плагинов (Modrinth/Spigot/Hangar/custom): настройки,
+// каталоги серверных плагинов (Modrinth/Spigot/Hangar/custom): настройки,
 // поиск и детали. Поисковые запросы обслуживает gui-слой.
 use serde_json::{json, Value};
 
@@ -18,8 +18,6 @@ pub fn default_plugin_catalogs() -> Value {
     ])
 }
 
-/// Нормализация списка каталогов из настроек: уникальные id, допустимые
-/// kind, только https.
 pub fn normalize_plugin_catalogs(value: &Value) -> Value {
     let raw: Vec<Value> = match value.as_array() {
         Some(items) => items.clone(),

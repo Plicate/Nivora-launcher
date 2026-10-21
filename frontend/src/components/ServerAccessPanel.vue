@@ -6,9 +6,6 @@ import Collapsible from './Collapsible.vue'
 import { bridge } from '../services/bridge'
 import type { SelectOption } from '../types'
 
-// Редакторы whitelist.json, ops.json и server.properties: пока сервер работает,
-// применяем живые команды консоли; на остановленном — пишем файлы напрямую.
-
 const props = defineProps<{
   name: string
   running: boolean
@@ -39,7 +36,7 @@ const opLevelOptions: SelectOption[] = [
   { value: '4', label: '4', meta: 'полный доступ' },
 ]
 
-// Ключи, которым даём понятные подписи; остальное показываем как есть.
+// ключи, которым даём понятные подписи; остальное показываем как есть.
 const propertyLabels: Record<string, string> = {
   'motd': 'MOTD',
   'max-players': 'Максимум игроков',

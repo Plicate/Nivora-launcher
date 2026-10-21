@@ -1,17 +1,16 @@
-// Выбор Java для запуска: настроенный бинар, системная java или runtime
-// Mojang из piston-meta; проверка прав/владения executable и безопасное
-// разворачивание runtime-манифеста в runtimes_dir.
+// выбор Java для запуска: настроенный бинар, системная java или runtime
 use regex::Regex;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::config::ConfigStore;
+use super::platform_support::canonical_path;
 use super::constants::JAVA_RUNTIME_MANIFEST_URL;
 use super::net::{atomic_json_write, HttpClient};
 
@@ -26,7 +25,7 @@ impl JavaRuntimeManager {
     pub(crate) fn new(config: &ConfigStore, http: Option<Arc<HttpClient>>) -> Result<Self, String> {
         let http = match http {
             Some(http) => http,
-            // Умолчания HttpClient из Python-воркера: 30 секунд, 3 попытки.
+            // умолчания HttpClient из Python-воркера: 30 секунд, 3 попытки.
             None => Arc::new(HttpClient::new(30, 3, "", None)?),
         };
         Ok(Self {
@@ -100,8 +99,6 @@ impl JavaRuntimeManager {
         Err("Java не найден. Установите jre-openjdk или разрешите лаунчеру скачать runtime Mojang.".to_owned())
     }
 
-    /// None — компонент недоступен для нашей платформы (или без манифеста);
-    /// ошибки манифеста/сети — Err.
     fn ensure_mojang_runtime(&self, component: &str) -> Result<Option<PathBuf>, String> {
         safe_runtime_component(component, "runtime component")?;
         let platform_key = runtime_platform()?;
@@ -159,7 +156,7 @@ impl JavaRuntimeManager {
         #[cfg(windows)]
         let mut pending_links: Vec<(PathBuf, PathBuf)> = Vec::new();
         for (relative, metadata) in files_map {
-            // Слэши Windows в манифесте нормализуем, «.»-компоненты
+            // слэши Windows в манифесте нормализуем, «.»-компоненты
             // схлопываются — как в pathlib.PurePath.parts.
             let relative_text = relative.replace('\\', "/");
             let parts: Vec<String> = relative_text
@@ -192,7 +189,7 @@ impl JavaRuntimeManager {
                 continue;
             }
             if file_type == "link" {
-                // Ссылки разрешаем только относительные и внутрь runtime.
+                // ссылки разрешаем только относительные и внутрь runtime.
                 let link_text = metadata.get("target").and_then(Value::as_str).unwrap_or("").replace('\\', "/");
                 let link_target = Path::new(&link_text);
                 let Some(target_parent) = target.parent() else {
@@ -256,7 +253,7 @@ impl JavaRuntimeManager {
         }
         #[cfg(windows)]
         if !pending_links.is_empty() {
-            // На Windows ссылки заменяем копией после того, как файлы
+            // на Windows ссылки заменяем копией после того, как файлы
             // скачаны; цикл нужен для цепочек ссылок.
             use std::sync::atomic::{AtomicU64, Ordering};
             static LINK_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -315,8 +312,6 @@ impl JavaRuntimeManager {
         Ok(None)
     }
 
-    /// Манифест runtime с кэшем на 6 часов; при сетевой ошибке отдаём
-    /// устаревший кэш, если он есть.
     fn runtime_manifest(&self) -> Result<Value, String> {
         let cache_path = self.download_cache.join("java-runtime-manifest.json");
         let mut cached: Option<Value> = None;
@@ -347,8 +342,6 @@ impl JavaRuntimeManager {
     }
 }
 
-/// Кэш манифеста: (значение, свежесть). Ссылки и файлы больше 8 МБ не
-/// читаем; битый fetched_at бракует весь кэш.
 fn read_cached_runtime_manifest(path: &Path) -> Option<(Value, bool)> {
     let meta = fs::symlink_metadata(path).ok()?;
     if meta.is_symlink() || meta.len() > 8 * 1024 * 1024 {
@@ -455,7 +448,7 @@ fn safe_runtime_component(value: &str, label: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Путь и все его предки до root не должны быть ссылками.
+/// путь и все его предки до root не должны быть ссылками.
 fn runtime_path_without_symlink(path: &Path, root: &Path) -> bool {
     let mut current = path.to_path_buf();
     loop {
@@ -502,7 +495,7 @@ fn is_executable(path: &Path) -> bool {
 }
 
 fn resolve_path(path: &Path) -> PathBuf {
-    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    canonical_path(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn expand_user(value: &str) -> PathBuf {
@@ -518,7 +511,7 @@ fn expand_user(value: &str) -> PathBuf {
     PathBuf::from(value)
 }
 
-/// Аналог shutil.which: обход PATH, на unix — ещё проверка бита x.
+/// аналог shutil.which: обход PATH, на unix — ещё проверка бита x.
 fn which(name: &str) -> Option<PathBuf> {
     let path_value = std::env::var("PATH").ok()?;
     for directory in std::env::split_paths(&path_value) {
@@ -549,8 +542,6 @@ fn add_execute_bits(path: &Path) -> Result<(), String> {
         .map_err(|error| format!("Не удалось изменить права файла Java runtime: {error}"))
 }
 
-/// Маркер завершённости runtime: без перехода по ссылке (O_NOFOLLOW),
-/// права 0600.
 fn write_runtime_marker(marker: &Path) -> Result<(), String> {
     #[cfg(unix)]
     {
@@ -574,8 +565,6 @@ fn write_runtime_marker(marker: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Аналог portable_fs.safe_path: относительный путь внутри корня без
-/// ссылок и выхода наружу.
 fn safe_path(root: &Path, parts: &[String]) -> Result<PathBuf, String> {
     if is_reparse_point(root) {
         return Err("Корневой каталог является ссылкой".to_owned());
@@ -625,9 +614,9 @@ fn validate_path_component(part: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Главная версия Java из вывода «<executable> -version».
+/// главная версия Java из вывода «<executable> -version».
 pub(crate) fn java_version(java_path: &Path) -> Option<i64> {
-    // Замена javaw нужна только на Windows; на unix переменная не меняется.
+    // замена javaw нужна только на Windows; на unix переменная не меняется.
     #[cfg_attr(not(windows), allow(unused_mut))]
     let mut executable = java_path.to_path_buf();
     #[cfg(windows)]
@@ -653,9 +642,9 @@ pub(crate) fn java_version(java_path: &Path) -> Option<i64> {
     value.split('.').next()?.parse::<i64>().ok()
 }
 
-/// Запуск с таймаутом 10 секунд, как subprocess.run(timeout=10).
+/// запуск с таймаутом 10 секунд, как subprocess.run(timeout=10).
 fn run_version_command(executable: &Path) -> Option<(String, String)> {
-    let mut child = Command::new(executable)
+    let mut child = super::platform::command(executable)
         .arg("-version")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -688,15 +677,14 @@ fn run_version_command(executable: &Path) -> Option<(String, String)> {
     Some((stdout, stderr))
 }
 
-/// Проверка Java executable без запуска: путь из настроек — недоверенный
-/// ввод, принимаем только java/javaw в bin каталога JDK/JRE, запись для
-/// группы/всех и чужой владение отвергаем.
 pub(crate) fn validate_java_path(value: &Path, allow_directory: bool) -> Result<PathBuf, String> {
     let mut candidate = expand_user(&value.to_string_lossy());
     if allow_directory && candidate.is_dir() {
         candidate = candidate.join("bin").join(java_binary_name());
     }
-    let resolved = fs::canonicalize(&candidate)
+    // без verbatim-префикса \\?\: JVM, запущенная по такому пути, получает
+    // java.home вида \\?\C:\… и ломает загрузку модулей у Forge/NeoForge.
+    let resolved = canonical_path(&candidate)
         .map_err(|_| format!("Java executable не найден: {}", candidate.display()))?;
     let allowed: [&str; 2] = if cfg!(windows) { ["java.exe", "javaw.exe"] } else { ["java", "javaw"] };
     let name_ok = resolved
@@ -741,7 +729,7 @@ pub(crate) fn validate_java_path(value: &Path, allow_directory: bool) -> Result<
 pub(crate) fn safe_process_environment(compatibility: bool) -> HashMap<String, String> {
     let raw: Vec<(String, String)> = std::env::vars().collect();
     if compatibility {
-        // Режим совместимости: всё, кроме секретоподобных переменных.
+        // режим совместимости: всё, кроме секретоподобных переменных.
         return raw
             .into_iter()
             .filter(|(key, _)| {
@@ -770,7 +758,7 @@ pub(crate) fn safe_process_environment(compatibility: bool) -> HashMap<String, S
     ];
     let mut result = HashMap::new();
     for (key, value) in raw {
-        // На Windows сравнение регистронезависимое, на unix — точное
+        // на Windows сравнение регистронезависимое, на unix — точное
         // плюс префикс LC_.
         let keep = if cfg!(windows) {
             passthrough.contains(&key.to_uppercase().as_str())
@@ -790,8 +778,6 @@ fn epoch_seconds() -> f64 {
         .map(|value| value.as_secs_f64())
         .unwrap_or(0.0)
 }
-
-// ----------------------------------------------------------- Тесты ----
 
 #[cfg(test)]
 mod tests {
@@ -825,8 +811,8 @@ mod tests {
         let root = temp_root("valid");
         let java = make_java(&root);
         let resolved = validate_java_path(&java, false).unwrap();
-        assert_eq!(resolved, fs::canonicalize(&java).unwrap());
-        // Каталог JDK с allow_directory подставляет bin/java.
+        assert_eq!(resolved, canonical_path(&java).unwrap());
+        // каталог JDK с allow_directory подставляет bin/java.
         assert_eq!(validate_java_path(&root.join("jdk"), true).unwrap(), resolved);
     }
 
@@ -845,7 +831,7 @@ mod tests {
         );
         let missing = validate_java_path(&root.join("nope").join("bin").join("java"), false).unwrap_err();
         assert!(missing.contains("Java executable не найден"));
-        // Доступность записи для группы — отказ.
+        // доступность записи для группы — отказ.
         let java = make_java(&root);
         fs::set_permissions(&java, fs::Permissions::from_mode(0o775)).unwrap();
         let error = validate_java_path(&java, false).unwrap_err();

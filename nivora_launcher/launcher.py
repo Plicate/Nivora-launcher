@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import codecs
 import json
 import os
 import platform
@@ -22,19 +23,17 @@ from .instance_files import instance_log_hash
 from .instances import InstanceStore
 from .metadata import VersionRepository
 from .operations import CancellationToken, OperationCancelled
-from .platform_support import open_path, process_start_options, set_private_fd, terminate_process_tree
+from .platform_support import mojang_os_name, open_path, process_start_options, set_private_fd, set_private_path, terminate_process_tree
 from .process_guard import InstanceProcessLock
-from .runtime import JavaRuntimeManager, java_version, safe_process_environment
+from .runtime import JavaRuntimeManager, java_bitness, java_probe, java_version, safe_process_environment
 from .security import ensure_instance_cell, prepare_process
 from .optimizer import JVM_PRESETS, analyze_instance, record_launch_end, record_launch_start
-
 
 _AUTH_TOKEN_PLACEHOLDER = "__TRIAL_LAUNCHER_AUTH_TOKEN__"
 _JAVA_ARGUMENT_FILE_TARGET = "/instance/.trial-cell/tmp/.trial-launcher-java-args"
 _WAYLAND_GLFW_URL = "https://github.com/jdkeke142/glfw-wayland-minecraft/releases/download/v1.1.0/libglfw.so"
 _WAYLAND_GLFW_SHA256 = "1fa075ea4f595bd6917a7f304f2fe5d583ec82d8f1ac0f0350bd38b32a20a46e"
 _WAYLAND_GLFW_SIZE = 662_440
-
 
 class _JavaArgumentFile:
     def __init__(self, *, fd: int | None = None, path: Path | None = None) -> None:
@@ -61,12 +60,10 @@ class _JavaArgumentFile:
             except OSError:
                 pass
 
-
 def _java_argument(value: str) -> str:
     if "\x00" in value or "\n" in value or "\r" in value:
         raise LauncherError("Аргумент Java содержит недопустимый перевод строки")
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
-
 
 def _is_wayland_session(environment: Mapping[str, str], version_id: str) -> bool:
     return (
@@ -74,7 +71,6 @@ def _is_wayland_session(environment: Mapping[str, str], version_id: str) -> bool
         and bool(environment.get("WAYLAND_DISPLAY"))
         and not _is_legacy_version(version_id)
     )
-
 
 def _native_wayland_command(command: list[str], main_class: str, library: Path) -> list[str]:
     try:
@@ -87,7 +83,6 @@ def _native_wayland_command(command: list[str], main_class: str, library: Path) 
         "-Dsodium.checks.issue2561=false",
         *command[main_index:],
     ]
-
 
 def _native_wayland_environment(environment: dict[str, str]) -> None:
     for key in (
@@ -107,7 +102,6 @@ def _native_wayland_environment(environment: dict[str, str]) -> None:
     environment["GLFW_FORCE_WAYLAND"] = "1"
     environment["TRIAL_LAUNCHER_GRAPHICS_BACKEND"] = "native-wayland-glfw-v1.1.0"
 
-
 def _looks_like_non_nvidia_renderer(line: str) -> bool:
     lowered = line.lower()
     if "llvmpipe" in lowered or "softpipe" in lowered:
@@ -115,6 +109,67 @@ def _looks_like_non_nvidia_renderer(line: str) -> bool:
     vendor = re.search(r"\bopengl\s+vendor\s*:\s*([^\r\n]+)", line, re.IGNORECASE)
     return bool(vendor and "nvidia" not in vendor.group(1).lower())
 
+def _windows_short_path(path: str) -> str:
+    """8.3-имя существующего пути (ASCII); пустая строка, если недоступно."""
+    if os.name != "nt":
+        return ""
+    try:
+        import ctypes
+
+        get_short = ctypes.windll.kernel32.GetShortPathNameW  # type: ignore[attr-defined]
+        size = get_short(path, None, 0)
+        if not size:
+            return ""
+        buffer = ctypes.create_unicode_buffer(size)
+        return buffer.value if get_short(path, buffer, size) else ""
+    except (AttributeError, OSError, ValueError):
+        return ""
+
+def _encodable(value: str, encoding: str) -> bool:
+    try:
+        value.encode(encoding, "strict")
+        return True
+    except (UnicodeEncodeError, LookupError):
+        return False
+
+def _windows_ansi_argument(value: str, encoding: str, short_path: Callable[[str], str] = _windows_short_path) -> str:
+    """привести аргумент к системной ANSI-кодировке Windows."""
+    if _encodable(value, encoding):
+        return value
+    pieces: list[str] = []
+    for piece in value.split(";"):
+        if _encodable(piece, encoding):
+            pieces.append(piece)
+            continue
+        prefix, path = "", piece
+        if piece.startswith("-") and "=" in piece:
+            prefix, path = piece.split("=", 1)
+            prefix += "="
+        shortened = short_path(path) if path else ""
+        if not shortened or not _encodable(shortened, encoding):
+            raise LauncherError(
+                "Путь содержит символы, которые Java на Windows не может прочитать в системной кодировке "
+                f"({encoding}): {path}. Перенесите папку игры в путь из латинских букв "
+                "(Настройки → Папка игры) или включите в Windows «Бета: UTF-8 для всех языков»."
+            )
+        pieces.append(prefix + shortened)
+    return ";".join(pieces)
+
+def _windows_ansi_command(command: list[str], encoding: str = "", short_path: Callable[[str], str] = _windows_short_path) -> list[str]:
+    encoding = encoding or _windows_ansi_encoding()
+    return [_windows_ansi_argument(value, encoding, short_path) for value in command]
+
+def _windows_ansi_encoding() -> str:
+    # «mbcs» — текущая ANSI-кодовая страница Windows; вне Windows кодека нет.
+    try:
+        codecs.lookup("mbcs")
+        return "mbcs"
+    except LookupError:
+        return "utf-8"
+
+def _argument_file_encoding() -> str:
+    # java читает @argfile в той же кодировке, что и argv: на Windows — ANSI.
+    return _windows_ansi_encoding() if os.name == "nt" else "utf-8"
 
 def _create_java_argument_file(
     arguments: list[str],
@@ -153,29 +208,41 @@ def _create_java_argument_file(
     fd, path = tempfile.mkstemp(prefix=".java-args-", dir=arguments_dir)
     try:
         set_private_fd(fd)
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        with os.fdopen(fd, "w", encoding=_argument_file_encoding(), errors="strict") as handle:
             handle.write(content)
+    except UnicodeEncodeError as exc:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        Path(path).unlink(missing_ok=True)
+        raise LauncherError("Аргументы Java содержат символы вне системной кодировки Windows") from exc
     except BaseException:
         try:
             os.close(fd)
         except OSError:
             pass
-        path.unlink(missing_ok=True)
+        Path(path).unlink(missing_ok=True)
         raise
+    if os.name == "nt":
+        set_private_path(Path(path))
     return _JavaArgumentFile(path=Path(path))
-
 
 def _create_launcher_java_argument_file(arguments: list[str], instance_dir: Path, data_home: Path) -> _JavaArgumentFile:
     if os.name == "nt":
         return _create_java_argument_file(arguments, instance_dir, private_directory=data_home)
     return _create_java_argument_file(arguments, instance_dir)
 
+def _should_use_argument_file(has_token: bool, java_major: int | None) -> bool:
+    """передавать ли аргументы Java через @argfile."""
+    if java_major is not None and java_major < 9:
+        return False
+    return has_token or os.name == "nt"
 
 def _materialize_auth_token(command: list[str], access_token: str) -> list[str]:
     if not access_token:
         return command
     return [value.replace(_AUTH_TOKEN_PLACEHOLDER, access_token) for value in command]
-
 
 class GameLauncher:
     def __init__(
@@ -257,11 +324,11 @@ class GameLauncher:
             "game_assets": str(game_assets),
             "assets_index_name": install.asset_index_name,
             "auth_uuid": account.uuid,
-            "auth_access_token": _AUTH_TOKEN_PLACEHOLDER if account.kind == "microsoft" and account.access_token else account.access_token,
-            "auth_session": _AUTH_TOKEN_PLACEHOLDER if account.kind == "microsoft" and account.access_token else account.access_token,
+            "auth_access_token": _AUTH_TOKEN_PLACEHOLDER if account.kind in ("microsoft", "ely") and account.access_token else account.access_token,
+            "auth_session": _AUTH_TOKEN_PLACEHOLDER if account.kind in ("microsoft", "ely") and account.access_token else account.access_token,
             "auth_profile_id": account.uuid,
             "user_properties": "{}",
-            "user_type": "msa" if account.kind == "microsoft" else "legacy",
+            "user_type": {"microsoft": "msa", "ely": "mojang"}.get(account.kind, "legacy"),
             "version_type": str(install.version_json.get("type", "release")),
             "natives_directory": str(install.natives_dir),
             "launcher_name": "Nivora Launcher",
@@ -294,7 +361,7 @@ class GameLauncher:
             jvm_args = [*profile_jvm_args, *jvm_args]
         if profile_game_args:
             game_args = [*game_args, *profile_game_args]
-        # Inject JVM preset flags (strip existing GC/UnlockExperimental args first)
+        # inject JVM preset flags (strip existing GC/UnlockExperimental args first)
         preset_id = str(launch_settings.get("jvm_preset", "none") or "none")
         preset_flags = list(JVM_PRESETS.get(preset_id, {}).get("flags", []))
         if preset_flags:
@@ -303,6 +370,8 @@ class GameLauncher:
             jvm_args = [*preset_flags, *jvm_args]
         if _is_legacy_version(install.version_id):
             compatibility_args = [
+                # современные флаги (пресеты, аргументы профиля) не должны убивать Java 8
+                "-XX:+IgnoreUnrecognizedVMOptions",
                 "-Dorg.lwjgl.opengl.Display.allowSoftwareOpenGL=true",
                 "-Dorg.lwjgl.opengl.Display.useXRandR=false",
             ]
@@ -317,7 +386,7 @@ class GameLauncher:
             game_args.extend(["--quickPlayMultiplayer", quick_server])
         graphics_mode = self._resolved_graphics_mode(launch_settings)
         if "-Dorg.lwjgl.opengl.Display.allowSoftwareOpenGL=true" not in jvm_args:
-            # Keep LWJGL 2 software rendering available after an explicit-driver fallback.
+            # keep LWJGL 2 software rendering available after an explicit-driver fallback.
             jvm_args.insert(0, "-Dorg.lwjgl.opengl.Display.allowSoftwareOpenGL=true")
         if graphics_mode in {"", "auto", "software"} and _is_legacy_version(install.version_id):
             for argument in ("-Dorg.lwjgl.opengl.Display.useXRandR=false",):
@@ -348,6 +417,9 @@ class GameLauncher:
             raise LauncherError("Ограничение автономного аккаунта исчерпано. Используйте Microsoft-авторизацию.")
         launch_settings = settings or {}
         command = _materialize_auth_token(self.build_command(install, account, launch_settings), account.access_token)
+        command = _adapt_command_for_old_java(command, emit)
+        if os.name == "nt":
+            command = _windows_ansi_command(command)
         original_command = command
         if dry_run:
             emit(shlex.join(_redact_command(command, {account.access_token, _AUTH_TOKEN_PLACEHOLDER})))
@@ -425,6 +497,13 @@ class GameLauncher:
                         f"{required_java_major} из метаданных версии; совместимость не гарантирована."
                     )
             event(java_line)
+        has_token = account.kind in ("microsoft", "ely") and bool(account.access_token)
+        argument_file_java = actual_java_major
+        if argument_file_java is None and (has_token or os.name == "nt"):
+            argument_file_java = java_version(Path(command[0]))
+        use_argument_file = _should_use_argument_file(has_token, argument_file_java)
+        if has_token and not use_argument_file:
+            event("Java 8 не поддерживает файлы аргументов (@argfile): параметры передаются напрямую.")
         captured: list[str] = []
         return_code: int | None = None
         wrong_nvidia_renderer = False
@@ -549,7 +628,7 @@ class GameLauncher:
                             install.instance_dir,
                             self.config.paths.data_home,
                         )
-                        if account.kind == "microsoft" and account.access_token
+                        if use_argument_file
                         else None
                     )
                     if java_argument_file:
@@ -576,7 +655,7 @@ class GameLauncher:
                 f"session={environment.get('XDG_SESSION_TYPE', 'unknown')}, "
                 f"legacy_lwjgl={'yes' if _is_legacy_version(install.version_id) else 'no'}"
             )
-            if not java_argument_file and account.kind == "microsoft" and account.access_token:
+            if not java_argument_file and use_argument_file:
                 java_argument_file = _create_launcher_java_argument_file(
                     command[1:],
                     install.instance_dir,
@@ -747,7 +826,7 @@ class GameLauncher:
         elif mode == "mesa":
             environment["__GLX_VENDOR_LIBRARY_NAME"] = "mesa"
         elif mode == "software":
-            # Keep GLVND from selecting a broken proprietary GLX provider when
+            # keep GLVND from selecting a broken proprietary GLX provider when
             # the explicit fallback is meant to use Mesa's llvmpipe.
             environment["__GLX_VENDOR_LIBRARY_NAME"] = "mesa"
             environment["LIBGL_ALWAYS_SOFTWARE"] = "1"
@@ -755,9 +834,7 @@ class GameLauncher:
             environment.pop("MESA_LOADER_DRIVER_OVERRIDE", None)
             environment["LIBGL_DRI3_DISABLE"] = "1"
             environment["LIBGL_ALWAYS_INDIRECT"] = "0"
-            # Some GLX servers advertise framebuffer configs that llvmpipe can
-            # enumerate but cannot use for LWJGL's default context request.
-            # Pin the fallback to a broadly supported compatibility profile.
+            # llvmpipe не тянет дефолтный профиль контекста LWJGL — держим совместимый
             if _is_legacy_version(version_id or ""):
                 environment["MESA_GL_VERSION_OVERRIDE"] = "2.1"
                 environment["MESA_GLSL_VERSION_OVERRIDE"] = "120"
@@ -790,11 +867,9 @@ class GameLauncher:
         except OSError as exc:
             raise LauncherError(f"Не удалось открыть папку: {exc}") from exc
 
-
 def _is_legacy_version(version_id: str) -> bool:
     match = re.search(r"1\.(\d+)(?:[.\-]|$)", version_id)
     return bool(match and int(match.group(1)) < 13)
-
 
 def _looks_like_glx_context_error(lines: list[str]) -> bool:
     text = "\n".join(lines).lower()
@@ -809,7 +884,6 @@ def _looks_like_glx_context_error(lines: list[str]) -> bool:
         )
     )
 
-
 def _safe_extra_arguments(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
@@ -821,11 +895,9 @@ def _safe_extra_arguments(value: Any) -> list[str]:
         result.append(argument[:512])
     return result
 
-
 def _log_component(value: str) -> str:
     normalized = re.sub(r"[^A-Za-z0-9._-]+", "_", str(value)).strip("._-")
     return normalized[:80] or "launcher"
-
 
 def _write_live_state(
     path: Path,
@@ -856,7 +928,6 @@ def _write_live_state(
     except OSError:
         pass
 
-
 def _ensure_private_file(path: Path) -> None:
     flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
     fd = os.open(path, flags, 0o600)
@@ -872,7 +943,6 @@ def _path_within(path: Path, root: Path) -> bool:
     except ValueError:
         return False
 
-
 def _expand_arguments(items: list[Any], placeholders: dict[str, str], features: dict[str, bool]) -> list[str]:
     expanded: list[str] = []
     for item in items:
@@ -886,7 +956,6 @@ def _expand_arguments(items: list[Any], placeholders: dict[str, str], features: 
         expanded.extend(_replace_placeholders(str(item_value), placeholders) for item_value in values)
     return expanded
 
-
 def _argument_allowed(rules: Any, features: dict[str, bool]) -> bool:
     if not rules:
         return True
@@ -896,7 +965,7 @@ def _argument_allowed(rules: Any, features: dict[str, bool]) -> bool:
             continue
         operating_system = rule.get("os", {})
         if isinstance(operating_system, dict):
-            current_os = "windows" if os.name == "nt" else platform.system().lower()
+            current_os = mojang_os_name()
             if operating_system.get("name") and operating_system["name"] != current_os:
                 continue
             architecture = platform.machine().lower()
@@ -916,12 +985,10 @@ def _argument_allowed(rules: Any, features: dict[str, bool]) -> bool:
         allowed = rule.get("action") == "allow"
     return allowed
 
-
 def _replace_placeholders(value: str, placeholders: dict[str, str]) -> str:
     for key, replacement in placeholders.items():
         value = value.replace("${" + key + "}", replacement)
     return value
-
 
 def _redact_command(command: list[str], secrets: set[str]) -> list[str]:
     return [
@@ -929,6 +996,54 @@ def _redact_command(command: list[str], secrets: set[str]) -> list[str]:
         for item in command
     ]
 
+_JVM_SIZE = re.compile(r"^(\d+(?:\.\d+)?)([kKmMgG]?)$")
+
+def _jvm_xmx_kib(value: str) -> int | None:
+    """Размер из -Xmx в терминах JVM: 2G, 512m, 4096k."""
+    match = _JVM_SIZE.match(value)
+    if not match:
+        return None
+    number = float(match.group(1))
+    unit = (match.group(2) or "m").lower()
+    factor = {"k": 1, "m": 1024, "g": 1024 * 1024}[unit]
+    return int(number * factor)
+
+def _adapt_command_for_old_java(command: list[str], emit: Callable[[str], None] | None = None) -> list[str]:
+    """правка команды под старые JVM, один запуск `java -version` на обе."""
+    if not command:
+        return command
+    try:
+        major, bitness = java_probe(Path(command[0]))
+    except (OSError, ValueError):
+        return command
+    capped = command
+    if bitness == 32:
+        capped = _cap_heap_for_32bit_java(command, emit, bitness=bitness)
+    if major is not None and major < 9 and "-XX:+IgnoreUnrecognizedVMOptions" not in capped:
+        capped = ["-XX:+IgnoreUnrecognizedVMOptions", *capped]
+    return capped
+
+def _cap_heap_for_32bit_java(command: list[str], emit: Callable[[str], None] | None = None, *, bitness: int | None = None) -> list[str]:
+    """32-битная Java не резервирует кучу больше ~1,5 ГБ — JVM умирает с"""
+    if not command:
+        return command
+    if bitness is None:
+        bitness = java_bitness(Path(command[0]))
+    if bitness != 32:
+        return command
+    capped: list[str] = []
+    adjusted = False
+    for item in command:
+        if item.startswith("-Xmx") and len(item) > 4:
+            kib = _jvm_xmx_kib(item[4:])
+            if kib is not None and kib > 1024 * 1024:
+                capped.append("-Xmx1024M")
+                adjusted = True
+                continue
+        capped.append(item)
+    if adjusted and emit is not None:
+        emit("Java 32-бит: память экземпляра уменьшена до 1024M — потолок этой сборки")
+    return capped
 
 def _apply_memory_setting(args: list[str], memory: str) -> list[str]:
     result = [value for value in args if not value.startswith("-Xmx")]
@@ -941,7 +1056,6 @@ def _apply_memory_setting(args: list[str], memory: str) -> list[str]:
         else:
             result.insert(index, value)
     return result
-
 
 def _ensure_native_library_path(args: list[str], natives_dir: Path) -> list[str]:
     if any(value.startswith("-Djava.library.path=") for value in args):

@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import Icon from './Icon.vue'
+import QrCode from './QrCode.vue'
+import { nicknameError } from '../services/nickname'
 import launcherLogo from '../assets/uni.png'
 import type { AccountInfo, ThemeMode } from '../types'
 import { FIRST_RUN_SETUP_STAGES, type FirstRunPhase } from '../services/firstRunExperience'
@@ -73,7 +75,7 @@ const tourSteps = [
   },
   {
     target: 'plugins', icon: 'plug', title: 'Инструменты',
-    body: 'Расширения лаунчера, LAN-комнаты и сторонние источники данных. Код расширений не запускается без вашего разрешения.',
+    body: 'Расширения лаунчера и сторонние источники данных. Код расширений не запускается без вашего разрешения.',
     hint: 'Каждому расширению вы сами выдаёте список разрешений.',
   },
   {
@@ -91,6 +93,12 @@ const tourSteps = [
 const phaseIndex = computed(() => setupSteps.findIndex((step) => step.phase === props.phase))
 const activeTourIndex = ref(0)
 const offlineName = ref('Player')
+const offlineNameError = computed(() => (offlineName.value ? nicknameError(offlineName.value) : ''))
+
+function submitOffline() {
+  if (props.busy || nicknameError(offlineName.value)) return
+  emit('add-offline', offlineName.value)
+}
 const gameDirectoryDraft = ref(props.gameDirectory)
 const memoryDraft = ref(Math.max(1, Math.floor(props.memoryGib || props.recommendedMemoryGib || 4)))
 const themeDraft = ref<ThemeMode>(props.theme || 'system')
@@ -112,8 +120,6 @@ const selectedAccount = computed(() => props.accounts.find((account) => account.
 const canSaveBasics = computed(() => Boolean(gameDirectoryDraft.value.trim()) && !props.busy)
 const isLastTourStep = computed(() => activeTourIndex.value >= tourSteps.length - 1)
 
-// Куда поставить карточку экскурсии: рядом с подсвеченным элементом, но
-// не поверх него. Если места сбоку нет — поднимаем карточку вверх/вниз.
 const tourCardStyle = computed(() => {
   const cardWidth = 400
   const margin = 20
@@ -183,7 +189,7 @@ function updateHighlight() {
 async function measureTourStep() {
   if (props.phase !== 'tour') return
   const target = document.querySelector<HTMLElement>(`[data-tour="${activeTourStep.value.target}"]`)
-  // Цель может быть за пределами вьюпорта — сначала подкатываем её в кадр.
+  // цель может быть за пределами вьюпорта — сначала подкатываем её в кадр.
   target?.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'instant' as ScrollBehavior })
   await nextTick()
   updateHighlight()
@@ -263,7 +269,7 @@ onBeforeUnmount(() => {
               <button class="button button--outline first-run-language-option" type="button" @click="emit('pick-language', 'en')"><strong>English</strong><small>Theme, settings and hints in English</small></button>
             </div>
           </div>
-          <div v-if="phase === 'welcome'" key="welcome" class="first-run-content first-run-welcome">
+          <div v-else-if="phase === 'welcome'" key="welcome" class="first-run-content first-run-welcome">
             <img class="first-run-hero-icon" :src="launcherLogo" alt="" />
             <h1 id="first-run-title">Добро пожаловать</h1>
             <p>Настроим главное: аккаунт, папку игры и базовые параметры. Это займёт пару минут — остальное можно поменять позже.</p>
@@ -297,19 +303,21 @@ onBeforeUnmount(() => {
               </button>
               <div class="first-run-offline-box">
                 <div class="first-run-offline-heading"><span class="first-run-option-icon"><Icon name="user" :size="17" /></span><span><strong>Локальный профиль</strong><small>Для одиночной игры; сервисы Microsoft не подключаются.</small></span></div>
-                <div class="first-run-offline-actions"><input v-model="offlineName" type="text" maxlength="16" autocomplete="nickname" aria-label="Имя локального профиля" placeholder="Например, Player" @keydown.enter.prevent="emit('add-offline', offlineName.trim())" /><button class="button button--outline" type="button" :disabled="busy || !offlineName.trim()" @click="emit('add-offline', offlineName.trim())">Создать</button></div>
+                <div class="first-run-offline-actions"><input v-model="offlineName" type="text" maxlength="16" autocomplete="nickname" aria-label="Имя локального профиля" placeholder="Например, Player" spellcheck="false" :aria-invalid="Boolean(offlineNameError)" :class="{ 'input--invalid': offlineNameError }" @keydown.enter.prevent="submitOffline" /><button class="button button--outline" type="button" :disabled="busy || Boolean(nicknameError(offlineName))" @click="submitOffline">Создать</button></div>
+                <p v-if="offlineNameError" class="inline-error first-run-nickname-error" role="alert">{{ offlineNameError }}</p>
               </div>
             </div>
 
             <div v-if="accounts.length" class="first-run-account-add">
               <button class="button button--quiet" type="button" :disabled="busy || !microsoftLoginAvailable" @click="emit('add-microsoft')"><Icon name="plus" :size="14" />Добавить Microsoft-аккаунт</button>
               <span class="first-run-or">или</span>
-              <div class="first-run-offline-actions"><input v-model="offlineName" type="text" maxlength="16" autocomplete="nickname" aria-label="Имя нового локального профиля" placeholder="Имя локального профиля" @keydown.enter.prevent="emit('add-offline', offlineName.trim())" /><button class="button button--small button--outline" type="button" :disabled="busy || !offlineName.trim()" @click="emit('add-offline', offlineName.trim())">Создать</button></div>
+              <div class="first-run-offline-actions"><input v-model="offlineName" type="text" maxlength="16" autocomplete="nickname" aria-label="Имя нового локального профиля" placeholder="Имя локального профиля" spellcheck="false" :aria-invalid="Boolean(offlineNameError)" :class="{ 'input--invalid': offlineNameError }" @keydown.enter.prevent="submitOffline" /><button class="button button--small button--outline" type="button" :disabled="busy || Boolean(nicknameError(offlineName))" @click="submitOffline">Создать</button></div>
+              <p v-if="offlineNameError" class="inline-error first-run-nickname-error" role="alert">{{ offlineNameError }}</p>
             </div>
 
             <div v-if="error" class="first-run-error" role="alert"><Icon name="warning" :size="15" />{{ error }}</div>
             <div v-if="busy" class="first-run-busy" role="status"><span class="first-run-spinner" />{{ accounts.length ? 'Подключаю аккаунт…' : 'Ждём подтверждения входа в браузере…' }}</div>
-            <div v-if="busy && microsoftCode" class="first-run-auth-code" role="status"><span>Откройте страницу входа Microsoft и введите код:</span><strong>{{ microsoftCode }}</strong><small>{{ microsoftVerificationUri || 'https://microsoft.com/devicelogin' }}</small></div>
+            <div v-if="microsoftCode" class="first-run-auth-code" role="status"><span>Откройте страницу входа Microsoft и введите код:</span><strong>{{ microsoftCode }}</strong><small>{{ microsoftVerificationUri || 'https://microsoft.com/devicelogin' }}</small><QrCode :value="microsoftVerificationUri || 'https://microsoft.com/devicelogin'" :size="148" label="QR-код страницы входа Microsoft" /></div>
             <div class="first-run-footer" :class="{ 'first-run-footer--back': !accounts.length }">
               <button class="button button--quiet" type="button" @click="goTo('welcome')"><Icon name="arrow-left" :size="14" />Назад</button>
               <span v-if="!accounts.length" class="first-run-footnote">После входа продолжим автоматически</span>

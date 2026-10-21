@@ -1,7 +1,4 @@
-// Экземпляры: инвентаризация game/instances, профиль с иконками и тегами,
-// группы, дублирование, экспорт в ZIP и импорт сторонних лаунчеров
-// (Prism/MultiMC, CurseForge, официальный). Служебные файлы экземпляра —
-// .nivora-launcher-*.json, имена общие с state.rs.
+// экземпляры: инвентаризация game/instances, профиль с иконками и тегами,
 use base64::Engine;
 use regex::Regex;
 use serde_json::{json, Map, Value};
@@ -9,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use zip::CompressionMethod;
 use zip::ZipWriter;
@@ -29,7 +26,7 @@ pub(crate) const INSTANCE_METADATA_FILE: &str = ".nivora-launcher-instance.json"
 const LIVE_STATE_FILE: &str = ".nivora-launcher-live.json";
 const SERVER_CONFIG_FILE: &str = ".nivora-launcher-server.json";
 const INSTANCE_ASSETS_DIR: &str = ".nivora-launcher-assets";
-// Каталог песочницы и техно-файлы установщика — не портируем и не экспортируем.
+// каталог песочницы и техно-файлы установщика — не портируем и не экспортируем.
 const CELL_DIRECTORY: &str = ".trial-cell";
 const SERVICE_JSON_FILES: &[&str] = &[
     ".nivora-launcher.json",
@@ -69,7 +66,7 @@ pub(crate) struct InstanceInfo {
 }
 
 impl InstanceInfo {
-    /// Внешняя форма экземпляра — поля как _instance_public в gui_service.
+    /// внешняя форма экземпляра — поля как _instance_public в gui_service.
     pub(crate) fn public(&self) -> Value {
         json!({
             "name": self.name,
@@ -126,7 +123,7 @@ impl ExternalImportCandidate {
     }
 }
 
-/// Поля профиля, которые меняет update_profile (kwargs из Python).
+/// поля профиля, которые меняет update_profile (kwargs из Python).
 #[derive(Default)]
 pub(crate) struct ProfileUpdate {
     pub(crate) display_name: String,
@@ -183,7 +180,33 @@ impl InstanceStore {
             .filter(|path| !is_symlink(path) && path.is_dir())
             .collect();
         paths.sort_by_key(|path| file_name_of(path).to_lowercase());
-        paths.iter().map(|path| self.inspect(path)).collect()
+        // Каждая папка читает несколько JSON и (для Java) каталог versions:
+        // на сотнях экземпляров последовательный обход заметен глазом, а
+        // inspect друг от друга не зависит — режем на полосы по нитям.
+        // Порядок сохраняем: результат собирается по индексам, не по
+        // порядку завершения нитей.
+        let workers = std::thread::available_parallelism()
+            .map(|value| value.get())
+            .unwrap_or(1)
+            .min(8)
+            .max(1);
+        if workers <= 1 || paths.len() < 8 {
+            return paths.iter().map(|path| self.inspect_with(path, false)).collect();
+        }
+        let chunk = paths.len().div_ceil(workers);
+        let slices: Vec<Vec<InstanceInfo>> = std::thread::scope(|scope| {
+            let mut handles = Vec::with_capacity(workers);
+            for slice in paths.chunks(chunk) {
+                handles.push(scope.spawn(move || {
+                    slice.iter().map(|path| self.inspect_with(path, false)).collect::<Vec<_>>()
+                }));
+            }
+            handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap_or_default())
+                .collect()
+        });
+        slices.into_iter().flatten().collect()
     }
 
     pub(crate) fn get(&self, name: &str) -> Result<InstanceInfo, String> {
@@ -197,7 +220,7 @@ impl InstanceStore {
         if instance_running(&value.path) {
             return Err("Нельзя удалить запущенный экземпляр".to_owned());
         }
-        // Bedrock-профиль чистит свой стор (bedrock.py); здесь только дерево
+        // bedrock-профиль чистит свой стор (bedrock.py); здесь только дерево
         // экземпляра и защищённые настройки.
         remove_tree(&value.path)?;
         self.clear_protected_settings(&value.name);
@@ -217,7 +240,7 @@ impl InstanceStore {
         assert_no_symlinks(&source.path)?;
         copy_tree(&source.path, &target)?;
         super::platform::restrict_dir(&target);
-        // Java и профиль безопасности лежат вне экземпляра — переносим
+        // java и профиль безопасности лежат вне экземпляра — переносим
         // вручную, иначе копия молча откатится на глобальную Java.
         let defaults = instance_security_defaults();
         if let Ok(values) = self.load_protected_settings(&source.name, &defaults) {
@@ -259,7 +282,7 @@ impl InstanceStore {
         Ok(destination)
     }
 
-    /// Ярлык запуска — .desktop (Windows-вариант с .cmd остаётся за сборкой).
+    /// ярлык запуска — .desktop (Windows-вариант с .cmd остаётся за сборкой).
     pub(crate) fn create_shortcut(&self, name: &str, destination: Option<&Path>) -> Result<PathBuf, String> {
         let value = self.get(name)?;
         if value.game_edition == "bedrock" {
@@ -387,6 +410,55 @@ impl InstanceStore {
         Ok(self.groups())
     }
 
+    pub(crate) fn rename_group(&self, old_name: &str, new_name: &str) -> Result<Vec<String>, String> {
+        let old_value = old_name.trim();
+        let value = take_chars(new_name.trim(), 40);
+        if value.is_empty() {
+            return Err("Название группы не может быть пустым".to_owned());
+        }
+        let mut groups = self.groups();
+        if !groups.iter().any(|group| group == old_value) {
+            return Err("Группа не найдена".to_owned());
+        }
+        if value == old_value {
+            return Ok(self.groups());
+        }
+        if groups.contains(&value) {
+            return Err("Группа с таким названием уже существует".to_owned());
+        }
+        let index = groups.iter().position(|item| item == old_value).expect("проверено выше");
+        groups[index] = value.clone();
+        let pinned: Vec<Value> = self
+            .settings_value()
+            .get("pinned_instance_groups")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .map(|item| {
+                        if item.as_str() == Some(old_value) { json!(value) } else { item.clone() }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut settings = self.settings_value();
+        set_value_on(&mut settings, "instance_groups", &json!(groups))?;
+        set_value_on(&mut settings, "pinned_instance_groups", &Value::Array(pinned))?;
+        self.write_settings(&settings)?;
+        for info in self.list() {
+            if info.group == old_value {
+                let update = ProfileUpdate {
+                    display_name: info.display_name.clone(),
+                    description: info.description.clone(),
+                    group: value.clone(),
+                    ..Default::default()
+                };
+                self.update_profile(&info.name, &update)?;
+            }
+        }
+        Ok(self.groups())
+    }
+
     pub(crate) fn list_import_candidates(&self) -> Vec<ExternalImportCandidate> {
         let mut seen: HashSet<PathBuf> = HashSet::new();
         let mut values: Vec<ExternalImportCandidate> = Vec::new();
@@ -462,8 +534,14 @@ impl InstanceStore {
     }
 
     fn inspect(&self, path: &Path) -> InstanceInfo {
+        self.inspect_with(path, true)
+    }
+
+    /// `include_banner`: список экземпляров не читает баннеры (до 8 МиБ
+    /// base64 на каждый), они нужны только на странице экземпляра.
+    fn inspect_with(&self, path: &Path, include_banner: bool) -> InstanceInfo {
         let metadata = read_profile(path);
-        let mut info = profile_public(path, &metadata, epoch_seconds());
+        let mut info = profile_public(path, &metadata, epoch_seconds(), include_banner);
         if info.game_edition == "bedrock" {
             return info;
         }
@@ -485,8 +563,6 @@ impl InstanceStore {
         atomic_json_write(&self.config_home.join("settings.json"), settings, true)
     }
 
-    // ------------------------------------------------ Защищённые настройки ----
-
     fn protected_settings_path(&self, instance_name: &str) -> Result<PathBuf, String> {
         let path = self.instance_security_dir.join(format!("{}.json", safe_instance_name(instance_name)));
         if is_symlink(&path) {
@@ -495,7 +571,7 @@ impl InstanceStore {
         Ok(path)
     }
 
-    fn load_protected_settings(&self, instance_name: &str, defaults: &Value) -> Result<Value, String> {
+    pub(crate) fn load_protected_settings(&self, instance_name: &str, defaults: &Value) -> Result<Value, String> {
         let path = self.protected_settings_path(instance_name)?;
         if fs::symlink_metadata(&path).is_err() {
             let values = defaults.clone();
@@ -526,7 +602,7 @@ impl InstanceStore {
         Ok(Value::Object(values))
     }
 
-    fn save_protected_settings(&self, instance_name: &str, values: &Value) -> Result<(), String> {
+    pub(crate) fn save_protected_settings(&self, instance_name: &str, values: &Value) -> Result<(), String> {
         let path = self.protected_settings_path(instance_name)?;
         let mut payload = values.as_object().cloned().unwrap_or_default();
         payload.insert("format".into(), json!(PROTECTED_SETTINGS_FORMAT));
@@ -543,16 +619,14 @@ impl InstanceStore {
 }
 
 fn instance_security_defaults() -> Value {
-    // Копия INSTANCE_SECURITY_DEFAULTS из instance_workspace.py.
+    // копия INSTANCE_SECURITY_DEFAULTS из instance_workspace.py.
     json!({
         "java_path": "",
         "security_profile": "strict",
-        "security_permissions": ["files:instance", "desktop:display", "desktop:audio"],
-        "security_policy_version": 3,
+        "security_permissions": ["network:game", "files:instance", "desktop:display", "desktop:audio"],
+        "security_policy_version": 4,
     })
 }
-
-// ------------------------------------------------------- Профиль экземпляра ----
 
 fn read_profile(path: &Path) -> Map<String, Value> {
     read_bounded_json(&path.join(INSTANCE_METADATA_FILE), MAX_INSTANCE_PROFILE_JSON_BYTES)
@@ -560,14 +634,14 @@ fn read_profile(path: &Path) -> Map<String, Value> {
         .unwrap_or_default()
 }
 
-fn profile_public(path: &Path, metadata: &Map<String, Value>, now: f64) -> InstanceInfo {
+fn profile_public(path: &Path, metadata: &Map<String, Value>, now: f64, include_banner: bool) -> InstanceInfo {
     let name = file_name_of(path);
     let running_seconds = live_play_seconds(path, now);
     let played = nonnegative_int(metadata.get("played_seconds").unwrap_or(&Value::Null));
     let display_name = take_chars(py_str(metadata.get("display_name").unwrap_or(&Value::Null)).trim(), 80);
     let icon_file = py_str(metadata.get("icon_file").unwrap_or(&Value::Null)).trim().to_owned();
     let banner_file = py_str(metadata.get("banner_file").unwrap_or(&Value::Null)).trim().to_owned();
-    // Конфиг сервера влияет на kind и подсказывает ядро/порт.
+    // конфиг сервера влияет на kind и подсказывает ядро/порт.
     let server_config = read_bounded_json(&path.join(SERVER_CONFIG_FILE), MAX_SERVER_CONFIG_JSON_BYTES)
         .filter(|value| value.is_object())
         .unwrap_or_else(|| json!({}));
@@ -585,7 +659,7 @@ fn profile_public(path: &Path, metadata: &Map<String, Value>, now: f64) -> Insta
     } else {
         image_data_url(&path.join(INSTANCE_ASSETS_DIR).join(&icon_file), 2 * 1024 * 1024)
     };
-    let banner = if banner_file.is_empty() {
+    let banner = if banner_file.is_empty() || !include_banner {
         String::new()
     } else {
         image_data_url(&path.join(INSTANCE_ASSETS_DIR).join(&banner_file), 8 * 1024 * 1024)
@@ -640,7 +714,7 @@ fn profile_public(path: &Path, metadata: &Map<String, Value>, now: f64) -> Insta
     }
 }
 
-/// Версия и загрузчик из самого свежего versions/<id>/<id>.json.
+/// версия и загрузчик из самого свежего versions/<id>/<id>.json.
 fn latest_version(path: &Path) -> Option<(String, String, String)> {
     let versions = path.join("versions");
     if is_symlink(&versions) || !versions.is_dir() {
@@ -671,7 +745,7 @@ fn latest_version(path: &Path) -> Option<(String, String, String)> {
             candidates.push((modified, metadata_path, value));
         }
     }
-    // Python max() оставляет первый максимум — reduce с строгим сравнением.
+    // python max() оставляет первый максимум — reduce с строгим сравнением.
     let (_, metadata_path, value) = candidates
         .into_iter()
         .reduce(|best, item| if item.0 > best.0 { item } else { best })?;
@@ -710,7 +784,7 @@ fn latest_version(path: &Path) -> Option<(String, String, String)> {
     Some((version_id, minecraft_version, loader))
 }
 
-/// Версия загрузчика: сначала libraries из профиля версии, потом разбор id.
+/// версия загрузчика: сначала libraries из профиля версии, потом разбор id.
 fn loader_version_of(path: &Path, version_id: &str, minecraft_version: &str, loader: &str) -> String {
     if !matches!(loader, "fabric" | "forge" | "neoforge" | "quilt") {
         return String::new();
@@ -760,7 +834,7 @@ fn loader_version_of(path: &Path, version_id: &str, minecraft_version: &str, loa
     if matches!(loader, "fabric" | "quilt") {
         let prefix = format!("{loader}-loader-");
         if lowered.starts_with(&prefix) {
-            // Смещение нашли в lowercase-строке: для не-ASCII id байты могут
+            // смещение нашли в lowercase-строке: для не-ASCII id байты могут
             // разъехаться, поэтому срезаем через get() без паники.
             if let Some(rest) = version_id.get(prefix.len()..) {
                 let mut version = rest.to_owned();
@@ -807,8 +881,6 @@ fn live_play_seconds(path: &Path, now: f64) -> i64 {
     }
 }
 
-// ------------------------------------------------------------ Изображения ----
-
 fn valid_image(content: &[u8], suffix: &str) -> bool {
     match suffix {
         ".png" => content.starts_with(b"\x89PNG\r\n\x1a\n"),
@@ -818,12 +890,43 @@ fn valid_image(content: &[u8], suffix: &str) -> bool {
     }
 }
 
+/// Кеш data-URL картинок профиля: список экземпляров читает и кодирует
+/// иконки при каждом bootstrap, а base64 больших PNG — самая дорогая часть
+/// чтения профиля. Ключ — путь, валидность — mtime+размер: смена иконки
+/// инвалидирует запись автоматически.
+struct CachedImage {
+    modified_ns: u128,
+    len: u64,
+    url: String,
+}
+
+static IMAGE_URL_CACHE: Mutex<Option<HashMap<PathBuf, CachedImage>>> = Mutex::new(None);
+/// верхняя граница кеша, чтобы сотни больших иконок не съели память.
+const IMAGE_URL_CACHE_MAX_BYTES: usize = 64 * 1024 * 1024;
+
 fn image_data_url(path: &Path, limit: u64) -> String {
     let Ok(meta) = fs::symlink_metadata(path) else {
         return String::new();
     };
     if meta.is_symlink() || !meta.is_file() || meta.len() > limit {
         return String::new();
+    }
+    let modified_ns = meta
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|age| age.as_nanos())
+        .unwrap_or(0);
+    let len = meta.len();
+    {
+        let guard = IMAGE_URL_CACHE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(map) = guard.as_ref() {
+            if let Some(hit) = map.get(path) {
+                if hit.modified_ns == modified_ns && hit.len == len {
+                    return hit.url.clone();
+                }
+            }
+        }
     }
     let Ok(content) = fs::read(path) else {
         return String::new();
@@ -838,7 +941,21 @@ fn image_data_url(path: &Path, limit: u64) -> String {
         ".webp" => "image/webp",
         _ => return String::new(),
     };
-    format!("data:{mime};base64,{}", base64::engine::general_purpose::STANDARD.encode(&content))
+    let url = format!("data:{mime};base64,{}", base64::engine::general_purpose::STANDARD.encode(&content));
+    if url.len() <= IMAGE_URL_CACHE_MAX_BYTES / 4 {
+        let mut guard = IMAGE_URL_CACHE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let map = guard.get_or_insert_with(HashMap::new);
+        let budget = map
+            .values()
+            .map(|entry| entry.url.len())
+            .sum::<usize>()
+            .saturating_add(url.len());
+        if budget > IMAGE_URL_CACHE_MAX_BYTES {
+            map.clear();
+        }
+        map.insert(path.to_path_buf(), CachedImage { modified_ns, len, url: url.clone() });
+    }
+    url
 }
 
 fn write_profile_asset(assets: &Path, kind: &str, file_name: &str, encoded: &str, limit: usize) -> Result<String, String> {
@@ -900,29 +1017,96 @@ fn lowercase_suffix(path: &Path) -> String {
         .unwrap_or_default()
 }
 
-// ------------------------------------------------------------- Импорт извне ----
+fn windows_appdata() -> Option<PathBuf> {
+    if !cfg!(windows) {
+        return None;
+    }
+    std::env::var_os("APPDATA").filter(|value| !value.is_empty()).map(PathBuf::from)
+}
+
+pub(crate) fn external_instances_scan(_request: &Value) -> Result<Value, String> {
+    let config = ConfigStore::load()?;
+    let store = InstanceStore::new(&config)?;
+    let candidates: Vec<Value> = store.list_import_candidates().iter().map(ExternalImportCandidate::public).collect();
+    Ok(json!({ "candidates": candidates }))
+}
+
+pub(crate) fn instance_groups(_request: &Value) -> Result<Value, String> {
+    let config = ConfigStore::load()?;
+    Ok(json!({ "groups": InstanceStore::new(&config)?.groups() }))
+}
+
+pub(crate) fn create_instance_group(request: &Value) -> Result<Value, String> {
+    let name = request.get("name").and_then(Value::as_str).unwrap_or_default();
+    let config = ConfigStore::load()?;
+    Ok(json!({ "groups": InstanceStore::new(&config)?.create_group(name)? }))
+}
+
+pub(crate) fn delete_instance_group(request: &Value) -> Result<Value, String> {
+    let name = request.get("name").and_then(Value::as_str).unwrap_or_default();
+    let config = ConfigStore::load()?;
+    Ok(json!({ "groups": InstanceStore::new(&config)?.delete_group(name)? }))
+}
+
+pub(crate) fn rename_instance_group(request: &Value) -> Result<Value, String> {
+    let old_name = request.get("old_name").and_then(Value::as_str).unwrap_or_default();
+    let new_name = request.get("new_name").and_then(Value::as_str).unwrap_or_default();
+    let config = ConfigStore::load()?;
+    Ok(json!({ "groups": InstanceStore::new(&config)?.rename_group(old_name, new_name)? }))
+}
+
+pub(crate) fn delete_instance(request: &Value) -> Result<Value, String> {
+    let name = request.get("name").and_then(Value::as_str).unwrap_or_default();
+    let config = ConfigStore::load()?;
+    let store = InstanceStore::new(&config)?;
+    store.delete(name)?;
+    super::shortcuts::forget_instance(name.trim());
+    let instances: Vec<Value> = store.list().iter().map(|info| info.public()).collect();
+    Ok(json!({ "instances": instances }))
+}
+
+pub(crate) fn duplicate_instance(request: &Value) -> Result<Value, String> {
+    let source = request.get("source").and_then(Value::as_str).unwrap_or_default();
+    let target = request.get("target").and_then(Value::as_str).unwrap_or_default();
+    let config = ConfigStore::load()?;
+    let value = InstanceStore::new(&config)?.duplicate(source, target)?;
+    Ok(json!({ "instance": value.public() }))
+}
 
 fn discover_external_instance_candidates(home: &Path) -> Vec<ExternalImportCandidate> {
     let mut values: Vec<ExternalImportCandidate> = Vec::new();
-    for root in [
+    let appdata = windows_appdata();
+    let mut prism_roots = vec![
         home.join(".local/share/PrismLauncher/instances"),
         home.join(".var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/instances"),
-    ] {
-        values.extend(discover_prism_family_instances(&root, "Prism Launcher"));
-    }
-    for root in [
+    ];
+    let mut multimc_roots = vec![
         home.join(".local/share/MultiMC/instances"),
         home.join(".config/MultiMC/instances"),
         home.join(".config/multimc/instances"),
-    ] {
-        values.extend(discover_prism_family_instances(&root, "MultiMC"));
-    }
-    values.extend(discover_curseforge_instances(&home.join("Documents/curseforge/minecraft/Instances")));
-    for root in [
+    ];
+    let mut curseforge_roots = vec![home.join("Documents/curseforge/minecraft/Instances")];
+    let mut official_roots = vec![
         home.join(".minecraft"),
         home.join("snap/minecraft-launcher/common/.minecraft"),
         home.join(".var/app/com.mojang.Minecraft/data/minecraft"),
-    ] {
+    ];
+    if let Some(appdata) = appdata.as_ref() {
+        prism_roots.push(appdata.join("PrismLauncher").join("instances"));
+        multimc_roots.push(appdata.join("MultiMC").join("instances"));
+        curseforge_roots.push(home.join("curseforge").join("minecraft").join("Instances"));
+        official_roots.insert(0, appdata.join(".minecraft"));
+    }
+    for root in prism_roots {
+        values.extend(discover_prism_family_instances(&root, "Prism Launcher"));
+    }
+    for root in multimc_roots {
+        values.extend(discover_prism_family_instances(&root, "MultiMC"));
+    }
+    for root in curseforge_roots {
+        values.extend(discover_curseforge_instances(&root));
+    }
+    for root in official_roots {
         if let Some(candidate) = discover_official_launcher_instance(&root) {
             values.push(candidate);
         }
@@ -1224,8 +1408,6 @@ fn loader_details_from_token(token: &str, minecraft_version: &str) -> (String, S
     (loader, version_id, minecraft_version)
 }
 
-/// Файл версии для импорта без своего versions/<id>/<id>.json: без него
-/// копия не запустится, поэтому дописываем минимальный манифест.
 fn ensure_import_version_metadata(target: &Path, candidate: &ExternalImportCandidate) -> Result<(), String> {
     let versions_dir = target.join("versions");
     if !is_symlink(&versions_dir) && version_json_exists(&versions_dir) {
@@ -1312,8 +1494,6 @@ fn read_key_value_file(path: &Path, limit: u64) -> HashMap<String, String> {
     values
 }
 
-// ------------------------------------------------------------------ ZIP ----
-
 fn write_export_archive(instance_path: &Path, temporary: &Path) -> Result<(), String> {
     let file = File::create(temporary).map_err(|error| format!("{error}"))?;
     let mut writer = ZipWriter::new(file);
@@ -1325,7 +1505,7 @@ fn write_export_archive(instance_path: &Path, temporary: &Path) -> Result<(), St
     collect_archive_files(instance_path, &mut files);
     for path in files {
         let relative = path.strip_prefix(instance_path).map_err(|error| format!("{error}"))?;
-        // Внутри архива путь начинается с имени каталога экземпляра.
+        // внутри архива путь начинается с имени каталога экземпляра.
         let mut archive_path = instance_name.clone();
         for component in relative.components() {
             archive_path.push('/');
@@ -1368,8 +1548,6 @@ fn collect_archive_files(directory: &Path, output: &mut Vec<PathBuf>) {
         }
     }
 }
-
-// ------------------------------------------------------------- Файловой ----
 
 fn remove_tree(path: &Path) -> Result<(), String> {
     let Ok(meta) = fs::symlink_metadata(path) else {
@@ -1442,14 +1620,12 @@ fn desktop_exec_argument(value: &str) -> Result<String, String> {
 }
 
 fn launcher_cli_command() -> Vec<String> {
-    // Упакованный бэкенд запускает CLI как <exe> --cli (scripts/backend_entry.py).
+    // упакованный бэкенд запускает CLI как <exe> --cli (scripts/backend_entry.py).
     match std::env::current_exe() {
         Ok(executable) => vec![executable.to_string_lossy().to_string(), "--cli".to_owned()],
         Err(_) => vec!["nivora-launcher-backend".to_owned()],
     }
 }
-
-// ------------------------------------------------------------- Утилиты ----
 
 fn epoch_seconds() -> f64 {
     SystemTime::now()
@@ -1492,8 +1668,6 @@ fn expand_home(path: &Path) -> PathBuf {
     path.to_path_buf()
 }
 
-/// Нестрогий аналог Path.resolve(): канонизация существующего, иначе
-/// лексическая нормализация (каталога назначения может ещё не быть).
 fn resolved_path(path: &Path) -> PathBuf {
     let expanded = expand_home(path);
     if let Ok(resolved) = expanded.canonicalize() {
@@ -1600,7 +1774,7 @@ fn valid_version_id(id: &str) -> bool {
         && id.chars().all(|character| character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '+' | '-'))
 }
 
-/// Версия игры из id: последний фрагмент, предпочтительно 1.x/2.x.
+/// версия игры из id: последний фрагмент, предпочтительно 1.x/2.x.
 fn version_from_id(version_id: &str) -> String {
     static VERSION_RE: OnceLock<Regex> = OnceLock::new();
     let regex = VERSION_RE.get_or_init(|| Regex::new(r"\d+\.\d+(?:\.\d+)?").unwrap());
@@ -1633,7 +1807,7 @@ mod tests {
     use std::fs;
     use std::sync::{Mutex, MutexGuard};
 
-    /// Тесты меняют XDG/HOME — гонки недопустимы, поэтому держим замок.
+    /// тесты меняют XDG/HOME — гонки недопустимы, поэтому держим замок.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn env_guard() -> MutexGuard<'static, ()> {
@@ -1653,10 +1827,10 @@ mod tests {
         std::env::set_var("XDG_CONFIG_HOME", root.join("config"));
         std::env::set_var("XDG_DATA_HOME", root.join("data"));
         std::env::set_var("XDG_CACHE_HOME", root.join("cache"));
-        // Каталог игры должен существовать до валидации в ConfigStore.
+        // каталог игры должен существовать до валидации в ConfigStore.
         fs::create_dir_all(root.join("game")).unwrap();
         let config = ConfigStore::load().unwrap();
-        // Свой каталог игры, как это делает GUI после выбора папки.
+        // свой каталог игры, как это делает GUI после выбора папки.
         let mut settings = config.settings().clone();
         set_value_on(&mut settings, "game_dir", &json!(root.join("game").to_string_lossy())).unwrap();
         atomic_json_write(&config.paths.settings_file, &settings, true).unwrap();
@@ -1698,8 +1872,6 @@ mod tests {
         let _guard = env_guard();
         let (_root, store) = store_with_env("versions");
         // get() прогоняет имя через safe_instance_name: «Fabric Test» →
-        // «Fabric-Test», каталог создаём по безопасному имени. Реальный
-        // fabric-профиль называется fabric-loader-<версия>-<mc>.
         let instance = store.root().join("Fabric-Test");
         let version_dir = instance.join("versions").join("fabric-loader-0.92.2-1.20.4");
         fs::create_dir_all(&version_dir).unwrap();
@@ -1824,7 +1996,7 @@ mod tests {
         let archive = root.join("export").join("alpha.zip");
         let exported = store.export_zip("alpha", &archive).unwrap();
         assert!(exported.is_file());
-        // Служебные json и cell в архив не попадают, игровые файлы — да.
+        // служебные json и cell в архив не попадают, игровые файлы — да.
         let mut zip = zip::ZipArchive::new(fs::File::open(&archive).unwrap()).unwrap();
         let mut names: Vec<String> = Vec::new();
         for index in 0..zip.len() {
@@ -1893,5 +2065,51 @@ mod tests {
         assert_eq!(loader_from_version("Neoforge 21"), "neoforge");
         assert_eq!(version_from_id("1.8.9-forge1.8.9"), "1.8.9");
         assert!(!valid_version_id("../evil"));
+    }
+
+    /// Ручной бенчмарк списка экземпляров: `cargo test --lib
+    /// benchmark_list_500 -- --ignored --nocapture`. Числа печатаются в
+    /// stdout и попадают в отчёт оптимизаций (baseline vs after).
+    #[test]
+    #[ignore = "бенчмарк: cargo test --lib benchmark_list_500 -- --ignored --nocapture"]
+    fn benchmark_list_500_instances() {
+        let _guard = env_guard();
+        let (root, store) = store_with_env("bench500");
+        let icon = crate::rust_engine::shortcuts::encode_png(&crate::rust_engine::shortcuts::Rgba::from_pixels(
+            64,
+            64,
+            (0..64 * 64 * 4).map(|index| (index % 251) as u8).collect(),
+        ))
+        .unwrap();
+        for index in 0..500 {
+            let name = format!("instance-{index:03}");
+            let instance = store.root().join(&name);
+            fs::create_dir_all(instance.join(INSTANCE_ASSETS_DIR)).unwrap();
+            fs::create_dir_all(instance.join("versions").join(&name)).unwrap();
+            fs::write(
+                instance.join(INSTANCE_METADATA_FILE),
+                json!({ "display_name": name, "icon_file": "icon.png", "banner_file": "banner.png" }).to_string(),
+            )
+            .unwrap();
+            fs::write(instance.join(INSTANCE_ASSETS_DIR).join("icon.png"), &icon).unwrap();
+            fs::write(instance.join(INSTANCE_ASSETS_DIR).join("banner.png"), &icon).unwrap();
+            fs::write(
+                instance.join("versions").join(&name).join(format!("{name}.json")),
+                json!({ "id": name, "minecraftVersion": "1.21.1" }).to_string(),
+            )
+            .unwrap();
+        }
+        for run in 0..3 {
+            let started = std::time::Instant::now();
+            let list = store.list();
+            let ms = started.elapsed().as_millis();
+            let with_banner = list.iter().filter(|info| !info.banner.is_empty()).count();
+            let with_icon = list.iter().filter(|info| !info.icon.is_empty()).count();
+            println!("list() прогон {run}: {ms} мс; экземпляров: {}, с иконкой: {}, с баннером: {with_banner}", list.len(), with_icon);
+        }
+        // детальная страница по-прежнему отдаёт баннер
+        let details = store.get("instance-000").unwrap();
+        assert!(!details.banner.is_empty(), "get()/instance_details обязан читать баннер");
+        let _ = fs::remove_dir_all(&root);
     }
 }

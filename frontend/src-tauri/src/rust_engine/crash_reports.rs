@@ -1,7 +1,4 @@
-// Разбор лога упавшего экземпляра: короткий вердикт и конкретные советы.
-// Паттерны сверены с реальными сообщениями Fabric/Forge/NeoForge и
-// ванильного сервера; без совпадения честно пишем «неизвестная ошибка»
-// и показываем выдержку лога.
+// разбор лога упавшего экземпляра: короткий вердикт и конкретные советы.
 use regex::Regex;
 use serde_json::{json, Value};
 use std::fs;
@@ -71,8 +68,6 @@ fn re_error_line() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"(?i)error|exception|caused by").unwrap())
 }
 
-/// Вердикт по логу запуска: поля как в Python analyze_crash. minecraft_version
-/// оставлен в подписи для паритета — разбор его не использует.
 pub(crate) fn analyze_crash(
     lines: &[String],
     exit_code: Option<i64>,
@@ -218,7 +213,7 @@ fn excerpt(lines: &[String]) -> Vec<String> {
         return Vec::new();
     }
     let tail: Vec<String> = lines.iter().rev().take(MAX_EXCERPT_LINES).rev().cloned().collect();
-    // Последняя запись об ошибке часто в середине — оставляем и её контекст.
+    // последняя запись об ошибке часто в середине — оставляем и её контекст.
     let stop = (lines.len() as i64 - (MAX_EXCERPT_LINES as i64) * 4).max(-1);
     let mut index = lines.len() as i64 - 1;
     while index > stop {
@@ -266,8 +261,6 @@ fn extract_mods(text: &str) -> Vec<Value> {
     found
 }
 
-/// Сверка упоминания мода с файлами в mods/: совпадение дополняет запись
-/// именем файла, без совпадения мод из подозреваемых убирается.
 fn match_mod_file(mod_value: &mut Value, instance_path: Option<&Path>) -> bool {
     let Some(root) = instance_path else { return true };
     let mods_dir = root.join("mods");
@@ -301,7 +294,7 @@ fn match_mod_file(mod_value: &mut Value, instance_path: Option<&Path>) -> bool {
     false
 }
 
-/// Хвост последнего hs_err_pid*.log в каталоге экземпляра.
+/// хвост последнего hs_err_pid*.log в каталоге экземпляра.
 pub(crate) fn read_hs_err_report(instance_path: &Path, limit: usize) -> Vec<String> {
     let Ok(entries) = fs::read_dir(instance_path) else { return Vec::new() };
     let mut reports: Vec<(SystemTime, PathBuf)> = Vec::new();
@@ -326,8 +319,6 @@ pub(crate) fn read_hs_err_report(instance_path: &Path, limit: usize) -> Vec<Stri
         .map(str::to_owned)
         .collect()
 }
-
-// ----------------------------------------------------------- Тесты ----
 
 #[cfg(test)]
 mod tests {
@@ -430,7 +421,7 @@ mod tests {
     #[test]
     fn excerpt_prefers_error_context_and_falls_back_to_tail() {
         let mut log: Vec<String> = (1..=200).map(|index| format!("line {index}")).collect();
-        // Поиск идёт только по последним MAX*4 строкам: ошибку вне окна
+        // поиск идёт только по последним MAX*4 строкам: ошибку вне окна
         // выдержка не видит — честный хвост, как в Python.
         log[49] = "java.lang.Exception: missed".into();
         let tail_only = excerpt(&log);
@@ -441,7 +432,7 @@ mod tests {
         let picked = excerpt(&log);
         assert_eq!(picked.last().unwrap(), "line 200");
         assert!(picked.contains(&"java.lang.Exception: boom".to_owned()));
-        // Окно заканчивается не последней строкой — добавлен разделитель.
+        // окно заканчивается не последней строкой — добавлен разделитель.
         assert!(picked.contains(&"…".to_owned()));
         let quiet: Vec<String> = (1..=30).map(|index| format!("ok {index}")).collect();
         let tail = excerpt(&quiet);

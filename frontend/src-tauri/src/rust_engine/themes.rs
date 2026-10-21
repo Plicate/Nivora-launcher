@@ -1,7 +1,4 @@
-// Локальное хранилище тем оформления: каталог data_home/themes/<id> с
-// theme.json + theme.yml (+ origin.json для тем из каталога GitHub).
-// Операции preview/import работают с ZIP-архивом ровно из двух файлов
-// в корне; экспорт собирает такой же архив обратно.
+// локальное хранилище тем оформления: каталог data_home/themes/<id> с
 use base64::Engine;
 use regex::Regex;
 use serde_json::{json, Map, Value};
@@ -56,7 +53,7 @@ fn err(message: &str) -> String {
     message.to_owned()
 }
 
-/// Текстовое поле темы: непустая строка не длиннее лимита.
+/// текстовое поле темы: непустая строка не длиннее лимита.
 fn text_field(value: Option<&Value>, field: &str, limit: usize) -> Result<String, String> {
     let raw = match value {
         Some(Value::String(text)) => text.trim(),
@@ -68,8 +65,6 @@ fn text_field(value: Option<&Value>, field: &str, limit: usize) -> Result<String
     Ok(raw.to_owned())
 }
 
-/// Нормализация темы из theme.json + theme.yml. Результирующий объект —
-/// контракт интерфейса студии тем; порядок ключей фиксирован.
 pub fn normalize_theme(value: &Value, metadata: &Value, source: &str, source_url: &str) -> Result<Value, String> {
     let theme_object = value.as_object().ok_or_else(|| err("ZIP темы должен содержать theme.json и theme.yml с объектами темы и описания"))?;
     let metadata_object = metadata.as_object().ok_or_else(|| err("ZIP темы должен содержать theme.json и theme.yml с объектами темы и описания"))?;
@@ -155,8 +150,6 @@ pub fn normalize_theme(value: &Value, metadata: &Value, source: &str, source_url
     Ok(Value::Object(result))
 }
 
-/// Срез YAML-комментария: `#` вне кавычек в начале строки или после
-/// пробельного символа.
 fn strip_yaml_comment(line: &str) -> String {
     let chars: Vec<char> = line.chars().collect();
     let mut quote = '\0';
@@ -184,8 +177,6 @@ fn as_json_string(value: &Value) -> Option<&str> {
     value.as_str()
 }
 
-/// Скаляр theme.yml: JSON-строка в двойных кавычках, одинарные кавычки с
-/// удвоением, JSON-массив строк либо голая строка.
 fn yaml_scalar(raw: &str) -> Result<Value, String> {
     let value = raw.trim();
     if value.is_empty() || value.starts_with(['!', '&', '*', '|', '>']) {
@@ -214,8 +205,6 @@ fn yaml_scalar(raw: &str) -> Result<Value, String> {
     Ok(json!(value))
 }
 
-/// Подмножество YAML, достаточное для theme.yml: четыре ключа верхнего
-/// уровня, скаляры и список creators с отступом в два пробела.
 pub fn parse_theme_yml(content: &[u8]) -> Result<Value, String> {
     if content.is_empty() || content.len() as u64 > MAX_METADATA_BYTES {
         return Err(err("theme.yml пустой или слишком большой"));
@@ -386,8 +375,6 @@ fn themes_root() -> Result<PathBuf, String> {
     Ok(root)
 }
 
-/// Чтение темы из каталога: theme.json + theme.yml (+ origin.json).
-/// Идентификатор обязан совпадать с именем каталога.
 fn read_theme(directory: &Path) -> Result<Value, String> {
     let theme_path = directory.join("theme.json");
     let metadata_path = directory.join("theme.yml");
@@ -430,8 +417,6 @@ fn read_theme(directory: &Path) -> Result<Value, String> {
     Ok(theme)
 }
 
-/// Список тем: до 256 каталогов по алфавиту (без учёта регистра),
-/// повреждённые молча пропускаются.
 pub fn list() -> Result<Vec<Value>, String> {
     let root = themes_root()?;
     let mut names: Vec<String> = fs::read_dir(&root)
@@ -473,9 +458,6 @@ fn existing_directory(root: &Path, theme_id: &str) -> Result<PathBuf, String> {
     Ok(directory)
 }
 
-/// Атомарная запись темы: staging-каталог внутри корня, затем rename с
-/// backup-откатом. Ни в какой момент целевой каталог не «наполовину»
-/// записан.
 fn persist(root: &Path, theme: &Value, replace: bool) -> Result<Value, String> {
     let theme_id = theme["id"].as_str().unwrap_or_default().to_owned();
     let target = root.join(&theme_id);
@@ -579,7 +561,7 @@ fn delete_at(root: &Path, theme_id: &str) -> Result<(), String> {
     fs::remove_dir_all(&target).map_err(|error| format!("Не удалось удалить тему: {error}"))
 }
 
-/// Сборка экспортного ZIP по теме из указанного каталога хранилища.
+/// сборка экспортного ZIP по теме из указанного каталога хранилища.
 fn export_at(root: &Path, theme_id: &str) -> Result<(String, Vec<u8>), String> {
     let theme = read_theme(&existing_directory(root, theme_id)?)?;
     let mut buffer = std::io::Cursor::new(Vec::new());
@@ -605,7 +587,6 @@ pub fn theme_export(request: &Value) -> Result<Value, String> {
     let (file_name, content) = export_at(&themes_root()?, theme_id)?;
     Ok(json!({ "file_name": file_name, "data": base64::engine::general_purpose::STANDARD.encode(&content) }))
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -659,11 +640,11 @@ mod tests {
         let mut bad_schema = sample_theme();
         bad_schema["schema_version"] = json!(2);
         assert!(normalize_theme(&bad_schema, &metadata, "local", "").is_err());
-        // Java обязана называться java/javaw и лежать в каталоге bin.
+        // java обязана называться java/javaw и лежать в каталоге bin.
         let mut bad_id = sample_theme();
         bad_id["id"] = json!("midnight_sky");
         assert!(normalize_theme(&bad_id, &metadata, "local", "").is_err());
-        // Регистр id нормализуется: «Midnight» превращается в «midnight».
+        // регистр id нормализуется: «Midnight» превращается в «midnight».
         let mut cased_id = sample_theme();
         cased_id["id"] = json!("Midnight-Sky");
         assert_eq!(normalize_theme(&cased_id, &metadata, "local", "").unwrap()["id"], json!("midnight-sky"));
@@ -703,8 +684,6 @@ mod tests {
         assert_eq!(again["name"], json!("Midnight Sky"));
         assert_eq!(again["creators"], json!(["Первый", "Второй"]));
 
-        // Повторное сохранение без replace отклоняется, с replace — заменяет;
-        // удаление убирает тему, повторное удаление — ошибка.
         assert!(persist(&root, &theme, false).is_err());
         assert!(persist(&root, &theme, true).is_ok());
         delete_at(&root, "midnight-sky").expect("удаление");
@@ -733,7 +712,7 @@ mod tests {
         let root = temp_root("mismatch");
         let theme = normalize_theme(&sample_theme(), &sample_metadata(), "local", "").unwrap();
         persist(&root, &theme, false).expect("сохранить");
-        // Каталог переименован вручную — id внутри больше не совпадает.
+        // каталог переименован вручную — id внутри больше не совпадает.
         fs::rename(root.join("midnight-sky"), root.join("other-id")).expect("переименовать");
         assert!(read_theme(&root.join("other-id")).is_err());
         assert!(read_theme(&root.join("midnight-sky")).is_err());

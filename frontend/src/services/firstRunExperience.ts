@@ -52,7 +52,7 @@ export function readFirstRunExperience(storage?: FirstRunStorage): FirstRunExper
 }
 
 export function initialFirstRunPhase(state: FirstRunExperienceState): FirstRunPhase | null {
-  // Язык — самый первый шаг первоначальной настройки: до приветствия,
+  // язык — самый первый шаг первоначальной настройки: до приветствия,
   // чтобы весь визард сразу был на языке пользователя.
   if (!state.setupCompleted) return 'language'
   if (!state.tourCompleted) return 'tour'

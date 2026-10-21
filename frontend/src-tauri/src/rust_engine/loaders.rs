@@ -1,4 +1,4 @@
-// Профили мод-лоадеров: Fabric/Quilt через их meta-API, Forge/NeoForge —
+// профили мод-лоадеров: Fabric/Quilt через их meta-API, Forge/NeoForge —
 // через maven-metadata; список версий лоадера и URL инсталляторов.
 use regex::Regex;
 use serde_json::{json, Value};
@@ -29,8 +29,6 @@ impl LoaderRepository {
         }
     }
 
-    /// Список вариантов лоадера для версии MC — те же dict, что
-    /// asdict(LoaderChoice) в Python.
     pub(crate) fn choices(&self, loader: &str, minecraft_version: &str) -> Result<Vec<Value>, String> {
         match loader {
             "fabric" => {
@@ -90,7 +88,7 @@ impl LoaderRepository {
         self.validate_profile(self.http.get_json(&url, None)?, "quilt")
     }
 
-    /// Явная версия лоадера, иначе самая свежая из choices.
+    /// явная версия лоадера, иначе самая свежая из choices.
     fn latest_loader_version(
         &self,
         loader: &str,
@@ -144,8 +142,6 @@ fn choice_dict(loader: &str, version: &str) -> Value {
     json!({ "loader": loader, "version": version, "installer_url": "" })
 }
 
-/// Fabric и Quilt отдают список {loader: {version, ...}}; без вложенного
-/// loader элемент читается сам — так же, как item.get("loader", item).
 fn meta_loader_choices(value: &Value, loader: &str) -> Vec<Value> {
     let mut choices = Vec::new();
     let Some(items) = value.as_array() else {
@@ -171,7 +167,7 @@ fn neoforge_choices_from(raw: &str, minecraft_version: &str) -> Result<Vec<Value
     if upper.contains("<!DOCTYPE") || upper.contains("<!ENTITY") {
         return Err("NeoForge metadata содержит запрещённые XML-декларации".to_owned());
     }
-    // Файл — плоский список <version>; текст между тегами берём как есть
+    // файл — плоский список <version>; текст между тегами берём как есть
     // (аналог node.text в ElementTree).
     static VERSION_TAGS: OnceLock<Regex> = OnceLock::new();
     let regex = VERSION_TAGS.get_or_init(|| Regex::new(r"(?s)<version(?:\s[^>]*)?>(.*?)</version>").unwrap());
@@ -184,7 +180,7 @@ fn neoforge_choices_from(raw: &str, minecraft_version: &str) -> Result<Vec<Value
     if parts.len() < 2 {
         return Ok(Vec::new());
     }
-    // Схема NeoForge кодирует всю минорную линию MC: 1.20.1 → 20.1.x,
+    // схема NeoForge кодирует всю минорную линию MC: 1.20.1 → 20.1.x,
     // 1.21 → 21.0.x.
     let minor_line = if parts.len() > 2 { parts[2] } else { "0" };
     let prefix = format!("{}.{}.", parts[1], minor_line);
@@ -199,8 +195,6 @@ fn joined_quoted(parts: &[&str]) -> String {
     parts.iter().map(|part| quote_component(part)).collect::<Vec<_>>().join("/")
 }
 
-/// urllib.parse.quote(safe=""): буквы, цифры и «_.-~» остаются, остальное —
-/// %-кодировка UTF-8 байтов.
 fn quote_component(value: &str) -> String {
     let mut encoded = String::with_capacity(value.len());
     for byte in value.as_bytes() {
@@ -214,7 +208,16 @@ fn quote_component(value: &str) -> String {
     encoded
 }
 
-// ----------------------------------------------------------- Тесты ----
+pub fn loader_choices(request: &Value) -> Result<Value, String> {
+    let config = super::config::ConfigStore::load()?;
+    let loader = request.get("loader").and_then(Value::as_str).unwrap_or("fabric");
+    let minecraft_version = request.get("minecraft_version").and_then(Value::as_str).unwrap_or("");
+    let operation_id = request.get("operation_id").and_then(Value::as_str).unwrap_or("");
+    let http = super::net::client_from_settings(config.settings(), operation_id)?;
+    let repository = LoaderRepository::new(http);
+    let choices = repository.choices(loader, minecraft_version)?;
+    Ok(json!({ "choices": choices }))
+}
 
 #[cfg(test)]
 mod tests {
@@ -254,7 +257,7 @@ mod tests {
         assert_eq!(for_1211[0]["version"], json!("21.1.77"));
         assert_eq!(neoforge_choices_from(xml, "1.21").unwrap()[0]["version"], json!("21.0.143"));
         assert!(neoforge_choices_from(xml, "1.19").unwrap().is_empty());
-        // Меньше двух компонент версии — пустой ответ, как в Python.
+        // меньше двух компонент версии — пустой ответ, как в Python.
         assert!(neoforge_choices_from(xml, "custom").unwrap().is_empty());
         assert!(neoforge_choices_from("<!DOCTYPE metadata><metadata/>", "1.21.1").is_err());
     }
@@ -266,7 +269,7 @@ mod tests {
             repository.installer_url("forge", "1.20.4", "49.0.30").unwrap(),
             "https://maven.minecraftforge.net/net/minecraftforge/forge/1.20.4-49.0.30/forge-1.20.4-49.0.30-installer.jar"
         );
-        // Координата уже с версией MC не дублирует её.
+        // координата уже с версией MC не дублирует её.
         assert_eq!(
             repository.installer_url("forge", "1.20.4", "1.20.4-49.0.30").unwrap(),
             "https://maven.minecraftforge.net/net/minecraftforge/forge/1.20.4-49.0.30/forge-1.20.4-49.0.30-installer.jar"

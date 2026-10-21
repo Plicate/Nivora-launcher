@@ -1,4 +1,4 @@
-// Каталог версий Mojang: манифест, наследование version JSON (inheritsFrom),
+// каталог версий Mojang: манифест, наследование version JSON (inheritsFrom),
 // URL ассетов/библиотек и безопасные Maven-координаты.
 use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet};
@@ -21,7 +21,7 @@ impl VersionRepository {
     pub(crate) fn new(config: &ConfigStore, http: Option<Arc<HttpClient>>) -> Result<Self, String> {
         let http = match http {
             Some(http) => http,
-            // Умолчания HttpClient из Python-воркера: 30 секунд, 3 попытки.
+            // умолчания HttpClient из Python-воркера: 30 секунд, 3 попытки.
             None => Arc::new(HttpClient::new(30, 3, "", None)?),
         };
         let custom = config.str_setting("data_api_url");
@@ -130,7 +130,7 @@ impl VersionRepository {
 }
 
 pub(crate) fn asset_url(sha1: &str) -> String {
-    // Python-срез sha1[:2] на короткой строке возвращает её целиком.
+    // python-срез sha1[:2] на короткой строке возвращает её целиком.
     let prefix = sha1.get(..2).unwrap_or(sha1);
     format!("{MINECRAFT_ASSET_BASE_URL}/{prefix}/{sha1}")
 }
@@ -182,7 +182,7 @@ fn library_base(library: &Value) -> String {
         .to_owned()
 }
 
-/// Слияние формата наследования Mojang; оба входа остаются нетронутыми.
+/// слияние формата наследования Mojang; оба входа остаются нетронутыми.
 pub(crate) fn merge_version_json(parent: &Value, child: &Value) -> Value {
     let mut result = match parent {
         Value::Object(map) => map.clone(),
@@ -221,7 +221,7 @@ fn merge_named_list(parent: &Value, child: &Value) -> Value {
     let Some(child_items) = child.as_array() else {
         return Value::Array(merged);
     };
-    // Отсутствующий name — отдельный ключ (в Python это None), как и
+    // отсутствующий name — отдельный ключ (в Python это None), как и
     // совпадающие имена библиотек.
     let mut indexes: HashMap<Option<String>, usize> = HashMap::new();
     for (index, item) in merged.iter().enumerate() {
@@ -312,7 +312,7 @@ pub(crate) fn maven_path(name: &str, classifier: Option<&str>) -> Result<String,
     {
         return Err(format!("Небезопасная Maven library coordinate: {name}"));
     }
-    // Четвёртая часть координаты — classifier, если явный не передан.
+    // четвёртая часть координаты — classifier, если явный не передан.
     let classifier = match classifier {
         Some(value) => Some(value.to_owned()),
         None if parts.len() >= 4 => Some(parts[3].to_owned()),
@@ -330,7 +330,28 @@ pub(crate) fn maven_path(name: &str, classifier: Option<&str>) -> Result<String,
     ))
 }
 
-// ----------------------------------------------------------- Тесты ----
+pub fn versions(request: &Value) -> Result<Value, String> {
+    let config = ConfigStore::load()?;
+    let include_snapshots = match request.get("include_snapshots") {
+        Some(Value::Bool(value)) => *value,
+        _ => true,
+    };
+    let operation_id = request.get("operation_id").and_then(Value::as_str).unwrap_or("");
+    let http = super::net::client_from_settings(config.settings(), operation_id)?;
+    let mut repository = VersionRepository::new(&config, Some(http))?;
+    let values = repository.list_versions(include_snapshots)?;
+    let versions: Vec<Value> = values
+        .iter()
+        .map(|value| {
+            json!({
+                "id": value.get("id").and_then(Value::as_str).unwrap_or(""),
+                "type": value.get("type").and_then(Value::as_str).unwrap_or("release"),
+                "release_time": value.get("releaseTime").and_then(Value::as_str).unwrap_or(""),
+            })
+        })
+        .collect();
+    Ok(json!({ "versions": versions }))
+}
 
 #[cfg(test)]
 mod tests {
@@ -385,10 +406,10 @@ mod tests {
         let merged = merge_version_json(&parent, &child);
         assert_eq!(merged["id"], json!("1.20.4-fabric"));
         assert_eq!(merged["mainClass"], json!("net.fabricmc.loader.impl.launch.knot.KnotClient"));
-        // Списки аргументов конкатенируются: родительские впереди.
+        // списки аргументов конкатенируются: родительские впереди.
         assert_eq!(merged["arguments"]["game"], json!(["--username", "${auth_name}", "--fabric"]));
         assert_eq!(merged["arguments"]["jvm"], json!(["-Xmx2G"]));
-        // Библиотека с тем же name заменяется, новая добавляется в конец.
+        // библиотека с тем же name заменяется, новая добавляется в конец.
         let libraries = merged["libraries"].as_array().unwrap();
         assert_eq!(libraries.len(), 3);
         assert_eq!(libraries[1]["url"], json!("https://mirror"));
@@ -396,7 +417,7 @@ mod tests {
         // downloads сливается глубоко: url родителя остаётся, sha1 перезаписан.
         assert_eq!(merged["downloads"]["client"]["url"], json!("https://a/client"));
         assert_eq!(merged["downloads"]["client"]["sha1"], json!("new"));
-        // Входы не мутируются.
+        // входы не мутируются.
         assert_eq!(parent["libraries"].as_array().unwrap().len(), 2);
         assert_eq!(parent["downloads"]["client"]["sha1"], json!("old"));
     }
@@ -412,7 +433,7 @@ mod tests {
             library_url(&plain, None).unwrap(),
             "https://libraries.minecraft.net/com/mojang/brigadier/1.0.18/brigadier-1.0.18.jar"
         );
-        // Хвостовой «/» у кастомного репозитория срезается.
+        // хвостовой «/» у кастомного репозитория срезается.
         let mirrored = json!({ "name": "org.lwjgl:lwjgl:3.3.1", "url": "https://repo.example/mc/" });
         assert_eq!(
             library_url(&mirrored, Some("natives-linux")).unwrap(),

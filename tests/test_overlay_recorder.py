@@ -11,7 +11,6 @@ from unittest.mock import Mock, patch
 from nivora_launcher.config import DEFAULT_OVERLAY_SETTINGS, _normalize_overlay_settings
 from nivora_launcher.errors import LauncherError
 
-import pytest
 from nivora_launcher.gui_service import handle
 from nivora_launcher.recorder import GameRecorder, build_recording_args, pick_encoder
 
@@ -173,8 +172,7 @@ class OverlayStateRoutingTests(unittest.TestCase):
     """
 
     def test_overlay_state_is_not_served_by_this_router(self) -> None:
-        with pytest.raises(LauncherError):
-            handle({"operation": "overlay_state"})
+        self.assertRaises(LauncherError, handle, {"operation": "overlay_state"})
 
 
 class RecordingStateFileTests(unittest.TestCase):

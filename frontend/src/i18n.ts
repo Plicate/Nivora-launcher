@@ -1,9 +1,4 @@
-// Локализация интерфейса без переписывания ~2500 шаблонных строк: русские
-// строки остаются ключами в разметке, при locale='en' словарь подменяет текст
-// прямо в DOM. MutationObserver доставляет записи микротаском — до кадра,
-// поэтому «вспышки» русского перед переводом нет. Перенос разметки на t() —
-// отдельная волна; этот слой даёт английский интерфейс уже сейчас и не
-// рискует логикой шаблонов.
+// локализация интерфейса без переписывания ~2500 шаблонных строк: русские
 import { ref } from 'vue'
 
 export type Locale = 'ru' | 'en'
@@ -11,7 +6,7 @@ export type Locale = 'ru' | 'en'
 export const locale = ref<Locale>('ru')
 
 const EN: Record<string, string> = {
-  // Навигация и заголовки страниц
+  // навигация и заголовки страниц
   'Главная': 'Home', 'Играть': 'Play', 'Экземпляры': 'Instances', 'Аккаунты': 'Accounts',
   'Каталог': 'Catalog', 'Моды': 'Mods', 'Модпаки': 'Modpacks', 'Ресурспаки': 'Resource packs',
   'Шейдеры': 'Shaders', 'Датапаки': 'Data packs', 'Плагины': 'Plugins', 'Настройки': 'Settings',
@@ -22,11 +17,11 @@ const EN: Record<string, string> = {
   'Моды и ресурсы': 'Mods and resources', 'Готовые сборки': 'Ready-made packs',
   'Расширения интерфейса': 'Interface extensions', 'Локальная сеть': 'Local network',
   'Параметры лаунчера': 'Launcher options', 'Студия оформления': 'Appearance studio',
-  'Центр настройки тем': 'Theme center', 'LAN-комнаты': 'LAN rooms',
+  'Центр настройки тем': 'Theme center',
   'Плагины для лаунчера': 'Launcher plugins', 'Разделы экземпляра': 'Instance sections',
   'Общие настройки': 'General settings', 'Базовая настройка': 'Basic setup',
 
-  // Общие кнопки и действия
+  // общие кнопки и действия
   'Сохранить': 'Save', 'Сохранить изменения': 'Save changes', 'Сохраняю…': 'Saving…',
   'Отмена': 'Cancel', 'Отменить': 'Undo', 'Повторить': 'Redo', 'Закрыть': 'Close',
   'Удалить': 'Delete', 'Убрать': 'Remove', 'Создать': 'Create', 'Изменить': 'Edit',
@@ -46,7 +41,7 @@ const EN: Record<string, string> = {
   'Папка': 'Folder', 'Новая папка': 'New folder', 'Путь к папке': 'Folder path',
   'Версия': 'Version', 'Версии': 'Versions', 'Редакция': 'Build',
 
-  // Состояния и статусы
+  // состояния и статусы
   'Изменения сохранены': 'Changes saved', 'Есть несохранённые изменения': 'There are unsaved changes',
   'Изменения применяются после сохранения': 'Changes apply after saving',
   'Версия не установлена': 'Version is not installed', 'Не определён': 'Unknown',
@@ -60,11 +55,35 @@ const EN: Record<string, string> = {
   'Вход отменён.': 'Sign-in canceled.', 'Игра завершила работу': 'The game exited cleanly',
   'Вход выполнен': 'Signed in', 'Выход выполнен': 'Signed out',
 
-  // Единицы и время
+  // единицы и время
   'мин': 'min', 'ч': 'h', 'сек': 'sec', 'МБ': 'MB', 'ГБ': 'GB', 'КБ': 'KB', 'байт': 'bytes',
   'байта': 'bytes', 'модов': 'mods', 'файлов': 'files', 'символов': 'characters',
 
-  // Настройки: разделы и поля
+  'Введите ник': 'Enter a nickname',
+  '3–16 символов: латиница, цифры и _': '3–16 characters: Latin letters, digits and _',
+  'Ник должен быть не короче 3 символов': 'The nickname must be at least 3 characters long',
+  'Ник должен быть не длиннее 16 символов': 'The nickname must be at most 16 characters long',
+  // авто-починка
+  'Авто-починка': 'Auto-repair',
+  'После краша': 'After a crash',
+  'Предлагать починку после краша': 'Offer a repair after a crash',
+  'Показывать окно с проблемой и вариантами исправления': 'Show a window with the problem and ways to fix it',
+  'Снова показывать всё': 'Show everything again',
+  'Проверить и починить': 'Check and repair',
+  'Проверяю…': 'Checking…',
+  'Починить…': 'Repair…',
+  'Починить': 'Repair',
+  'Чиню…': 'Repairing…',
+  'Не сейчас': 'Not now',
+  'Больше не показывать': 'Don\'t show again',
+  'Не чинить': 'Don\'t fix',
+  'Как починить': 'How to fix',
+  'рекомендуется': 'recommended',
+  'Что нашлось в логе': 'What was found in the log',
+  'Результат починки': 'Repair result',
+  'Запустить снова': 'Launch again',
+  'Проблем не найдено': 'No problems found',
+  'Починка не удалась': 'Repair failed',
   'Внешний вид': 'Appearance', 'Поведение': 'Behavior', 'Запуск и управление': 'Launch and control',
   'Интеграции': 'Integrations', 'Сторонние источники': 'Third-party sources',
   'Система': 'System', 'Безопасность': 'Security', 'Сеть': 'Network', 'О лаунчере': 'About',
@@ -77,7 +96,7 @@ const EN: Record<string, string> = {
   'Показать сейчас': 'Show now', 'Скорость': 'Speed', 'Таймаут': 'Timeout',
   'Показывать заставку': 'Show idle screen', 'Включить': 'Enable', 'Выключить': 'Disable',
 
-  // Студия тем
+  // студия тем
   'Тема': 'Theme', 'Цвета': 'Colors', 'Формы': 'Shapes', 'Обои': 'Wallpaper',
   'Навигация': 'Navigation', 'Движение': 'Motion', 'Страницы': 'Pages',
   'Режим, акцент, шрифт, масштаб': 'Mode, accent, font, scale',
@@ -99,20 +118,19 @@ const EN: Record<string, string> = {
   'Поведение сайдбара': 'Sidebar behavior', 'Метеорный поток': 'Meteor shower',
   'Акварельные разводы': 'Watercolor wash', 'Своя заставка': 'Custom screen',
 
-  // Диалоги
+  // диалоги
   'Подтверждение': 'Confirmation', 'Удалить безвозвратно?': 'Delete permanently?',
   'Это действие нельзя отменить.': 'This action cannot be undone.',
   'Сохранить и продолжить': 'Save and continue', 'Не сохранять': 'Don’t save',
   'Свой каталог': 'Custom catalog', 'Официальный каталог': 'Official catalog',
   'Укажите имя экземпляра': 'Enter an instance name', 'Имя сохранения': 'Save name',
-  'Название комнаты': 'Room name',
 
-  // Аккаунты
+  // аккаунты
   'Войти через Microsoft': 'Sign in with Microsoft', 'Выйти': 'Sign out',
   'Microsoft аккаунт': 'Microsoft account', 'Оффлайн-аккаунт': 'Offline account',
   'Добавить аккаунт': 'Add account', 'Активный аккаунт': 'Active account',
 
-  // Bedrock-воркспейс: консоль, скриншоты, снапшоты
+  // bedrock-воркспейс: консоль, скриншоты, снапшоты
   'Консоль сессии': 'Session console', 'Архив логов': 'Log archive',
   'Скриншоты Bedrock': 'Bedrock screenshots', 'Снапшоты контента': 'Content snapshots',
   'Создать снапшот': 'Create snapshot', 'Остановлена': 'Stopped',
@@ -122,12 +140,12 @@ const EN: Record<string, string> = {
   'Живой поток вывода игры Bedrock и архив прошлых сессий.': 'Live Bedrock game output and past session archives.',
   'Лог появится после запуска игры.': 'The log will appear after the game starts.',
 
-  // Активность: остановка и копирование
+  // активность: остановка и копирование
   'Копировать содержимое': 'Copy contents',
   'Остановка запрошена — операция завершит текущий шаг сама.': 'Stop requested — the operation will finish its current step on its own.',
   'Переименовать группу (экземпляры остаются в ней)': 'Rename the group (instances stay in it)',
 
-  // Прочее частое
+  // прочее частое
   'Неизвестная ошибка': 'Unknown error', 'Ошибка': 'Error', 'Информация': 'Information',
   'Подробнее': 'Details', 'Открыть настройки': 'Open settings', 'Фокус на поиск': 'Focus search',
   'Показать активность': 'Show activity', 'Сначала новые': 'Newest first',
@@ -135,7 +153,7 @@ const EN: Record<string, string> = {
   'Недавно обновлялись': 'Recently updated', 'Релизы': 'Releases',
   'Тестовые сборки': 'Test builds', 'Официальный каталог ядра': 'Official core catalog',
 
-  // Экземпляры и профили запуска
+  // экземпляры и профили запуска
   'Версия Minecraft': 'Minecraft version', 'Память JVM': 'JVM memory', 'Ширина окна': 'Window width',
   'Высота окна': 'Window height', 'по одному на строку': 'one per line', 'Восстановить': 'Restore',
   'Библиотека': 'Library', 'Отображаемое название': 'Display name', 'Порт': 'Port',
@@ -159,7 +177,7 @@ const EN: Record<string, string> = {
   'Закрыть предпросмотр': 'Close preview', 'Удалить снапшот': 'Delete snapshot',
   'Выдержка лога': 'Log excerpt', 'Максимум игроков': 'Max players',
   'Максимум снапшотов': 'Max snapshots', 'Ник игрока': 'Player nickname',
-  'Порт Minecraft': 'Minecraft port', 'Адрес комнаты': 'Room address',
+  'Порт Minecraft': 'Minecraft port',
   'Консоль сервера': 'Server console', 'Команда сервера': 'Server command',
   'Память для Minecraft': 'Memory for Minecraft', 'Имя локального профиля': 'Local profile name',
   'Найти экземпляр': 'Find an instance',  'Оверлей': 'Overlay',
@@ -188,7 +206,6 @@ const EN: Record<string, string> = {
   'Импортировать архив': 'Import an archive', 'Декларативная вкладка': 'Declarative tab',
   'Вкладка создана из метаданных manifest. Файл entrypoint плагина не запускается.': 'The tab is built from manifest metadata. The plugin entrypoint file is not executed.',
   'Игра в локальной сети': 'Local network play',
-  'Комната координирует игроков и поднимает launcher-туннель до мира хоста без отдельного VPN-клиента.': 'The room coordinates players and raises a launcher tunnel to the host’s world without a separate VPN client.',
   'Пути, память, источники и резервная копия файлов настраиваются здесь.': 'Paths, memory, sources and file backups are configured here.',
   'Обучение': 'Tutorial', 'Экскурсия по лаунчеру': 'A tour of the launcher',
   'Коротко покажем основные разделы и возможности. Экскурсию можно закрыть в любой момент.': 'A quick look at the main sections and features. You can close the tour at any moment.',
@@ -238,8 +255,6 @@ const EN: Record<string, string> = {
   'Температуры': 'Temperatures',  
 }
 
-// Динамические строки с подстановками: регулярка по русской фразе,
-// английский шаблон с $1….
 const PATTERNS: Array<[RegExp, string]> = [
   [/^Доступна версия (.*)\.$/, 'Version $1 is available.'],
   [/^Найдена версия (.*)$/, 'Version $1 found'],

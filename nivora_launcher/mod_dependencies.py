@@ -1,9 +1,4 @@
-"""Дерево зависимостей модов по манифестам внутри jar-файлов.
-
-Читаем fabric.mod.json, quilt.mod.json, META-INF/mods.toml и mcmod.info —
-без сети, поэтому граф строится даже для локальных модов. Идентификаторы
-загрузчика и игры (minecraft, fabricloader, java) отфильтрованы как шум.
-"""
+"""дерево зависимостей модов по манифестам внутри jar-файлов."""
 from __future__ import annotations
 
 import json
@@ -23,7 +18,6 @@ NOISE_IDS = frozenset({
 })
 MAX_MODS = 600
 
-
 def _read_zip_member(archive: zipfile.ZipFile, name: str) -> bytes:
     try:
         info = archive.getinfo(name)
@@ -32,7 +26,6 @@ def _read_zip_member(archive: zipfile.ZipFile, name: str) -> bytes:
         return archive.read(info)
     except (KeyError, OSError, RuntimeError, ValueError, zipfile.BadZipFile):
         return b""
-
 
 def _fabric_manifest(raw: bytes) -> dict[str, Any] | None:
     try:
@@ -61,7 +54,6 @@ def _fabric_manifest(raw: bytes) -> dict[str, Any] | None:
         "breaks": [str(key) for key in breaks.keys()],
     }
 
-
 def _quilt_manifest(raw: bytes) -> dict[str, Any] | None:
     try:
         value = json.loads(raw.decode("utf-8", errors="replace"))
@@ -87,7 +79,6 @@ def _quilt_manifest(raw: bytes) -> dict[str, Any] | None:
         "dependencies": dependencies,
         "breaks": [],
     }
-
 
 def _toml_manifest(raw: bytes) -> dict[str, Any] | None:
     text = raw.decode("utf-8", errors="replace")
@@ -121,7 +112,6 @@ def _toml_manifest(raw: bytes) -> dict[str, Any] | None:
         "breaks": [],
     }
 
-
 def _mcmod_manifest(raw: bytes) -> dict[str, Any] | None:
     try:
         value = json.loads(raw.decode("utf-8", errors="replace"))
@@ -144,7 +134,6 @@ def _mcmod_manifest(raw: bytes) -> dict[str, Any] | None:
         "dependencies": dependencies,
         "breaks": [],
     }
-
 
 def read_mod_manifest(path: Path) -> dict[str, Any] | None:
     if path.is_symlink() or is_reparse_point(path) or not path.is_file():
@@ -170,7 +159,6 @@ def read_mod_manifest(path: Path) -> dict[str, Any] | None:
         return None
     return None
 
-
 def _sidecar(path: Path) -> dict[str, Any]:
     sidecar_path = path.with_name(f".{path.name}.trial-project.json")
     try:
@@ -180,7 +168,6 @@ def _sidecar(path: Path) -> dict[str, Any]:
         return value if isinstance(value, dict) else {}
     except (OSError, ValueError, TypeError):
         return {}
-
 
 def dependency_graph(mods_directory: Path) -> dict[str, Any]:
     if mods_directory.is_symlink() or not mods_directory.is_dir():
@@ -226,7 +213,6 @@ def dependency_graph(mods_directory: Path) -> dict[str, Any]:
                 seen_missing.add(dependency_id)
                 missing.append({"id": dependency_id, "required_by": node["id"], "optional": bool(dependency.get("optional"))})
     return {"nodes": nodes, "edges": edges, "missing": missing}
-
 
 def removal_impact(graph: dict[str, Any], mod_id: str) -> dict[str, Any]:
     """Что сломается, если удалить мод: обратный обход по рёбрам."""

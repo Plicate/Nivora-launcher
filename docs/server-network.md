@@ -2,7 +2,7 @@
 
 ## Интерфейс
 
-Откройте сервер → **Управление → Сеть и белый IP**. На Dashboard также есть кнопка перехода в этот раздел. Это публикация игрового Java TCP-порта, а не LAN-комната, VPN или relay.
+Откройте сервер → **Управление → Сеть и белый IP**. На Dashboard также есть кнопка перехода в этот раздел. Это публикация игрового Java TCP-порта, а не VPN или relay.
 
 1. Сохраните внутренний игровой порт в настройках сервера (обычно `25565`).
 2. Для обычного Minecraft-ядра остановите сервер и нажмите **Подготовить server.properties**. После подтверждения лаунчер выставит сохранённый `server-port` и очистит `server-ip`, чтобы сервер принимал подключения на сетевых интерфейсах. Остальные свойства, в том числе `online-mode` и `white-list`, не меняются.
@@ -69,7 +69,7 @@ UPnP использует отдельный ограниченный LAN-кли
 
 ## Interface
 
-Open the server → **Manage → Network and white IP**. The Dashboard also has a button that jumps to this section. This publishes the game's Java TCP port; it is not a LAN room, a VPN or a relay.
+Open the server → **Manage → Network and white IP**. The Dashboard also has a button that jumps to this section. This publishes the game's Java TCP port; it is not a VPN or a relay.
 
 1. Save the internal game port in server settings (usually `25565`).
 2. For a regular Minecraft core, stop the server and press **Prepare server.properties**. After confirmation the launcher sets the saved `server-port` and clears `server-ip` so the server accepts connections on every network interface. Other properties, including `online-mode` and `white-list`, are untouched.

@@ -1,9 +1,4 @@
-"""Экспорт экземпляра в формат Modrinth (.mrpack).
-
-Моды с Modrinth-метаданными попадают в files[] с URL и sha1 (запрашиваем у
-каталога по version_id), всё остальное — в overrides/. Так модпак остаётся
-обновляемым у получателя, а локальные моды не теряются.
-"""
+"""экспорт экземпляра в формат Modrinth (.mrpack)."""
 from __future__ import annotations
 
 import hashlib
@@ -25,7 +20,6 @@ OVERRIDE_ROOTS = ("config", "defaultconfigs", "shaderpacks", "resourcepacks", "s
 OVERRIDE_FILES = ("options.txt", "servers.dat", "servers.dat_old")
 EXPORT_DIR_NAME = "exports"
 
-
 def _loader_from_version(version_id: str, loader: str) -> str:
     if loader != "vanilla":
         return loader
@@ -34,7 +28,6 @@ def _loader_from_version(version_id: str, loader: str) -> str:
         if name in lowered:
             return name
     return "vanilla"
-
 
 def _loader_version(version_id: str, minecraft_version: str = "") -> str:
     value = version_id
@@ -51,14 +44,12 @@ def _loader_version(version_id: str, minecraft_version: str = "") -> str:
             return match.group(1)
     return ""
 
-
 def _sha1(path: Path) -> str:
     digest = hashlib.sha1()
     with open(path, "rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
-
 
 def _version_download(http: Any, base_url: str, version_id: str, file_name: str) -> dict[str, Any] | None:
     try:
@@ -76,7 +67,6 @@ def _version_download(http: Any, base_url: str, version_id: str, file_name: str)
         return {"url": url, "sha1": sha1, "size": int(candidate.get("size") or 0), "primary_file_name": str(candidate.get("filename") or "")}
     except Exception:
         return None
-
 
 def export_instance_as_mrpack(
     http: Any,
@@ -179,7 +169,6 @@ def export_instance_as_mrpack(
         "indexed_files": len(indexed),
         "override_files": len(override_files),
     }
-
 
 def _read_sidecar(path: Path) -> dict[str, Any]:
     sidecar = path.with_name(f".{path.name}.trial-project.json")

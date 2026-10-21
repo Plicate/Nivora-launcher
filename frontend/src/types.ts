@@ -1,4 +1,4 @@
-export type ViewName = 'instances' | 'instance-settings' | 'accounts' | 'mods' | 'modpacks' | 'plugins' | 'lan-rooms' | 'themes' | 'settings'
+export type ViewName = 'instances' | 'instance-settings' | 'accounts' | 'mods' | 'modpacks' | 'plugins' | 'themes' | 'settings'
 export type LoaderId = 'vanilla' | 'fabric' | 'forge' | 'neoforge' | 'quilt'
 export type ProjectType = 'mod' | 'resourcepack' | 'shader' | 'datapack' | 'plugin' | 'modpack'
 export type CatalogSort = 'relevance' | 'downloads' | 'newest' | 'updated'
@@ -69,19 +69,13 @@ export interface OverlaySettings {
   compact: boolean
   show_clock: boolean
   show_system_metrics: boolean
+  metrics_gpu: boolean
   metrics_cpu: boolean
   metrics_ram: boolean
-  metrics_gpu: boolean
   metrics_disk: boolean
   metrics_temperatures: boolean
   system_metrics_display: 'overlay' | 'always' | string
   show_chat: boolean
-}
-
-export interface OverlayModEntry {
-  name: string
-  display_name: string
-  enabled: boolean
 }
 
 export interface RecordingStatus {
@@ -92,6 +86,12 @@ export interface RecordingStatus {
   elapsed_seconds: number
   encoder: string
   instance: string
+}
+
+export interface OverlayModEntry {
+  name: string
+  display_name: string
+  enabled: boolean
 }
 
 export interface OverlayMetrics {
@@ -175,8 +175,8 @@ export interface BackupSchedule {
 
 export interface SystemMetricsSnapshot {
   timestamp: number
-  cpu: { percent: number | null; per_core: number[]; cores: number }
-  memory: { used_bytes: number | null; total_bytes: number | null; percent: number | null; swap_percent: number | null }
+  cpu: { percent: number | null }
+  memory: { percent: number | null }
   disks: Array<{ mount: string; total_bytes: number; free_bytes: number; percent: number }>
   gpus: Array<{ index: number; name: string; utilization_percent: number | null; memory_used_mib: number | null; memory_total_mib: number | null; temperature_c: number | null }>
   temperatures: { cpu_c: number | null; gpu_c: number | null; motherboard_c: number | null }
@@ -195,6 +195,53 @@ export interface CrashReport {
   hints: CrashHint[]
   suspected_mods: Array<{ name: string; file?: string; reason?: string }>
   excerpt: string[]
+}
+
+export type AutoRepairAction =
+  | 'disable_mods'
+  | 'install_dependencies'
+  | 'set_memory'
+  | 'set_java'
+  | 'reset_jvm_arguments'
+  | 'repair_version'
+  | 'backup_configs'
+  | 'set_graphics_mode'
+  | 'update_loader'
+  | 'set_account'
+  | 'login_microsoft'
+  | 'set_security'
+
+export interface AutoRepairFix {
+  id: string
+  action: AutoRepairAction
+  label: string
+  steps: string[]
+  params: Record<string, unknown>
+  recommended: boolean
+}
+
+export interface AutoRepairIssue {
+  id: string
+  title: string
+  detail: string
+  evidence: string[]
+  fixes: AutoRepairFix[]
+  manual: string
+}
+
+export interface AutoRepairReport {
+  instance_name: string
+  exit_code: number | null
+  issues: AutoRepairIssue[]
+  muted_issues: string[]
+  manual?: boolean
+  disabled?: boolean
+}
+
+export interface AutoRepairResult {
+  id: string
+  ok: boolean
+  message: string
 }
 
 export interface ModDependencyGraph {
@@ -233,8 +280,6 @@ export interface BedrockVersionsResult {
   current_version: string
 }
 
-// Снимок фонового задания Bedrock (установка версии / вход в Microsoft):
-// операция больше не блокирует воркер, интерфейс опрашивает состояние.
 export interface BedrockSetupStatus {
   started: boolean
   running: boolean
@@ -317,12 +362,33 @@ export interface AppearanceSettings {
   animations: AnimationMode
   animation_settings: AnimationSettings
   density: DensityMode
+  instance_layout: InstanceLayout
   ui_scale: number
   radius_tokens: Record<string, number>
   page_themes: Record<ViewName, PageTheme>
   page_layouts: Record<ViewName, PageLayout>
   widget_visibility: Record<string, boolean>
   color_tokens: Record<string, string>
+}
+
+/** Формат списка экземпляров: обычные строки или плотный список как в Prism. */
+export type InstanceLayout = 'default' | 'compact' | string
+
+/** Информация о последнем релизе из GitHub (фолбэк проверки обновлений). */
+export interface RemoteReleaseInfo {
+  update_available: boolean
+  latest_version: string
+  current_version: string
+  release_url: string
+  published_at: string
+  notes: string
+  assets: Array<{ name: string; url: string }>
+}
+
+export interface SkinExportResult {
+  path: string
+  folder: string
+  opened: boolean
 }
 
 export interface SettingsInfo {
@@ -348,6 +414,9 @@ export interface SettingsInfo {
   download_timeout_seconds: number
   download_retries: number
   confirm_destructive_actions: boolean
+  auto_repair_enabled: boolean
+  auto_repair_muted: string[]
+  auto_repair_kinds?: Array<{ id: string; title: string }>
   show_activity_panel: boolean
   show_toasts: boolean
   minimize_on_launch: boolean
@@ -361,6 +430,7 @@ export interface SettingsInfo {
   launcher_profiles: LauncherProfile[]
   active_launcher_profile_id: string
   http_proxy: string
+  download_source?: 'auto' | 'official' | 'mirror'
   has_client_id: boolean
   developer_mode: boolean
   theme: ThemeMode
@@ -381,6 +451,7 @@ export interface SettingsInfo {
   overlay_settings: OverlaySettings
   backup_schedule: BackupSchedule
   density: DensityMode
+  instance_layout: InstanceLayout
   ui_scale: number
   radius_tokens: Record<string, number>
   page_themes: Record<ViewName, PageTheme>
@@ -499,8 +570,38 @@ export interface ServerMetrics {
   tps: number
   peak_ram_bytes?: number
   peak_cpu_percent?: number
+  peak_gpu_percent?: number | null
+  avg_cpu_percent?: number | null
+  avg_ram_bytes?: number | null
+  avg_gpu_percent?: number | null
+  gpu?: ProcessGpuSample | null
+  session?: SessionTelemetry | null
   exit_code?: number | null
   ended_at?: number
+}
+
+export interface ProcessGpuSample {
+  util_percent?: number | null
+  memory_bytes?: number | null
+  source?: string
+}
+
+export interface SessionTelemetry {
+  events?: SessionEvent[]
+  mods?: ModResourceUsage[]
+}
+
+export interface SessionEvent {
+  at: number
+  title: string
+}
+
+export interface ModResourceUsage {
+  mod: string
+  lines: number
+  warnings: number
+  errors: number
+  first_seen: number
 }
 
 export interface ServerFile {
@@ -702,36 +803,6 @@ export interface ResourceUpdate {
   world_title?: string
 }
 
-export interface LanRoomCredentials {
-  room_name: string
-  password: string
-  player_nickname: string
-  host_control_port: number
-  minecraft_game_port: number
-  host_address?: string
-}
-
-export interface LanRoomStatus {
-  room_name: string
-  host_nickname: string
-  host_address: string
-  host_control_port: number
-  minecraft_game_port: number
-  host_reachable_minecraft_address: string
-  minecraft_address: string
-  same_lan_only: boolean
-  network_scope: string
-  coordination_only: boolean
-  game_traffic_tunnel: boolean
-  local_role: 'host' | 'peer'
-  local_nickname: string
-  members: Array<{ nickname: string; source_ip: string; role: string }>
-  peers: Array<{ nickname: string; source_ip: string }>
-  players: string[]
-  player_count: number
-  alternative_hosts?: string[]
-}
-
 export interface GitHubPluginRepository {
   owner: string
   repo: string
@@ -812,6 +883,7 @@ export interface AppState {
 
 export interface SecurityStatus {
   platform: string
+  sandbox?: 'bubblewrap' | 'appcontainer' | 'none'
   bubblewrap: boolean
   bubblewrap_path: string
   strict_available: boolean
@@ -973,10 +1045,65 @@ export interface InstanceDetails {
   snapshots: Record<string, ServerSnapshot[]>
 }
 
+export interface ShaderAnalyzeResult {
+  analysis: {
+    name: string
+    format: string
+    files: number
+    programs: string[]
+    features: string[]
+    shadow_resolution: number
+    size_bytes: number
+    complexity: number
+    estimated_vram_mb: number
+    notes: string[]
+  }
+  gpu: {
+    name: string
+    vram_mb: number
+    tier: string
+    tier_label: string
+    source: string
+    recommendations: Array<{ name: string; detail: string }>
+  }
+  verdict: { label: string; tone: string }
+  benchmark_available: boolean
+}
+
+export interface ShaderBenchmarkState {
+  phase: 'idle' | 'prepare' | 'baseline' | 'shader' | 'done' | 'failed'
+  progress?: number
+  message?: string
+  error?: string
+  baseline?: { cpu_percent?: number | null; ram_mb?: number; gpu_percent?: number | null; gpu_memory_mb?: number | null }
+  shader?: { cpu_percent?: number | null; ram_mb?: number; gpu_percent?: number | null; gpu_memory_mb?: number | null }
+  verdict?: { label: string; tone: string; gpu_delta_percent?: number; metric?: string }
+}
+
+export interface InstanceVersionComponent {
+  id: string
+  title: string
+  version: string
+  meta: string
+  changeable: boolean
+  removable: boolean
+  overridden?: string
+}
+
+export interface InstanceVersionsPayload {
+  components: InstanceVersionComponent[]
+  minecraft_version: string
+  loader: string
+  loader_version: string
+  lwjgl_versions: string[]
+  library_overrides: Record<string, string>
+}
+
 export interface InstanceLog {
   lines: string[]
   running: boolean
   metrics: ServerMetrics
+  last_metrics?: ServerMetrics | Record<string, unknown>
 }
 
 export interface SkinInfo {
@@ -1177,8 +1304,6 @@ export interface BackendEvent {
   metrics?: ServerMetrics
 }
 
-// ─── Optimization types ───────────────────────────────────────────────────────
-
 export interface JvmPreset {
   id: string
   name: string
@@ -1204,6 +1329,7 @@ export interface OptimizationInstance {
   mc_version: string
   mod_count: number
   weight: 'vanilla' | 'light' | 'medium' | 'heavy' | 'legacy'
+  java_required?: number | null
 }
 
 export interface OptimizerMod {

@@ -65,6 +65,14 @@ chmod +x "$BACKEND_BIN"
 cp -f "$BACKEND_BIN" "$BACKEND_RESOURCE"
 log "Бэкенд готов: $BACKEND_RESOURCE"
 
+# --- 1b. Пакетный SHA-256 хелпер (обязателен для ресурса tauri-конфига) --------
+log "Собираю nivora-turbo (пакетное SHA-256)"
+bash "$SCRIPT_DIR/build_turbo.sh" || die "nivora-turbo не собрался"
+
+# --- 1c. Каталог Modrinth на Go + Java-хелпер ModScan ------------------------
+log "Собираю nivora-modcat (каталог Modrinth)"
+bash "$SCRIPT_DIR/build_modcat.sh" || die "nivora-modcat не собрался"
+
 # --- 2. Фронтенд и Tauri deb ---------------------------------------------------
 log "Собираю фронтенд (npm)"
 cd frontend
@@ -82,7 +90,17 @@ if [ ! -f src-tauri/icons/32x32.png ]; then
 fi
 
 log "Собираю Tauri (deb; первая сборка компилирует все зависимости — это надолго)"
-npm run tauri -- build --bundles deb
+# Подписанные updater-артефакты создаём только при наличии ключа
+# (как в build_windows_exe.sh): без TAURI_SIGNING_PRIVATE_KEY tauri build
+# падает на «A public key has been found, but no private key», потому что в
+# tauri.conf.json есть pubkey апдейтера. Локальной deb-сборке артефакты
+# не нужны — самообновление на Linux работает только через AppImage.
+if [ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
+  TAURI_CONFIG_ARGS=()
+else
+  TAURI_CONFIG_ARGS=(--config '{"bundle":{"createUpdaterArtifacts":false}}')
+fi
+npm run tauri -- build --bundles deb "${TAURI_CONFIG_ARGS[@]}"
 cd "$PROJECT_ROOT"
 
 # --- 3. Артефакт ---------------------------------------------------------------

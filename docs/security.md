@@ -4,25 +4,47 @@
 
 ## Linux Sandbox
 
-- `strict` требует Linux и рабочий `bubblewrap`; при отсутствии sandbox запуск завершается ошибкой. `/usr`, системные бинарники и Java подключаются read-only; вместо полного host `/etc` создаётся отдельный каталог только с небольшим набором файлов конфигурации, нужных libc и Java.
+- На Linux `strict` требует рабочий `bubblewrap` (на Windows — AppContainer, см. ниже); при отсутствии sandbox запуск завершается ошибкой. `/usr`, системные бинарники и Java подключаются read-only; вместо полного host `/etc` создаётся отдельный каталог только с небольшим набором файлов конфигурации, нужных libc и Java.
 - Домашние и временные каталоги скрыты. Папка экземпляра подключается на запись только с `files:instance`; host-write в `strict` запрещён. `files:host-read` открывает ограниченные host-папки read-only.
-- Новые игровые экземпляры по умолчанию получают `files:instance`, `desktop:display` и `desktop:audio`; `network:game` выключен. Его включение разрешает обычный доступ ко всем адресам, включая localhost и LAN; списка разрешённых серверов нет. Без этого разрешения `strict` использует отдельный network namespace. Это не фильтрация адресов и не защита от утечки данных при включённой сети.
+- Новые игровые экземпляры по умолчанию получают `network:game`, `files:instance`, `desktop:display` и `desktop:audio`: без сети Minecraft не видит ни одного сервера. `network:game` разрешает обычный доступ ко всем адресам, включая localhost и LAN; списка разрешённых серверов нет. Без этого разрешения `strict` использует отдельный network namespace. Это не фильтрация адресов и не защита от утечки данных при включённой сети.
 - `desktop:display` управляет X11/Wayland сокетами и GPU-устройствами; `desktop:audio` управляет PipeWire/PulseAudio сокетами и `/dev/snd`. Оба разрешения включены по умолчанию для сохранения обычного игрового поведения и отключаются в настройках экземпляра. X11/XWayland может раскрывать окну ввод или содержимое других окон.
-- При миграции старых настроек версии 2 сетевой доступ по умолчанию отзывается; включите `network:game` для сетевой игры. Ранее неявный доступ к дисплею и звуку становится явным, чтобы не ломать существующие установки.
+- При миграции настроек версий ≤3 (политика версии 4) `network:game` включается один раз; если затем выключить его вручную, выбор сохраняется.
+- Дистрибутивные JDK хранят `conf/security/java.security` и `cacerts` ссылками в `/etc` (`/etc/java-*`, `/etc/ssl/certs/java`, `/etc/pki/...`). Песочница подключает эти пути read-only — иначе Java не загружает `java.security`, и в игре не работают DNS и TLS («сервер не найден»). Ранее неявный доступ к дисплею и звуку становится явным, чтобы не ломать существующие установки.
 - `strict` не устанавливает seccomp syscall filter. Это снижает доступ к файловой системе и устройствам, но не защищает от уязвимости ядра или вредоносного кода, использующего разрешённые каналы.
+
+## Windows Sandbox
+
+На Windows `strict` и `manual` запускают Java в **AppContainer** внутри **Job Object** (Windows 8+, права администратора не нужны). Обёртку выполняет сам бэкенд в режиме `--win-sandbox` (`nivora_launcher/windows_sandbox.py`) — аналог bubblewrap на Linux.
+
+- У каждого экземпляра свой профиль AppContainer (`Nivora.Cell.<hash>`). Его SID получает доступ только к папке экземпляра (запись — с `files:instance`, иначе чтение; временный каталог cell остаётся записываемым), к каталогу Java (чтение) и к Java argument file (чтение). Профиль пользователя, другие диски и данные лаунчера процессу не видны. Служебные файлы `.trial-launcher*.json` закрыты для записи явным deny-ACE — как read-only bind в bubblewrap.
+- Метка выданных ACL хранится в `%LOCALAPPDATA%\nivora-launcher\sandbox-acl\`, вне папки экземпляра, чтобы игра не могла её подделать. При переключении записи на чтение прежнее разрешение снимается.
+- Без `network:game` у контейнера нет сетевых capabilities — сети нет полностью, включая loopback. С `network:game` выдаются `internetClient`, `internetClientServer` и `privateNetworkClientServer`. Windows не пускает AppContainer к этому же компьютеру (localhost); для игры на локальном сервере используйте `off` или исключение `CheckNetIsolation.exe LoopbackExempt -a -p=<SID>` (нужны права администратора).
+- Job Object: игра завершается вместе с обёрткой (`KILL_ON_JOB_CLOSE`, аналог `--die-with-parent`), не может запускать дочерние процессы (лимит — один процесс), не может переключать рабочие столы, менять системные параметры и завершать сеанс. Без `desktop:display` дополнительно закрыты буфер обмена, чужие окна и смена режима экрана.
+- Входящие подключения к процессу в контейнере блокируются: хостить Minecraft-сервер из песочницы нельзя — клиенты не смогут подключиться. Серверы из desktop-приложения запускаются нативным движком без песочницы; для CLI-запуска сервера используйте профиль `off`.
+- AppContainer работает с низким уровнем целостности (UIPI): нельзя слать сообщения и ставить хуки окнам обычных процессов. Микрофон и камера закрыты всегда — capabilities для них не выдаются.
+- `HOME`, `TEMP`/`TMP`, `APPDATA` и `LOCALAPPDATA` игры указывают в cell; сама обёртка работает с настоящими каталогами пользователя, чтобы её код не распаковывался в папку, доступную игре на запись.
+
+Ограничения Windows (честно):
+
+- `desktop:audio` не обеспечивается: Windows не даёт запретить вывод звука в AppContainer. Окно игры без `desktop:display` не скрывается — применяются только UI-ограничения Job Object.
+- `files:host-read` в `strict` не поддерживается: потребовалось бы менять ACL на всём профиле пользователя. В `manual` с этим разрешением (или с `files:host-write`) песочница не включается, и лаунчер предупреждает об этом.
+- Java из `Program Files` читается через `ALL APPLICATION PACKAGES`; если у установленной Java такого доступа нет, запуск в песочнице завершается ошибкой с подсказкой выбрать Java в папке пользователя или Mojang runtime.
+- Часть драйверов OpenGL может вести себя в AppContainer иначе, чем в обычном процессе; при ошибке создания контекста используйте `off` для доверенной сборки.
+- Как и на Linux, это изоляция всего экземпляра, а не отдельных модов, и не защита от уязвимостей ядра.
+- Серверы из desktop-приложения запускает нативный Rust-движок, который пока не применяет ни bubblewrap, ни AppContainer (на любой ОС).
 
 ## Профили и Ограничения
 
 - `compat` сохраняет исходные HOME/XDG/graphics-переменные и не изолирует моды.
-- `manual` применяет bubblewrap на Linux, если он доступен и не выдан host-write; иначе возвращает предупреждение, что ограничения network/files/desktop не обеспечиваются.
-- `strict` поддерживается только на Linux и не запускается, если bubblewrap недоступен.
+- `manual` применяет bubblewrap на Linux (если он доступен и не выдан host-write) и AppContainer на Windows (если не выданы host-read/host-write); иначе возвращает предупреждение, что ограничения network/files/desktop не обеспечиваются.
+- `strict` поддерживается на Linux (bubblewrap) и Windows (AppContainer) и не запускается, если песочница недоступна. На других ОС `strict` отклоняется.
 - `off` отключает ограничения лаунчера и предназначен только для доверенных сборок.
 - `process:spawn`, `chat:read`, `input:capture` и `native:load` нельзя надёжно выдать модам внутри одной JVM в `manual` или `strict`; такие права отклоняются до запуска.
 - Java-моды одной сборки работают в одном JVM и разделяют его права. Sandbox применяется ко всему экземпляру, а не к каждому моду отдельно.
 
 ## Account Token
 
-Microsoft access token не передаётся Minecraft JVM в OS argv. Launcher формирует Java argument file: на Linux это anonymous `memfd`, а в `strict` bubblewrap подключает его read-only только внутри security cell. В argv остаётся ссылка на argument file; fallback-файл имеет режим `0600` и удаляется после запуска.
+Microsoft access token не передаётся Minecraft JVM в OS argv. Launcher формирует Java argument file: на Linux это anonymous `memfd`, а в `strict` bubblewrap подключает его read-only только внутри security cell. В argv остаётся ссылка на argument file; fallback-файл имеет режим `0600` и удаляется после запуска. На Windows файл лежит в каталоге данных лаунчера, его ACL сужается до текущего пользователя (наследование отключается), а в `strict`/`manual` чтение дополнительно выдаётся только SID песочницы этого экземпляра.
 
 Это защищает от случайного раскрытия токена через список аргументов, но не изолирует account от модов. Мод внутри JVM может прочитать состояние запуска и отправить доступные данные по разрешённой сети. Для недоверенных модпаков используйте отдельный Microsoft account и отключайте игровую сеть, если она не нужна.
 
@@ -55,9 +77,9 @@ python3 -m nivora_launcher audit ~/Downloads/SuspiciousMod.jar --json   # маш
 
 Ограничения: аудит статический — он не даёт гарантий и не заменяет sandbox. Обфусцированный или нативный код может скрыть поведение; нативные библиотеки и скачанный в рантайме код не проверяются. Используйте аудит вместе с профилем `strict`, а не вместо него.
 
-## LAN Rooms
+## LAN-комнаты
 
-LAN-комната в авто-режиме слушает все локальные интерфейсы (как и сама игра по LAN), а участникам сообщается конкретный частный IPv4 хоста; если адрес определить не удалось, используется loopback. Публичные IP для входа отклоняются, список альтернативных локальных адресов показывается в интерфейсе комнаты. Комната использует парольную проверку и проксирует только Minecraft TCP-порт через прямое подключение к частному адресу хоста. Она не создаёт виртуальный сетевой адаптер, не передаёт произвольный трафик, не включает шифрование транспорта, NAT traversal или внешний relay и не соединяет устройства за разными сетями. Настройки firewall влияют на доступность комнаты.
+Встроенные LAN-комнаты удалены. Лаунчер больше не открывает сетевой порт для комнат и не проксирует игровой трафик; операции `lan_session_*` отклоняются desktop bridge и Python-бэкендом.
 
 ## Публичные серверы
 
@@ -73,25 +95,47 @@ Each game instance gets a separate `.trial-cell/` for `HOME`, temporary files, c
 
 ## Linux Sandbox
 
-- `strict` requires Linux and a working `bubblewrap`; without a sandbox the launch fails. `/usr`, system binaries and Java are mounted read-only; instead of the full host `/etc` a separate directory is created with only the few configuration files libc and Java need.
+- On Linux `strict` requires a working `bubblewrap` (on Windows — AppContainer, see below); without a sandbox the launch fails. `/usr`, system binaries and Java are mounted read-only; instead of the full host `/etc` a separate directory is created with only the few configuration files libc and Java need.
 - Home and temporary directories are hidden. The instance folder is mounted writable only with `files:instance`; host-write is forbidden in `strict`. `files:host-read` opens limited host folders read-only.
-- New game instances default to `files:instance`, `desktop:display` and `desktop:audio`; `network:game` is off. Enabling it allows ordinary access to all addresses, including localhost and LAN; there is no allowed-server list. Without this permission `strict` uses a separate network namespace. This is not address filtering and not leak protection once networking is on.
+- New game instances default to `network:game`, `files:instance`, `desktop:display` and `desktop:audio`: without networking Minecraft cannot reach any server. `network:game` allows ordinary access to all addresses, including localhost and LAN; there is no allowed-server list. Without this permission `strict` uses a separate network namespace. This is not address filtering and not leak protection once networking is on.
 - `desktop:display` controls X11/Wayland sockets and GPU devices; `desktop:audio` controls PipeWire/PulseAudio sockets and `/dev/snd`. Both permissions are enabled by default to preserve ordinary game behavior and can be disabled in instance settings. X11/XWayland may expose input or the contents of other windows to the game window.
-- When old version 2 settings are migrated, network access is revoked by default; enable `network:game` for network play. Previously implicit display and audio access becomes explicit, so existing installations keep working.
+- When settings from versions ≤3 are migrated (policy version 4), `network:game` is enabled once; turning it off manually afterwards is preserved.
+- Distro JDKs keep `conf/security/java.security` and `cacerts` as symlinks into `/etc`; the sandbox mounts those paths read-only, otherwise Java cannot load `java.security` and DNS/TLS fail in game ("server not found"). Previously implicit display and audio access becomes explicit, so existing installations keep working.
 - `strict` does not install a seccomp syscall filter. This reduces filesystem and device access but does not protect against a kernel vulnerability or malicious code using permitted channels.
+
+## Windows Sandbox
+
+On Windows `strict` and `manual` run Java in an **AppContainer** inside a **Job Object** (Windows 8+, no administrator rights needed). The wrapper is the backend itself in `--win-sandbox` mode (`nivora_launcher/windows_sandbox.py`) — the counterpart of bubblewrap on Linux.
+
+- Each instance has its own AppContainer profile (`Nivora.Cell.<hash>`). Its SID is granted access only to the instance folder (write with `files:instance`, otherwise read; the cell temp directory stays writable), the Java directory (read) and the Java argument file (read). The user profile, other drives and launcher data are invisible to the process. The `.trial-launcher*.json` service files are write-protected with an explicit deny ACE — like the read-only bind in bubblewrap.
+- The record of granted ACLs is kept in `%LOCALAPPDATA%\nivora-launcher\sandbox-acl\`, outside the instance folder, so the game cannot forge it. Switching from write to read removes the previous grant.
+- Without `network:game` the container has no network capabilities — no network at all, loopback included. With `network:game` it gets `internetClient`, `internetClientServer` and `privateNetworkClientServer`. Windows blocks AppContainers from reaching the same computer (localhost); to play on a local server use `off` or the `CheckNetIsolation.exe LoopbackExempt -a -p=<SID>` exemption (administrator rights required).
+- Job Object: the game exits together with the wrapper (`KILL_ON_JOB_CLOSE`, like `--die-with-parent`), cannot start child processes (limit of one process), cannot switch desktops, change system parameters or log off. Without `desktop:display` the clipboard, other windows and display mode changes are also closed.
+- Inbound connections to a process in the container are blocked: you cannot host a Minecraft server from the sandbox — clients will not be able to connect. Servers started from the desktop app run through the native engine without a sandbox; use the `off` profile for CLI server launches.
+- AppContainer runs at low integrity (UIPI): it cannot send messages to or hook windows of normal processes. The microphone and camera are always closed — no capabilities are granted for them.
+- The game's `HOME`, `TEMP`/`TMP`, `APPDATA` and `LOCALAPPDATA` point into the cell; the wrapper itself uses the real user directories so its code is never unpacked into a folder the game can write.
+
+Windows limitations (honestly):
+
+- `desktop:audio` is not enforced: Windows cannot forbid audio output in an AppContainer. Without `desktop:display` the game window is not hidden — only the Job Object UI restrictions apply.
+- `files:host-read` is not supported in `strict`: it would require changing ACLs on the whole user profile. In `manual` with this permission (or `files:host-write`) the sandbox is not enabled, and the launcher warns about it.
+- Java under `Program Files` is readable through `ALL APPLICATION PACKAGES`; if an installed Java lacks that access, the sandboxed launch fails with a hint to pick a Java in the user folder or the Mojang runtime.
+- Some OpenGL drivers may behave differently in an AppContainer than in a normal process; if context creation fails, use `off` for a trusted build.
+- As on Linux, this isolates the whole instance, not individual mods, and does not protect against kernel vulnerabilities.
+- Servers in the desktop app are started by the native Rust engine, which does not apply bubblewrap or AppContainer yet (on any OS).
 
 ## Profiles and Restrictions
 
 - `compat` keeps the original HOME/XDG/graphics variables and does not isolate mods.
-- `manual` applies bubblewrap on Linux if it is available and host-write was not granted; otherwise it returns a warning that network/files/desktop restrictions are not provided.
-- `strict` is supported only on Linux and refuses to launch when bubblewrap is unavailable.
+- `manual` applies bubblewrap on Linux (if available and host-write was not granted) and AppContainer on Windows (if host-read/host-write were not granted); otherwise it returns a warning that network/files/desktop restrictions are not provided.
+- `strict` is supported on Linux (bubblewrap) and Windows (AppContainer) and refuses to launch when the sandbox is unavailable. On other systems `strict` is rejected.
 - `off` disables launcher restrictions and is intended only for trusted builds.
 - `process:spawn`, `chat:read`, `input:capture` and `native:load` cannot be reliably granted to mods inside a single JVM in `manual` or `strict`; such grants are rejected before launch.
 - Java mods of one build run in one JVM and share its permissions. The sandbox applies to the whole instance, not to each mod separately.
 
 ## Account Token
 
-The Microsoft access token is not passed to the Minecraft JVM in OS argv. The launcher builds a Java argument file: on Linux it is an anonymous `memfd`, and in `strict` bubblewrap mounts it read-only only inside the security cell. A reference to the argument file stays in argv; the fallback file has mode `0600` and is deleted after launch.
+The Microsoft access token is not passed to the Minecraft JVM in OS argv. The launcher builds a Java argument file: on Linux it is an anonymous `memfd`, and in `strict` bubblewrap mounts it read-only only inside the security cell. A reference to the argument file stays in argv; the fallback file has mode `0600` and is deleted after launch. On Windows the file lives in the launcher data directory, its ACL is narrowed to the current user (inheritance disabled), and in `strict`/`manual` read access is additionally granted only to this instance's sandbox SID.
 
 This protects against accidental token disclosure through the argument list, but does not isolate the account from mods. A mod inside the JVM can read the launch state and send available data over the permitted network. For untrusted modpacks use a separate Microsoft account and keep game networking off when you do not need it.
 
@@ -124,10 +168,22 @@ How it works:
 
 Limitations: the audit is static — it guarantees nothing and does not replace the sandbox. Obfuscated or native code can hide behavior; native libraries and code downloaded at runtime are not checked. Use the audit together with the `strict` profile, not instead of it.
 
-## LAN Rooms
+## LAN rooms
 
-A LAN room in auto mode listens on all local interfaces (like the game itself over LAN), and participants are told the host's specific private IPv4; if the address cannot be determined, loopback is used. Public IPs for joining are rejected; the list of alternative local addresses is shown in the room interface. The room uses password verification and proxies only the Minecraft TCP port over a direct connection to the host's private address. It does not create a virtual network adapter, does not carry arbitrary traffic, does not enable transport encryption, NAT traversal or an external relay, and does not join devices across different networks. Firewall settings affect room availability.
+The built-in LAN rooms have been removed. The launcher no longer opens a network port for rooms and no longer proxies game traffic; `lan_session_*` operations are rejected by the desktop bridge and the Python backend.
 
 ## Public servers
 
 Publishing over a white IPv4 is a separate opt-in feature of the server workspace, not a LAN relay. It creates only a confirmed temporary UPnP rule for the game TCP port, does not enable RCON, does not disable the firewall and does not change online-mode / whitelist. Other people's UPnP rules are not overwritten or deleted. The restricted LAN HTTP client talks only to the RFC1918 IPv4 of the SSDP response source; redirects, credentials, loopback/link-local and third-party control URLs are forbidden. XML is size-limited and parsed with entities disallowed. The public HTTP client and its SSRF policy are not weakened. Documentation: `docs/server-network.md`.
+
+## Антивирусы и сборка Windows
+
+Ложные срабатывания на сборках без кодовой подписи — не признак вредоносного кода, а реакция эвристик на характерные черты упаковки. Сборка Nivora Launcher устроена так, чтобы их было минимум:
+
+- Бэкенд — onedir-сборка PyInstaller (не onefile): onefile-бутлоадер, распаковывающий себя во временную папку и запускающий оттуда, эвристики считают дроппером и помечают как generic-троян.
+- Внутрь `nivora-launcher.exe` бэкенд вкладывается zip-архивом, а не «голым» exe: исполняемый файл внутри другого исполняемого файла — классический признак упаковщика/дроппера.
+- UPX отключён (`--noupx`): упакованные секции — второй по частоте триггер.
+- В exe зашиты метаданные версии (компания, описание, версия файла) — «безликие» бинарники подозрительнее.
+- Установщик и портативный exe подписываются Authenticode, если задан `WINDOWS_CERT_FILE` (см. `scripts/build_windows_exe.sh`); подпись убирает и предупреждение SmartScreen.
+
+Если конкретный антивирус всё равно срабатывает: отправьте false positive прямо вендору (Microsoft Security Intelligence, Kaspersky Opentip, ESET — формы приёма образцов есть на их сайтах; обычно разблокируют за 1–3 дня). Полностью убрать срабатывания без покупки сертификата кодовой подписи невозможно — это ограничение экосистемы Windows, а не дефект лаунчера.

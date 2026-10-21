@@ -131,8 +131,12 @@ else
   PYINSTALLER_RUN=(wine "$WINE_PYTHON")
 fi
 
-# --- 1. PyInstaller-сборка бэкенда ------------------------------------------
-log "Собираю $BACKEND_NAME (PyInstaller, onefile)"
+# --- 1. Сборка бэкенда PyInstaller ------------------------------------------
+# Onedir, а не onefile: onefile-бутлоадер PyInstaller — лидер по ложным
+# срабатываниям антивирусов (распаковка во временную папку + запуск оттуда
+# эвристики считают дроппером). Onedir-сборки детектируются на порядок реже.
+# В nivora-launcher.exe бэкед вкладывается zip-архивом onedir-каталога.
+log "Собираю $BACKEND_NAME (PyInstaller, onedir)"
 mkdir -p "$WORK_DIR"
 
 # Метаданные (версия/компания/описание) внутри exe: «безликие» бинарники
@@ -201,26 +205,75 @@ fi
 # PyInstaller запускается с относительными путями: под wine cwd отображается
 # в Z:\, и относительные пути работают без конвертации winepath.
 "${PYINSTALLER_RUN[@]}" -m PyInstaller \
-  --noconfirm --clean --onefile --noconsole \
+  --noconfirm --clean --onedir --noconsole --noupx \
   --name nivora-launcher-backend \
   --distpath .build-windows/dist \
   --workpath .build-windows/work \
   --specpath .build-windows \
   --collect-submodules nivora_launcher \
   --collect-data nivora_launcher \
+  --collect-all keyring \
+  --hidden-import keyring.backends.Windows \
+  --hidden-import truststore \
   "${VERSION_FILE_ARGS[@]}" \
   scripts/backend_entry.py
 
-BACKEND_EXE="$WORK_DIR/dist/$BACKEND_NAME"
+BACKEND_DIR="$WORK_DIR/dist/nivora-launcher-backend"
+BACKEND_EXE="$BACKEND_DIR/$BACKEND_NAME"
 [ -f "$BACKEND_EXE" ] || die "PyInstaller не создал $BACKEND_EXE — смотрите вывод выше."
 
+# --- 1b. Нативные хелперы для Windows (обязательны) ---------------------------
+# Кладутся в onedir-каталог ДО упаковки zip: тогда их получают и установщик,
+# и portable-exe (раньше zip собирался раньше, и в portable-версии хелперов
+# не было). Сбой любого хелпера — ошибка сборки.
+log "Собираю nivora-turbo.exe (C++, статически с zlib)"
+TURBO_TARGET=windows bash "$SCRIPT_DIR/build_turbo.sh" "$BACKEND_DIR/nivora-turbo.exe" \
+  || die "nivora-turbo.exe не собрался (нужен mingw-w64 g++ с posix-потоками или MSYS2 g++)."
+GO_BIN="$(command -v go || true)"
+[ -n "$GO_BIN" ] || { [ -x "$HOME/.local/go/bin/go" ] && GO_BIN="$HOME/.local/go/bin/go"; } || true
+[ -n "$GO_BIN" ] || die "Go не найден: nivora-modcat.exe обязателен (https://go.dev/dl/)."
+(cd "$PROJECT_ROOT/go-modcat" && GOOS=windows GOARCH=amd64 CGO_ENABLED=0 "$GO_BIN" build \
+    -trimpath -ldflags='-s -w' -o "$BACKEND_DIR/nivora-modcat.exe" .) \
+  || die "nivora-modcat.exe не собрался."
+cp -f "$PROJECT_ROOT/java/ModScan.java" "$BACKEND_DIR/ModScan.java" || die "ModScan.java не скопирован."
+
+# Ни один бинарник сборки не должен открывать консоль сам по себе.
+python3 "$SCRIPT_DIR/check_pe_subsystem.py" --gui "$BACKEND_EXE" \
+  || die "Бэкенд собран как консольное приложение (нужен --noconsole)."
+
+# Zip для встраивания в nivora-launcher.exe (include_bytes!) и как
+# переносимый отладочный артефакт. Питоном — zip в окружении может не быть.
+log "Упаковываю onedir-каталог бэкенда в zip"
+BACKEND_ZIP="$WORK_DIR/nivora-launcher-backend.zip"
+python3 - "$BACKEND_DIR" "$BACKEND_ZIP" <<'PY'
+import os, sys, zipfile
+
+source, target = sys.argv[1], sys.argv[2]
+root = os.path.basename(source)
+with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
+    for base, _dirs, files in os.walk(source):
+        for name in files:
+            path = os.path.join(base, name)
+            archive.write(path, os.path.join(root, os.path.relpath(path, source)))
+PY
+[ -s "$BACKEND_ZIP" ] || die "не удалось собрать $BACKEND_ZIP"
+
 mkdir -p "$(dirname "$BACKEND_RESOURCE")" "$OUTPUT_DIR"
-cp -f "$BACKEND_EXE" "$BACKEND_RESOURCE"
-cp -f "$BACKEND_EXE" "$OUTPUT_DIR/$BACKEND_NAME"
-log "Бэкенд готов: $BACKEND_RESOURCE"
+# Для встраивания: include_bytes! ждёт zip рядом (см. lib.rs).
+BACKEND_ZIP_RESOURCE="$PROJECT_ROOT/frontend/src-tauri/resources/backend/nivora-launcher-backend.zip"
+cp -f "$BACKEND_ZIP" "$BACKEND_ZIP_RESOURCE"
+# Для NSIS-установщика: распакованный onedir кладём ресурсом — установленная
+# копия запускает бэкенд напрямую, без распаковки при первом старте.
+BACKEND_APP_RESOURCE="$PROJECT_ROOT/frontend/src-tauri/resources/backend/app"
+rm -rf "$BACKEND_APP_RESOURCE"
+mkdir -p "$BACKEND_APP_RESOURCE"
+cp -R "$BACKEND_DIR/." "$BACKEND_APP_RESOURCE/"
+
+log "Бэкенд готов: $BACKEND_ZIP_RESOURCE (+ $BACKEND_APP_RESOURCE для установщика)"
 
 if [ "$ONLY_BACKEND" -eq 1 ]; then
-  log "Готово (--only-backend): $OUTPUT_DIR/$BACKEND_NAME"
+  cp -f "$BACKEND_ZIP" "$OUTPUT_DIR/$BACKEND_NAME.zip"
+  log "Готово (--only-backend): $OUTPUT_DIR/$BACKEND_NAME.zip"
   exit 0
 fi
 
@@ -419,30 +472,38 @@ fi
 
 # Подписанные updater-артефакты создаём только при наличии ключа,
 # локальной сборке exe они не нужны (см. tauri.arch.conf.json для Arch).
-if [ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
-  TAURI_CONFIG_ARGS=()
-else
-  TAURI_CONFIG_ARGS=(--config '{"bundle":{"createUpdaterArtifacts":false}}')
+# tauri.windows.conf.json (свой NSIS-шаблон установщика, ресурсы бэкенда)
+# tauri CLI подхватывает по ОС ХОСТА: при кросс-сборке с Linux он молча
+# игнорировался, и получался стандартный установщик Tauri. Передаём явно.
+TAURI_CONFIG_ARGS=(--config src-tauri/tauri.windows.conf.json)
+if [ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
+  TAURI_CONFIG_ARGS+=(--config '{"bundle":{"createUpdaterArtifacts":false}}')
 fi
 
-# include_bytes! в lib.rs упаковывает бэкенд В САМ nivora-launcher.exe —
-# на момент tauri build файл обязан существовать, иначе cargo выдаст
+# include_bytes! в lib.rs упаковывает zip бэкеда В САМ nivora-launcher.exe —
+# на момент tauri build архив обязан существовать, иначе cargo выдаст
 # малопонятную ошибку. Здесь — явная проверка с понятным сообщением.
-if [ ! -f "$BACKEND_RESOURCE" ]; then
-  die "Не найден $BACKEND_RESOURCE. tauri build не сможет встроить бэкенд в nivora-launcher.exe — сначала соберите его (PyInstaller-шаг выше)."
+if [ ! -f "$BACKEND_ZIP_RESOURCE" ]; then
+  die "Не найден $BACKEND_ZIP_RESOURCE. tauri build не сможет встроить бэкенд в nivora-launcher.exe — сначала соберите его (PyInstaller-шаг выше)."
 fi
 
 log "Собираю Tauri (Windows exe; первая кросс-сборка качает Windows SDK и компилирует все зависимости — это надолго)"
 cd frontend
-npm run tauri -- build "${TAURI_TARGET_ARGS[@]}" "${TAURI_CONFIG_ARGS[@]}"
+NIVORA_REQUIRE_EMBEDDED_BACKEND=1 npm run tauri -- build "${TAURI_TARGET_ARGS[@]}" "${TAURI_CONFIG_ARGS[@]}"
 cd "$PROJECT_ROOT"
 
 # --- 4. Артефакты -------------------------------------------------------------
 setup_exe="$(ls -1t "$RELEASE_DIR/bundle/nsis/"*-setup.exe 2>/dev/null | head -n 1 || true)"
+nsis_script="$RELEASE_DIR/nsis/x64/installer.nsi"
+if [ -f "$nsis_script" ] && ! grep -q "NivoraPurgeData" "$nsis_script"; then
+  die "Установщик собран из стандартного шаблона Tauri, а не из frontend/src-tauri/windows/installer.nsi — проверьте bundle.windows.nsis.template."
+fi
 raw_exe="$RELEASE_DIR/nivora-launcher.exe"
 
 [ -n "$setup_exe" ] || die "NSIS-установщик не найден в $RELEASE_DIR/bundle/nsis/ — смотрите вывод tauri build."
 [ -f "$raw_exe" ] || die "Автономный exe не найден: $raw_exe"
+python3 "$SCRIPT_DIR/check_pe_subsystem.py" --gui "$raw_exe" \
+  || die "nivora-launcher.exe собран с консольной подсистемой — в production консоли быть не должно."
 
 cp -f "$setup_exe" "$OUTPUT_DIR/"
 cp -f "$raw_exe" "$OUTPUT_DIR/"
@@ -472,12 +533,54 @@ else
   log "Внимание: exe НЕ подписан (нет WINDOWS_CERT_FILE). Windows SmartScreen покажет предупреждение — это нормально для файлов без кодовой подписи, см. README «Windows предупреждает при запуске»."
 fi
 
+# --- 4.1.1 Фид самообновления (latest.json) ---------------------------------------
+# Встроенный апдейтер читает releases/latest/download/latest.json. Без этого
+# файла в релизе лаунчер пишет «Could not fetch a valid release JSON from the
+# remote» и не видит новых версий. Подписываем ФИНАЛЬНЫЙ установщик (уже после
+# osslsigncode — Authenticode меняет байты, и подпись tauri build устаревает).
+APP_VERSION_TAURI="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' frontend/src-tauri/tauri.conf.json)"
+RELEASE_TAG="${RELEASE_TAG:-$APP_VERSION_TAURI}"
+GITHUB_RELEASE_REPO="${GITHUB_RELEASE_REPO:-vedrooou0/Nivora-launcher}"
+setup_name="$(basename "$setup_exe")"
+# GitHub заменяет пробелы в именах ассетов точками — сразу называем так же,
+# чтобы ссылка в latest.json совпала с реальным файлом релиза.
+update_asset="${setup_name// /.}"
+if [ "$update_asset" != "$setup_name" ]; then
+  mv -f "$OUTPUT_DIR/$setup_name" "$OUTPUT_DIR/$update_asset"
+fi
+if [ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
+  log "Подписываю установщик для апдейтера и собираю latest.json (тег $RELEASE_TAG)"
+  rm -f "$OUTPUT_DIR/$update_asset.sig"
+  ( cd frontend && npm run tauri -- signer sign "$OUTPUT_DIR/$update_asset" >/dev/null ) \
+    || die "Не удалось подписать установщик ключом апдейтера (проверьте TAURI_SIGNING_PRIVATE_KEY и TAURI_SIGNING_PRIVATE_KEY_PASSWORD)."
+  [ -f "$OUTPUT_DIR/$update_asset.sig" ] || die "tauri signer не создал $update_asset.sig"
+  python3 - "$OUTPUT_DIR" "$update_asset" "$APP_VERSION_TAURI" "$RELEASE_TAG" "$GITHUB_RELEASE_REPO" <<'PY'
+import datetime, json, sys, urllib.parse
+from pathlib import Path
+out, asset, version, tag, repo = sys.argv[1:6]
+signature = (Path(out) / f"{asset}.sig").read_text(encoding="utf-8").strip()
+url = f"https://github.com/{repo}/releases/download/{urllib.parse.quote(tag)}/{urllib.parse.quote(asset)}"
+entry = {"signature": signature, "url": url}
+feed = {
+    "version": version,
+    "notes": f"Nivora Launcher {version}",
+    "pub_date": datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+    "platforms": {"windows-x86_64": entry, "windows-x86_64-nsis": entry},
+}
+(Path(out) / "latest.json").write_text(json.dumps(feed, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+PY
+  log "latest.json: $OUTPUT_DIR/latest.json — загрузите его в релиз $RELEASE_TAG вместе с $update_asset"
+  log "Например: gh release create $RELEASE_TAG \"$OUTPUT_DIR/$update_asset\" \"$OUTPUT_DIR/latest.json\" --title \"Nivora Launcher $APP_VERSION_TAURI\""
+else
+  log "Внимание: нет TAURI_SIGNING_PRIVATE_KEY — latest.json НЕ создан. Встроенное самообновление этот релиз не увидит; лаунчер 1.1+ всё равно найдёт его через GitHub API и предложит скачать вручную."
+fi
+
 # --- 4.2 Контрольные суммы -----------------------------------------------------
 ( cd "$OUTPUT_DIR" && sha256sum ./*.exe > sha256sums.txt )
 log "Суммы SHA256: $OUTPUT_DIR/sha256sums.txt"
 
 log "Готово. Артефакты: $OUTPUT_DIR"
-log "Главный файл — nivora-launcher.exe (ОДИН файл: Python-бэкенд уже встроен внутрь и при первом запуске распаковывается в %LOCALAPPDATA%\\nivora-launcher\\backend). Отдельный nivora-launcher-backend.exe в dist — только для отладки, для работы он не нужен."
+log "Главный файл — nivora-launcher.exe (ОДИН файл: бэкенд встроен zip-архивом и при первом запуске распаковывается в %LOCALAPPDATA%\\nivora-launcher\\backend). Установщик кладёт бэкенд рядом с приложением — без распаковки."
 ( cd "$OUTPUT_DIR" && for artifact in *; do
     [ -f "$artifact" ] || continue
     printf '    %8s  %s\n' "$(du -h "$artifact" | cut -f1)" "$artifact"

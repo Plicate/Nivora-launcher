@@ -1,15 +1,4 @@
-// Minecraft Bedrock для всех поддерживаемых ОС — целиком в Rust.
-//
-// Linux   — встроенная среда BedrockOnLinux (профили Wine/GDK-Proton):
-//           тот же протокол команд, что раньше жил в nivora_launcher/bedrock.py.
-// Windows — ОФИЦИАЛЬНЫЙ «Minecraft for Windows» из Microsoft Store:
-//           установка через winget с открытием страницы Store (платные
-//           Xbox-продукты лицензирует только сам Store), запуск по
-//           протоколу minecraft://, контент — прямо в com.mojang
-//           установленного пакета. BedrockOnLinux/Wine не используется.
-// macOS   — официальный Bedrock не выпускается: честный отказ с пояснением.
-//
-// Все операции регистрируются в NATIVE_OPS и обслуживаются без Python-воркера.
+// minecraft Bedrock для всех поддерживаемых ОС — целиком в Rust.
 use base64::Engine;
 use regex::Regex;
 use serde_json::{json, Value};
@@ -30,14 +19,12 @@ use super::platform_support::{is_reparse_point, process_exists};
 use super::process_guard::InstanceProcessLock;
 use super::state::{launcher_roots, read_bounded_json, safe_instance_name, settings_game_dir};
 
-// ─────────────────────────────────── Константы ─────────────────────────────
-
 const BEDROCK_ON_LINUX_URL: &str = "https://github.com/Wyze3306/BedrockOnLinux";
 const BEDROCK_ON_LINUX_BUNDLED_VERSION: &str = "2.2.9";
 const BEDROCK_ON_LINUX_BUNDLED_SHA256: &str =
     "bb894a86ed19575635d63f11cef466b70da2b99a12a3bda8468386630c40ed5c";
 const BUNDLED_PYZ_MAX_BYTES: u64 = 4 * 1024 * 1024;
-/// Минимальная поддержка версии среды (2.2.0).
+/// минимальная поддержка версии среды (2.2.0).
 const MIN_BOL_VERSION: (u32, u32, u32) = (2, 2, 0);
 /// glibc, ниже которого xodus-вход в Microsoft Store не работает.
 const MIN_GLIBC_VERSION: (u32, u32, u32) = (2, 39, 0);
@@ -49,7 +36,7 @@ const MAX_JOB_LOG_LINES: usize = 200;
 const MAX_SESSION_LOG_LINES: usize = 500;
 const MAX_LOG_ARCHIVE_BYTES: u64 = 5 * 1024 * 1024;
 
-/// Внутрипрофильный путь BoL к данным игры (относительно профиля).
+/// внутрипрофильный путь BoL к данным игры (относительно профиля).
 const BOL_CONTENT_ROOT_PARTS: &[&str] = &[
     "compatdata", "pfx", "drive_c", "users", "steamuser", "AppData", "Roaming",
     "Minecraft Bedrock", "Users",
@@ -62,8 +49,6 @@ const CONTENT_DIRECTORIES: &[(&str, &[&str])] = &[
 ];
 const IMPORT_EXTENSIONS: &[&str] = &[".mcpack", ".mcaddon", ".mcworld", ".mctemplate", ".mcskin"];
 
-/// Windows: официальные идентификаторы продуктов Microsoft Store.
-/// ProductId — страница Store; PackageFamilyName — каталог данных игры.
 struct WindowsChannel {
     product_id: &'static str,
     package_family: &'static str,
@@ -128,7 +113,7 @@ fn secret_line_re() -> &'static Regex {
     });
     &RE
 }
-/// BedrockOnLinux пишет уровень в начало строки («error …»); среда может
+/// bedrockOnLinux пишет уровень в начало строки («error …»); среда может
 /// завершиться с кодом 0 даже после собственных «error».
 fn bol_error_line_re() -> &'static Regex {
     static RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)^(?:error|critical|fatal)\b").unwrap());
@@ -142,8 +127,6 @@ fn glibc_re() -> &'static Regex {
     static RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b(\d+\.\d+)\b").unwrap());
     &RE
 }
-
-// ─────────────────────────────────── Платформа ─────────────────────────────
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum BedrockPlatform {
@@ -170,14 +153,10 @@ fn platform_id() -> &'static str {
     }
 }
 
-/// Версия «latest» допустима только для официального канала Windows:
-/// Store всегда ставит последний выпуск, номер заранее неизвестен.
 fn valid_game_version(version: &str) -> bool {
     game_version_re().is_match(version)
         || (bedrock_platform() == BedrockPlatform::WindowsOfficial && version == "latest")
 }
-
-// ─────────────────────────────────── Контекст ──────────────────────────────
 
 struct Ctx {
     game_dir: PathBuf,
@@ -204,8 +183,6 @@ fn bedrock_instance(store: &InstanceStore, name: &str) -> Result<InstanceInfo, S
     Ok(info)
 }
 
-// ─────────────────────────────── Мелкие хелперы ────────────────────────────
-
 fn sha256_hex(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
@@ -227,7 +204,7 @@ fn random_hex(byte_count: usize) -> String {
             return buffer.iter().map(|byte| format!("{byte:02x}")).collect();
         }
     }
-    // Фолбэк: pid + время через SHA-256 (на Windows urandom недоступен напрямую).
+    // фолбэк: pid + время через SHA-256 (на Windows urandom недоступен напрямую).
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|value| value.subsec_nanos())
@@ -305,7 +282,7 @@ fn prepare_command(command: &mut Command) -> &mut Command {
     command
 }
 
-/// Запуск с общим таймаутом; возвращает (код, stdout+stderr). None — таймаут.
+/// запуск с общим таймаутом; возвращает (код, stdout+stderr). None — таймаут.
 fn run_timed(command: &mut Command, timeout: Duration) -> Option<(i32, String)> {
     let child = command
         .stdin(Stdio::null())
@@ -349,10 +326,6 @@ fn run_timed(command: &mut Command, timeout: Duration) -> Option<(i32, String)> 
         }
     }
 }
-
-// ───────────────────────────── Фоновые задания ─────────────────────────────
-// Установка версии и вход в Store занимают минуты; они живут в фоновых нитях,
-// а интерфейс опрашивает bedrock_setup_status / bedrock_store_login_status.
 
 struct JobState {
     running: bool,
@@ -475,10 +448,8 @@ fn job_fail(job: &Arc<Mutex<JobState>>, error: &str, cancelled: bool) {
     state.error = error.to_owned();
 }
 
-// ─────────────────────── Среда запуска Linux (BedrockOnLinux) ──────────────
-
 struct BolRuntime {
-    /// Готовые к запуску команды (системная среда и/или встроенный pyz).
+    /// готовые к запуску команды (системная среда и/или встроенный pyz).
     commands: Vec<Vec<String>>,
     setup_error: String,
 }
@@ -489,7 +460,7 @@ struct ProbeStatus {
     message: String,
 }
 
-/// Имя файла встроенной среды: версия и имя держатся в синхроне.
+/// имя файла встроенной среды: версия и имя держатся в синхроне.
 fn bundled_pyz_name() -> &'static str {
     static NAME: LazyLock<String> =
         LazyLock::new(|| format!("bedrock-on-linux-{BEDROCK_ON_LINUX_BUNDLED_VERSION}.pyz"));
@@ -507,7 +478,7 @@ fn bundled_pyz_candidates() -> Vec<PathBuf> {
             candidates.push(dir.join("nivora_launcher").join("vendor").join(bundled_pyz_name()));
             candidates.push(dir.join("../share/nivora-launcher/vendor").join(bundled_pyz_name()));
             candidates.push(dir.join("../Resources/vendor").join(bundled_pyz_name()));
-            // Режим разработки: binary лежит в target/debug, pyz — в
+            // режим разработки: binary лежит в target/debug, pyz — в
             // src-tauri/resources/vendor.
             candidates.push(dir.join("../../resources/vendor").join(bundled_pyz_name()));
         }
@@ -596,7 +567,7 @@ fn glibc_version() -> Option<String> {
         return None;
     }
     let ldd = find_in_path("ldd")?;
-    let output = run_timed(prepare_command(Command::new(ldd).arg("--version")), Duration::from_secs(10))?;
+    let output = run_timed(prepare_command(super::platform::command(ldd).arg("--version")), Duration::from_secs(10))?;
     glibc_re()
         .captures(&output.1)
         .and_then(|captures| captures.get(1).map(|value| value.as_str().to_owned()))
@@ -608,7 +579,7 @@ fn bol_probe(command: &[String], home: &Path) -> ProbeStatus {
         version,
         message: message.to_owned(),
     };
-    let mut process = Command::new(&command[0]);
+    let mut process = super::platform::command(&command[0]);
     process.args(&command[1..]).arg("--help");
     if home.is_dir() {
         process.current_dir(home);
@@ -675,8 +646,6 @@ fn bol_require_runtime(home: &Path) -> Result<(Vec<String>, ProbeStatus), String
     Ok(selected)
 }
 
-// ── реестр активных процессов среды (остановка запусков) ──
-
 static ACTIVE_PROCESSES: LazyLock<Mutex<HashMap<String, Arc<Mutex<Child>>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
@@ -721,8 +690,6 @@ fn terminate_process_tree(child: &mut Child, force: bool) {
     }
 }
 
-/// Гашение дерева процессов через /proc: store-login запускает xodus-cli
-/// в новой сессии — вне группы процесса, поэтому одного kill() мало.
 #[cfg(target_os = "linux")]
 fn terminate_linux_tree(child: &mut Child, force: bool) {
     let pid = child.id() as i32;
@@ -792,7 +759,7 @@ fn terminate_generic(child: &mut Child, _force: bool) {
     #[cfg(windows)]
     {
         if let Some(taskkill) = find_in_path("taskkill.exe").or_else(|| find_in_path("taskkill")) {
-            let _ = Command::new(taskkill)
+            let _ = super::platform::command(taskkill)
                 .args(["/PID", &child.id().to_string(), "/T", "/F"])
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
@@ -805,8 +772,6 @@ fn terminate_generic(child: &mut Child, _force: bool) {
     let _ = child.wait();
 }
 
-/// Окружение BoL: BOL_HOME + подмена notify-send (Nivora сам решает, когда
-/// отправлять системные уведомления) + опциональный XDG_DATA_HOME для ярлыков.
 fn bol_environment(home: &Path, xdg_data_home: Option<&Path>) -> HashMap<String, String> {
     let mut environment: HashMap<String, String> = std::env::vars().collect();
     environment.insert("BOL_HOME".to_owned(), home.to_string_lossy().into_owned());
@@ -870,7 +835,7 @@ fn bol_run(
     if let Some(token) = cancellation {
         token.check()?;
     }
-    let mut process = Command::new(&command[0]);
+    let mut process = super::platform::command(&command[0]);
     process
         .args(&command[1..])
         .args(argv)
@@ -930,10 +895,7 @@ fn bol_run(
             Ok(None) => reader_done = true,
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 if !stall_timeout.is_zero() && last_output.elapsed() > stall_timeout {
-                    // Молчание stdout ≠ зависание: CLI-путь do_setup в
-                    // BedrockOnLinux качает пакет игры (2+ ГиБ), не печатая
-                    // ни строки. Пока дерево профиля растёт — это живое
-                    // скачивание: продлеваем ожидание и подаём heartbeat.
+                    // молчание stdout ≠ зависание: CLI-путь do_setup в
                     let verdict = watchdog.as_deref_mut().map(|state| state.check());
                     match verdict {
                         Some(WatchdogVerdict::Active(bytes)) => {
@@ -984,13 +946,6 @@ fn bol_run(
     Ok((final_code, lines))
 }
 
-/// Читатель stdout/stderr процесса: строки в канал, None в конце потока.
-/// Читатель stdout/stderr процесса: строки в канал, None в конце потока.
-///
-/// Границей строки считается не только `\n`, но и `\r`: инструменты скачивания
-/// (winget, индикаторы BedrockOnLinux) перерисовывают прогресс возвратом
-/// каретки, и «настоящий» читатель строк молчал бы всю загрузку — а таймаут
-/// простоя считал живое скачивание зависшим и убивал его на середине.
 fn spawn_line_reader<S: Read + Send + 'static>(stream: Option<S>, sender: mpsc::Sender<Option<String>>) {
     if let Some(stream) = stream {
         std::thread::spawn(move || {
@@ -1043,10 +998,6 @@ fn spawn_line_reader<S: Read + Send + 'static>(stream: Option<S>, sender: mpsc::
     }
 }
 
-/// Чистка сырой строки процесса: ANSI-последовательности (прогресс-бары
-/// winget и BedrockOnLinux перерисовывают вывод курсорами), NUL-добивки
-/// псевдотерминала и хвостовые пробелы. Пустое после чистки — None: это шум
-/// перерисовки, а не строка.
 fn clean_process_line(raw: &[u8]) -> Option<String> {
     let mut cleaned: Vec<u8> = Vec::with_capacity(raw.len().min(1024));
     let mut index = 0;
@@ -1091,7 +1042,7 @@ fn clean_process_line(raw: &[u8]) -> Option<String> {
     }
 }
 
-/// Размер в человекочитаемом виде для heartbeat-строк скачивания.
+/// размер в человекочитаемом виде для heartbeat-строк скачивания.
 fn human_bytes(bytes: u64) -> String {
     const GIB: f64 = 1_073_741_824.0;
     const MIB: f64 = 1_048_576.0;
@@ -1105,9 +1056,6 @@ fn human_bytes(bytes: u64) -> String {
     }
 }
 
-/// Суммарный размер файлов в дереве (по статистике, без чтения). Пределы
-/// защищают от симлинк-циклов и патологических деревьев: здоровый профиль
-/// Bedrock укладывается в десятки тысяч записей.
 fn walk_tree_size(root: &Path) -> u64 {
     let mut total: u64 = 0;
     let mut entries: usize = 0;
@@ -1139,22 +1087,17 @@ fn walk_tree_size(root: &Path) -> u64 {
     total
 }
 
-/// Вердикт watchdog'а для фазы, когда процесс молчит по stdout.
+/// вердикт watchdog'а для фазы, когда процесс молчит по stdout.
 #[derive(Debug, PartialEq)]
 enum WatchdogVerdict {
-    /// Снимка ещё нет / прошёл слишком мало времени — решения нет.
+    /// снимка ещё нет / прошёл слишком мало времени — решения нет.
     Pending,
-    /// Дерево выросло — скачивание или распаковка живы.
+    /// дерево выросло — скачивание или распаковка живы.
     Active(u64),
-    /// Дерево не меняется — процесс действительно завис.
+    /// дерево не меняется — процесс действительно завис.
     Silent,
 }
 
-/// Немой инструмент скачивания — не приговор: BedrockOnLinux при установке
-/// игры пишет пакет на диск, не печатая ничего в stdout (CLI-путь do_setup не
-/// передаёт progress-колбэк). Рост дерева профиля — единственный честный
-/// признак работы; старый код убивал живое скачивание по таймауту тишины,
-/// и каждая повторная попытка начинала 2+ ГиБ с нуля.
 struct DownloadWatchdog {
     root: PathBuf,
     snapshot: u64,
@@ -1178,8 +1121,6 @@ impl DownloadWatchdog {
         }
     }
 
-    /// Вызывается только когда stdout молчит дольше stall-таймаута:
-    /// частые обходы не нужны, решает разница между двумя снимками.
     fn check(&mut self) -> WatchdogVerdict {
         if let Some(last) = self.last_walk {
             if last.elapsed() < self.interval {
@@ -1203,8 +1144,6 @@ impl DownloadWatchdog {
         }
     }
 }
-
-// ── профили BoL (Linux) ──
 
 fn profile_name(instance_name: &str) -> String {
     format!("nivora-{}", &sha256_hex(instance_name.as_bytes())[..16])
@@ -1258,7 +1197,7 @@ fn profile_settings(profile: &Path) -> Value {
     read_bounded_json(&profile.join("settings.json"), 1024 * 1024).unwrap_or(Value::Null)
 }
 
-/// Выбранная версия игры из настроек профиля.
+/// выбранная версия игры из настроек профиля.
 fn selected_version(profile: &Path) -> (String, String) {
     let settings = profile_settings(profile);
     if !settings.is_object() {
@@ -1279,7 +1218,7 @@ fn selected_version(profile: &Path) -> (String, String) {
 }
 
 fn engine_ready(profile: &Path) -> bool {
-    // BoL пишет выбранный движок (GDK-Proton/WineGDK) в settings.json;
+    // boL пишет выбранный движок (GDK-Proton/WineGDK) в settings.json;
     // «play» без него умирал с «GDK-Proton missing».
     let proton = profile_settings(profile)
         .get("proton")
@@ -1309,8 +1248,6 @@ fn store_status(profile: &Path) -> (bool, String) {
     (signed_in, gamertag)
 }
 
-// ───────────────────── Официальный Bedrock Windows ─────────────────────────
-
 fn win_local_appdata() -> Option<PathBuf> {
     let value = std::env::var_os("LOCALAPPDATA")?;
     let path = PathBuf::from(value);
@@ -1325,7 +1262,7 @@ fn win_package_dir(channel: &WindowsChannel) -> Option<PathBuf> {
     win_local_appdata().map(|base| base.join("Packages").join(channel.package_family))
 }
 
-/// Каталог контента официальной игры: …\Packages\<family>\LocalState\games\com.mojang
+/// каталог контента официальной игры: …\Packages\<family>\LocalState\games\com.mojang
 fn win_content_root(edition: &str) -> Result<PathBuf, String> {
     let channel = win_channel(edition);
     let package = win_package_dir(channel)
@@ -1339,9 +1276,6 @@ struct WinPackageState {
     version: String,
 }
 
-/// Кэш состояния пакетов Store: статус среды, список версий и установка
-/// спрашивают одно и то же, а PowerShell на машинах с антивирусом стартует
-/// секунды — раньше каждый вызов запускал свой процесс на каждый выпуск.
 struct WinPackageCache {
     at: Instant,
     release: WinPackageState,
@@ -1351,8 +1285,6 @@ struct WinPackageCache {
 static WIN_PACKAGE_CACHE: LazyLock<Mutex<Option<WinPackageCache>>> =
     LazyLock::new(|| Mutex::new(None));
 
-/// Сброс кэша состояния пакетов: winget или страница Store могли только что
-/// установить игру — свежая проверка обязана увидеть новый каталог.
 fn invalidate_windows_package_cache() {
     *WIN_PACKAGE_CACHE.lock().unwrap() = None;
 }
@@ -1366,10 +1298,6 @@ fn windows_package_state(edition: &str) -> WinPackageState {
     }
 }
 
-/// Оба выпуска одним процессом PowerShell и общим кэшем на 30 секунд:
-/// заход на вкладку «Версия» раньше мог стоить 5–7 запусков PowerShell
-/// (до 20 секунд каждый на заблокированной системе) — интерфейс выглядел
-/// «зависшим», а список версий не загружался.
 fn windows_package_states() -> (WinPackageState, WinPackageState) {
     if let Some(cache) = WIN_PACKAGE_CACHE.lock().unwrap().as_ref() {
         if cache.at.elapsed() < Duration::from_secs(30) {
@@ -1385,10 +1313,6 @@ fn windows_package_states() -> (WinPackageState, WinPackageState) {
     pair
 }
 
-/// Наличие пакета — по каталогу данных (дёшево, без PowerShell); версия —
-/// одним процессом PowerShell на оба выпуска, и только когда хоть один
-/// каталог есть. PowerShell недоступен/заблокирован → версия пустая,
-/// интерфейс продолжает работать (Store-поток ставит «latest»).
 fn query_windows_package_states() -> (WinPackageState, WinPackageState) {
     let release = dir_based_state("release");
     let preview = dir_based_state("preview");
@@ -1403,7 +1327,7 @@ fn query_windows_package_states() -> (WinPackageState, WinPackageState) {
     let powershell = find_in_path("powershell.exe")
         .or_else(|| find_in_path("powershell"))
         .unwrap_or_else(|| PathBuf::from("powershell"));
-    let mut command = Command::new(powershell);
+    let mut command = super::platform::command(powershell);
     command.args(["-NoProfile", "-NonInteractive", "-Command", &script]);
     if let Some((_, output)) = run_timed(prepare_command(&mut command), Duration::from_secs(8)) {
         let sections: Vec<&str> = output.split("@@NIVORA-CHANNEL@@").collect();
@@ -1444,11 +1368,11 @@ fn winget_executable() -> Option<PathBuf> {
         .filter(|path| path.is_file())
 }
 
-/// Открыть официальную страницу продукта в Microsoft Store.
+/// открыть официальную страницу продукта в Microsoft Store.
 fn open_store_product(edition: &str) -> bool {
     let channel = win_channel(edition);
     let uri = format!("ms-windowsstore://pdp/?ProductId={}", channel.product_id);
-    let mut command = Command::new("cmd.exe");
+    let mut command = super::platform::command("cmd.exe");
     command.args(["/C", "start", "", &uri]);
     prepare_command(&mut command)
         .stdin(Stdio::null())
@@ -1459,10 +1383,10 @@ fn open_store_product(edition: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Запуск официальной игры по протоколу (minecraft:// / minecraft-preview://).
+/// запуск официальной игры по протоколу (minecraft:// / minecraft-preview://).
 fn launch_official(edition: &str) -> Result<(), String> {
     let channel = win_channel(edition);
-    let mut command = Command::new("cmd.exe");
+    let mut command = super::platform::command("cmd.exe");
     command.args(["/C", "start", "", channel.protocol]);
     let started = prepare_command(&mut command)
         .stdin(Stdio::null())
@@ -1472,8 +1396,8 @@ fn launch_official(edition: &str) -> Result<(), String> {
     if started.map(|status| status.success()).unwrap_or(false) {
         return Ok(());
     }
-    // Запасной путь — AUMID через AppsFolder.
-    let mut fallback = Command::new("explorer.exe");
+    // запасной путь — AUMID через AppsFolder.
+    let mut fallback = super::platform::command("explorer.exe");
     fallback.arg(format!("shell:AppsFolder\\{}", channel.aumid));
     let fallback_ok = prepare_command(&mut fallback)
         .stdin(Stdio::null())
@@ -1493,7 +1417,7 @@ fn launch_official(edition: &str) -> Result<(), String> {
 
 /// PID игры по образу процесса (tasklist есть на любой Windows).
 fn windows_game_pids() -> Vec<u32> {
-    let mut command = Command::new("tasklist.exe");
+    let mut command = super::platform::command("tasklist.exe");
     command.args(["/FO", "CSV", "/NH"]);
     let Some((_, text)) = run_timed(prepare_command(&mut command), Duration::from_secs(15)) else {
         return Vec::new();
@@ -1519,7 +1443,7 @@ fn windows_kill_pid(pid: u32) -> bool {
     let Some(taskkill) = find_in_path("taskkill.exe").or_else(|| find_in_path("taskkill")) else {
         return false;
     };
-    Command::new(taskkill)
+    super::platform::command(taskkill)
         .args(["/PID", &pid.to_string(), "/T", "/F"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -1529,13 +1453,8 @@ fn windows_kill_pid(pid: u32) -> bool {
         .unwrap_or(false)
 }
 
-// ─────────────────────── Метаданные экземпляра Bedrock ─────────────────────
-
 fn read_instance_metadata(path: &Path) -> Value {
-    // Python-воркер исторически пишет .trial-launcher-instance.json
-    // (обновление профиля), Rust-движок — .nivora-launcher-instance.json.
-    // Читаем оба, предпочитаем «свой»: в нём актуальный выбор канала
-    // официальной версии (bedrock_edition/bedrock_version).
+    // python-воркер исторически пишет .trial-launcher-instance.json
     for name in [
         INSTANCE_METADATA_FILE,
         ".trial-launcher-instance.json",
@@ -1553,7 +1472,7 @@ fn write_instance_metadata(path: &Path, metadata: &Value) -> Result<(), String> 
     write_private_json(&path.join(INSTANCE_METADATA_FILE), metadata)
 }
 
-/// Выбранный канал официальной версии хранится в метаданных экземпляра.
+/// выбранный канал официальной версии хранится в метаданных экземпляра.
 fn windows_selected(instance_path: &Path) -> (String, String) {
     let metadata = read_instance_metadata(instance_path);
     let edition = metadata
@@ -1580,10 +1499,6 @@ fn persist_windows_selection(instance_path: &Path, edition: &str, version: &str)
     write_instance_metadata(instance_path, &metadata)
 }
 
-// ──────────────────────── Живое состояние и логи ───────────────────────────
-
-/// Python-воркер читает .trial-launcher-live.json, Rust-движок —
-/// .nivora-launcher-live.json; пишем оба, чтобы «запущено» видели все.
 fn write_live_state(
     instance_path: &Path,
     running: bool,
@@ -1611,8 +1526,6 @@ fn write_live_state(
     }
 }
 
-/// Идентификатор журнала, совместимый с парсером Python (instance_files.py):
-/// <имя>-<sha24>-bedrock-<мс>-<hex10>.log
 fn new_log_id(instance_name: &str) -> String {
     let component: String = instance_name
         .chars()
@@ -1656,8 +1569,6 @@ impl SessionLog {
     }
 }
 
-// ───────────────────────────── Парсинг версий ──────────────────────────────
-
 fn parse_game_versions(lines: &[String]) -> Vec<Value> {
     let mut edition = String::new();
     let mut versions: Vec<Value> = Vec::new();
@@ -1685,8 +1596,6 @@ fn parse_game_versions(lines: &[String]) -> Vec<Value> {
     }
     versions
 }
-
-// ───────────────────────── Валидация архивов ───────────────────────────────
 
 fn validate_content_archive(content: &[u8]) -> Result<zip::ZipArchive<std::io::Cursor<&[u8]>>, String> {
     if content.is_empty() || content.len() > MAX_CONTENT_UPLOAD_BYTES {
@@ -1723,8 +1632,6 @@ fn validate_content_archive(content: &[u8]) -> Result<zip::ZipArchive<std::io::C
     }
     Ok(archive)
 }
-
-// ─────────────────────────── Операции движка ───────────────────────────────
 
 pub fn runtime_status(request: &Value) -> Result<Value, String> {
     let name = request_field(request, "name").unwrap_or_default().to_owned();
@@ -1901,7 +1808,7 @@ fn linux_versions(name: &str, refresh: bool) -> Result<Value, String> {
     if refresh {
         argv.push("--refresh".to_owned());
     }
-    // Свежий индекс версий тоже скачивается молча: stall-таймаут с watchdog'ом
+    // свежий индекс версий тоже скачивается молча: stall-таймаут с watchdog'ом
     // не убивает медленную сеть (файлы индекса растут на диске).
     let mut watchdog = DownloadWatchdog::new(&profile);
     let (code, lines) =
@@ -1912,7 +1819,7 @@ fn linux_versions(name: &str, refresh: bool) -> Result<Value, String> {
         return Err(format!("Не удалось загрузить список версий Minecraft: {detail}"));
     }
     let mut parsed = parse_game_versions(&lines);
-    // Выбранная в профиле версия тоже установленная — иначе после успешного
+    // выбранная в профиле версия тоже установленная — иначе после успешного
     // setup список показывал «Будет загружена».
     if !selected.0.is_empty() && !selected.1.is_empty() {
         for item in parsed.iter_mut() {
@@ -1937,7 +1844,7 @@ fn windows_versions(name: &str) -> Result<Value, String> {
         let entry = if state.installed && !state.version.is_empty() {
             json!({ "edition": edition, "version": state.version, "installed": true })
         } else {
-            // Официальный Store всегда ставит последний выпуск; конкретную
+            // официальный Store всегда ставит последний выпуск; конкретную
             // версию для Windows выбрать нельзя — ставим «latest».
             json!({ "edition": edition, "version": "latest", "installed": false })
         };
@@ -1956,8 +1863,6 @@ fn windows_versions(name: &str) -> Result<Value, String> {
         "current_version": current_version,
     }))
 }
-
-// ── установка версии ──
 
 pub fn setup_version(request: &Value) -> Result<Value, String> {
     let name = request_field(request, "name")?.to_owned();
@@ -2028,13 +1933,13 @@ fn linux_setup(
         version.to_owned(),
         "--beta".to_owned(),
     ];
-    // Игра (2+ ГиБ) скачивается почти без вывода в stdout: без watchdog'а
+    // игра (2+ ГиБ) скачивается почти без вывода в stdout: без watchdog'а
     // stall-таймаут убивал живую загрузку, а BoL каждый ретрай начинал с нуля.
     let mut watchdog = DownloadWatchdog::new(&profile);
     let (code, logs) =
         bol_run(&argv, &profile, "setup", cancellation, Some(&mut logger), Duration::from_secs(600), 500, false, None, None, Some(&mut watchdog))?;
     let (selected_edition, selected_version) = selected_version(&profile);
-    // BoL ПАДАЕТ С КОДОМ 0: источник правды — строки «error» и settings.json.
+    // boL ПАДАЕТ С КОДОМ 0: источник правды — строки «error» и settings.json.
     let error_lines: Vec<String> = logs
         .iter()
         .filter(|line| bol_error_line_re().is_match(line.trim()))
@@ -2102,11 +2007,9 @@ fn windows_setup(
     let mut state = windows_package_state(edition);
     if !state.installed {
         // 1) Автоматическая попытка winget: срабатывает не для всех учётных
-        //    записей — платные/Xbox-продукты Store лицензирует только сам
-        //    Store под аккаунтом пользователя.
         if let Some(winget) = winget_executable() {
             job_log(job, &format!("Пробую установку через winget ({}):", channel.product_id));
-            let mut command = Command::new(&winget);
+            let mut command = super::platform::command(&winget);
             command
                 .args([
                     "install",
@@ -2128,8 +2031,8 @@ fn windows_setup(
                 &mut command,
                 cancellation,
                 &mut move |line: &str| job_log(&log_job, line),
-                // Игра весит гигабайты: медленная сеть легально качается часами.
-                // Потолок — защита от вечного winget, тишина 10 мин — от тупика.
+                // игра весит гигабайты: медленная сеть легально качается часами.
+                // потолок — защита от вечного winget, тишина 10 мин — от тупика.
                 Duration::from_secs(3 * 60 * 60),
                 Duration::from_secs(10 * 60),
             );
@@ -2192,10 +2095,6 @@ fn windows_setup(
     }))
 }
 
-/// Запуск процесса с потоковым логом в задание, жёстким потолком времени и
-/// детекцией зависания: медленное скачивание winget может идти часами
-/// (прогресс перерисовывается `\r` и теперь считается выводом), а вот полная
-/// тишина дольше stall-таймаута — признак тупика.
 #[allow(clippy::too_many_arguments)]
 fn run_job_process(
     command: &mut Command,
@@ -2262,8 +2161,6 @@ pub fn setup_cancel(request: &Value) -> Result<Value, String> {
     Ok(json!({ "stopped": cancel_job("setup", request_field(request, "name")?) }))
 }
 
-// ── вход в Microsoft Store ──
-
 pub fn store_login(request: &Value) -> Result<Value, String> {
     let name = request_field(request, "name")?.to_owned();
     let store = instance_store()?;
@@ -2282,7 +2179,7 @@ pub fn store_login(request: &Value) -> Result<Value, String> {
             })
         }
         BedrockPlatform::WindowsOfficial => spawn_job("login", &name, move |job, _cancellation| {
-            // Официальная версия подписывается в самой игре (Xbox Live);
+            // официальная версия подписывается в самой игре (Xbox Live);
             // отдельного входа через лаунчер не требуется.
             job_log(&job, "Официальный Minecraft for Windows выполняет вход внутри игры:");
             job_log(&job, "запустите игру и войдите в аккаунт Microsoft/Xbox — Nivora ничего не хранит.");
@@ -2347,11 +2244,6 @@ pub fn store_login_status(request: &Value) -> Result<Value, String> {
     Ok(job_snapshot("login", request_field(request, "name")?))
 }
 
-/// Подключён ли аккаунт Microsoft Store к профилю BedrockOnLinux.
-/// Зеркалит xodus.signed_in(): лицензия xodus живёт в RON-ключнице
-/// <профиль>/xodus-home/.xodus-keyring.ron, вход выполнен, когда там есть
-/// и «user-tokens», и «user-DA» (одни девайс-записи — это ещё не вход).
-/// Файл маленький, но читаем с потолком — как все файлы состояния.
 fn bol_profile_signed_in(profile: &Path) -> bool {
     keyring_file_signed_in(&profile.join("xodus-home").join(".xodus-keyring.ron"))
 }
@@ -2367,21 +2259,6 @@ fn keyring_file_signed_in(keyring: &Path) -> bool {
     contains(b"\"user-tokens\"") && contains(b"\"user-DA\"")
 }
 
-/// Общая ключница xodus для ВСЕХ профилей Bedrock.
-///
-/// Лицензия xodus хранится в <профиль>/xodus-home/.xodus-keyring.ron, а
-/// профиль у каждого экземпляра свой — раньше вход приходилось выполнять
-/// в каждом профиле отдельно, и каждый вход регистрировал Microsoft Store
-/// очередное устройство (лимит аккаунта ограничен, дальше «Device group is
-/// full»); единственный вход мог «застрять» в сломанном экземпляре. Теперь
-/// все профили ссылаются на один общий <root>/xodus-home: вход выполняется
-/// один раз и виден каждому экземпляру.
-///
-/// Первый запуск поднимает в общий дом найденный вход — в том числе из
-/// профиля, чей экземпляр уже не используется: после этого такой экземпляр
-/// можно удалять, лицензия остаётся в общем доме. Локальные копии не
-/// удаляются, а переименовываются в xodus-home.local (rmtree профиля
-/// симлинки не следует — общий дом переживёт удаление любого профиля).
 fn share_xodus_keyring(paths: &ProfilePaths) {
     let shared = paths.root.join("xodus-home");
     if xodus_is_symlink(&shared) || fs::create_dir_all(&shared).is_err() {
@@ -2407,10 +2284,7 @@ fn share_xodus_keyring(paths: &ProfilePaths) {
             continue;
         }
         let local_keyring = local.join(".xodus-keyring.ron");
-        // Поднимаем первый найденный вход в общий дом. Если нашлось
-        // несколько (разные аккаунты в разных профилях) — побеждает
-        // первый, остальные остаются в xodus-home.local для ручного
-        // восстановления.
+        // поднимаем первый найденный вход в общий дом. Если нашлось
         if !shared_signed && keyring_file_signed_in(&local_keyring) {
             if fs::rename(&local_keyring, &shared_keyring).is_ok() {
                 shared_signed = true;
@@ -2438,7 +2312,7 @@ fn link_shared_xodus(shared: &Path, local: &Path) -> std::io::Result<()> {
     }
 }
 
-/// Символическая ссылка (Unix) или точка повторной обработки (Windows).
+/// символическая ссылка (Unix) или точка повторной обработки (Windows).
 fn xodus_is_symlink(path: &Path) -> bool {
     #[cfg(unix)]
     {
@@ -2450,13 +2324,8 @@ fn xodus_is_symlink(path: &Path) -> bool {
     }
 }
 
-/// Сообщение-действие: игра зашифрована лицензией аккаунта-владельца,
-/// без повторной привязки xodus не стартует (NotSignedIn в BoL).
 const BEDROCK_LOGIN_REQUIRED_MESSAGE: &str = "Для запуска Bedrock нужен подключённый аккаунт Microsoft, которому принадлежит игра. Нажмите «Подключить аккаунт» в карточке «Лицензия Microsoft Store» на вкладке «Обзор» и запустите игру снова.";
 
-/// Текущее состояние привязки аккаунта Microsoft для экземпляра Bedrock.
-/// Интерфейс показывает его в карточке лицензии всегда, а не только после
-/// попытки входа: без привязки игра не стартует вовсе.
 pub fn account_status(request: &Value) -> Result<Value, String> {
     let name = request_field(request, "name")?;
     match bedrock_platform() {
@@ -2471,7 +2340,7 @@ pub fn account_status(request: &Value) -> Result<Value, String> {
             }))
         }
         BedrockPlatform::WindowsOfficial => Ok(json!({
-            // Официальная версия подписывается в самой игре (Xbox Live).
+            // официальная версия подписывается в самой игре (Xbox Live).
             "signed_in": true,
             "platform": "windows-official",
         })),
@@ -2485,8 +2354,6 @@ pub fn store_login_cancel(request: &Value) -> Result<Value, String> {
     let stopped_process = stop_registered_process(&format!("bedrock-login:{name}"));
     Ok(json!({ "stopped": stopped_job || stopped_process }))
 }
-
-// ── создание экземпляра ──
 
 pub fn create_instance(request: &Value) -> Result<Value, String> {
     let raw_name = request_field(request, "name")?;
@@ -2506,7 +2373,7 @@ pub fn create_instance(request: &Value) -> Result<Value, String> {
         BedrockPlatform::LinuxBol => {
             let paths = profile_paths(&ctx)?;
             bol_require_runtime(&paths.root)?;
-            // Новый экземпляр сразу получает доступ к общему входу Microsoft.
+            // новый экземпляр сразу получает доступ к общему входу Microsoft.
             share_xodus_keyring(&paths);
             let profile = profile_name(&instance_name);
             let profile_path = paths.profiles_root.join(&profile);
@@ -2553,7 +2420,7 @@ pub fn create_instance(request: &Value) -> Result<Value, String> {
             }
         }
         BedrockPlatform::WindowsOfficial => {
-            // Официальной версии профиль среды не нужен — только экземпляр.
+            // официальной версии профиль среды не нужен — только экземпляр.
             let metadata = json!({
                 "kind": "client",
                 "game_edition": "bedrock",
@@ -2577,20 +2444,18 @@ pub fn create_instance(request: &Value) -> Result<Value, String> {
     }))
 }
 
-/// Путь профиля BoL для экземпляра (только Linux).
+/// путь профиля BoL для экземпляра (только Linux).
 fn linux_profile_path(ctx: &Ctx, info: &InstanceInfo) -> Result<PathBuf, String> {
     let expected = profile_name(&info.name);
     if info.bedrock_profile != expected {
         return Err("Профиль Bedrock не совпадает с экземпляром".to_owned());
     }
     let paths = profile_paths(ctx)?;
-    // Один общий вход Microsoft для всех экземпляров: консолидация
+    // один общий вход Microsoft для всех экземпляров: консолидация
     // идемпотентна и дёшева (обход профилей), поэтому — на каждом resolve.
     share_xodus_keyring(&paths);
     validate_profile_path(&paths, &expected)
 }
-
-// ── контент ──
 
 pub fn content_list(request: &Value) -> Result<Value, String> {
     let name = request_field(request, "name")?;
@@ -2611,7 +2476,7 @@ fn scope_tail(scope: &str) -> String {
     }
 }
 
-/// Общий обход каталогов контента; roots — пары (scope, games/com.mojang).
+/// общий обход каталогов контента; roots — пары (scope, games/com.mojang).
 fn scan_content(roots: &[(String, PathBuf)]) -> Result<Vec<Value>, String> {
     let mut values: Vec<Value> = Vec::new();
     for (scope, content_root) in roots {
@@ -2705,10 +2570,6 @@ fn windows_content_list(name: &str) -> Result<Value, String> {
     Ok(json!({ "items": scan_content(&[("LocalState".to_owned(), content_root)])? }))
 }
 
-/// Скриншоты Bedrock: игра кладёт снимки (камера/Win+G) в com.mojang/
-/// minecraftScreenshots. Возвращаем записи с путём ОТНОСИТЕЛЬНО корня
-/// файловых операций экземпляра (Linux — профиль BoL, Windows — com.mojang),
-/// чтобы фронтенд читал их штатным instance_file_read(base64).
 pub fn screenshots_list(request: &Value) -> Result<Value, String> {
     const MAX_SCREENSHOTS: usize = 500;
     let name = request_field(request, "name")?.to_owned();
@@ -2796,7 +2657,7 @@ pub fn screenshots_list(request: &Value) -> Result<Value, String> {
     Ok(json!({ "items": items }))
 }
 
-/// Служебные и скрытые имена в каталоге скриншотов не показываем.
+/// служебные и скрытые имена в каталоге скриншотов не показываем.
 fn reserved_screenshot_name(name: &str) -> bool {
     name.starts_with('.') || name == "Thumbs.db" || name.is_empty()
 }
@@ -2901,8 +2762,6 @@ fn linux_content_import(name: &str, file_name: &str, content: Vec<u8>) -> Result
     }))
 }
 
-/// Классификация архива по манифесту: resource/behavior/skin/world.
-/// Возвращает пары (целевой каталог, корень внутри архива).
 fn classify_archive(archive: &mut zip::ZipArchive<std::io::Cursor<&[u8]>>) -> Result<Vec<(String, String)>, String> {
     let names: Vec<String> = (0..archive.len())
         .filter_map(|index| archive.by_index(index).ok().map(|entry| entry.name().replace('\\', "/")))
@@ -2977,7 +2836,7 @@ fn classify_single_root(
         roots.push((target.to_owned(), prefix.to_owned()));
         return Ok(());
     }
-    // Мир без манифеста: levelname.txt / level.dat.
+    // мир без манифеста: levelname.txt / level.dat.
     let names: Vec<String> = (0..archive.len())
         .filter_map(|index| archive.by_index(index).ok().map(|entry| entry.name().replace('\\', "/")))
         .collect();
@@ -3017,7 +2876,7 @@ fn windows_content_import(name: &str, file_name: &str, content: Vec<u8>) -> Resu
     let (edition, _) = windows_selected(&info.path);
     let edition = if edition.is_empty() { "release" } else { edition.as_str() };
     let content_root = win_content_root(edition)?;
-    // Быстрая классификация по расширению, точная — по манифесту.
+    // быстрая классификация по расширению, точная — по манифесту.
     let targets: Vec<(String, String)> = match suffix.as_str() {
         ".mcworld" | ".mctemplate" => vec![("minecraftWorlds".to_owned(), String::new())],
         ".mcskin" => vec![("skin_packs".to_owned(), String::new())],
@@ -3154,8 +3013,6 @@ fn windows_content_remove(name: &str, directory_name: &str, item_name: &str) -> 
     Ok(json!({ "items": windows_content_list(name)?.get("items").cloned().unwrap_or_default() }))
 }
 
-// ── остановка ──
-
 pub fn stop(request: &Value) -> Result<Value, String> {
     let name = request_field(request, "name")?.to_owned();
     let store = instance_store()?;
@@ -3170,10 +3027,6 @@ pub fn stop(request: &Value) -> Result<Value, String> {
     }
 }
 
-// ── запуск игры ──
-
-/// Быстрая проверка (без побочных эффектов): запускает ли этот запрос
-/// Bedrock-сессию, которую ведёт Rust-движок.
 pub fn should_intercept_launch(request: &Value) -> bool {
     let operation = request.get("operation").and_then(Value::as_str).unwrap_or_default();
     if !matches!(operation, "launch" | "launch_instance") {
@@ -3193,8 +3046,6 @@ pub fn should_intercept_launch(request: &Value) -> bool {
     info.kind == "client" && info.game_edition == "bedrock"
 }
 
-/// Провести Bedrock-сессию до выхода игры. Вызывается только после
-/// validate_backend_request: allowlist обязан отсеять запрос ДО запуска.
 pub fn launch_intercepted(request: &Value) -> Result<Value, String> {
     let operation = request.get("operation").and_then(Value::as_str).unwrap_or("launch");
     let name = request
@@ -3229,17 +3080,14 @@ fn linux_launch(name: &str, operation: &str) -> Result<Value, String> {
     }
     let profile = linux_profile_path(&ctx, &info)?;
     bol_require_runtime(&profile)?;
-    // Лицензия xodus обязательна на каждом запуске (игра зашифрована под
-    // аккаунт-владелец). Проверяем ДО старта: раньше «play» поднимал WineGDK,
-    // печатал портянку на английском и умирал — теперь сразу понятное
-    // действие, а не лог с рекомендацией «bedrock-on-linux store-login».
+    // лицензия xodus обязательна на каждом запуске (игра зашифрована под
     if !bol_profile_signed_in(&profile) {
         return Err(BEDROCK_LOGIN_REQUIRED_MESSAGE.to_owned());
     }
-    // Блокировка экземпляра живёт всю игровую сессию — как в Python-версии.
+    // блокировка экземпляра живёт всю игровую сессию — как в Python-версии.
     let mut session_lock = InstanceProcessLock::new(&ctx.data_home, &info.name);
     session_lock.acquire()?;
-    // Если установке версии не хватило сети/времени на движок, «play» умирал
+    // если установке версии не хватило сети/времени на движок, «play» умирал
     // с «GDK-Proton missing» — доустанавливаем сами (setup идемпотентен).
     if !engine_ready(&profile) {
         let (edition, version) = selected_version(&profile);
@@ -3320,9 +3168,7 @@ fn linux_launch(name: &str, operation: &str) -> Result<Value, String> {
     };
     write_live_state(&info.path, false, 0, Some(exit_code as i64), started_at, &log_id);
     let _ = store.add_played_seconds(&info.path, start.elapsed().as_secs() as i64);
-    // BoL умеет падать с кодом 0/1 без старта игры, когда привязка аккаунта
-    // потерялась между проверкой выше и запуском: источник правды — строки
-    // NotSignedIn в логе сессии. Возвращаем действие, а не «завершился с кодом».
+    // boL умеет падать с кодом 0/1 без старта игры, когда привязка аккаунта
     if exit_code != 0 {
         let joined = logs.join("\n").to_lowercase();
         let not_signed_in = joined.contains("cannot start until that account is linked again")
@@ -3363,7 +3209,7 @@ fn windows_launch(name: &str, operation: &str) -> Result<Value, String> {
         "Запущен официальный Minecraft Bedrock ({edition}) по протоколу {}.",
         win_channel(&edition).protocol
     ));
-    // Ждём появление процесса игры, затем сопровождаем сессию до выхода.
+    // ждём появление процесса игры, затем сопровождаем сессию до выхода.
     let mut game_pid: u32 = 0;
     let discover_deadline = Instant::now() + Duration::from_secs(60);
     while Instant::now() < discover_deadline {
@@ -3380,7 +3226,7 @@ fn windows_launch(name: &str, operation: &str) -> Result<Value, String> {
             std::thread::sleep(Duration::from_millis(1000));
         }
     } else {
-        // Процесс не найден (tasklist недоступен) — не блокируем сессию навсегда.
+        // процесс не найден (tasklist недоступен) — не блокируем сессию навсегда.
         std::thread::sleep(Duration::from_secs(5));
     }
     write_live_state(&info.path, false, game_pid, Some(0), started_at, &log_id);
@@ -3397,8 +3243,6 @@ fn windows_launch(name: &str, operation: &str) -> Result<Value, String> {
     }))
 }
 
-// ──────────────────────────────── Тесты ────────────────────────────────────
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3413,7 +3257,7 @@ mod tests {
 
     #[test]
     fn bol_keyring_markers_decide_signed_in() {
-        // Полная ключница: вход выполнен
+        // полная ключница: вход выполнен
         let profile = temp_profile("full");
         fs::write(
             profile.join("xodus-home").join(".xodus-keyring.ron"),
@@ -3423,7 +3267,7 @@ mod tests {
         assert!(bol_profile_signed_in(&profile), "user-tokens + user-DA = вход выполнен");
         let _ = fs::remove_dir_all(&profile);
 
-        // Только девайс-записи: xodus провизию устройства делает сам, это НЕ вход
+        // только девайс-записи: xodus провизию устройства делает сам, это НЕ вход
         let profile = temp_profile("device-only");
         fs::write(
             profile.join("xodus-home").join(".xodus-keyring.ron"),
@@ -3432,7 +3276,7 @@ mod tests {
         .unwrap();
         assert!(!bol_profile_signed_in(&profile), "девайс-запись без пользовательских токенов — входа нет");
 
-        // Нет файла вовсе
+        // нет файла вовсе
         let profile = temp_profile("missing");
         assert!(!bol_profile_signed_in(&profile));
         let _ = fs::remove_dir_all(&profile);
@@ -3451,7 +3295,7 @@ mod tests {
             fs::create_dir_all(dir.join("xodus-home")).unwrap();
             fs::write(dir.join("profile.json"), "{}").unwrap();
         }
-        // Единственный вход живёт в профиле A (экземпляр которого «сломан»);
+        // единственный вход живёт в профиле A (экземпляр которого «сломан»);
         // в B — только девайс-записи; в C — пусто.
         fs::write(
             prof_a.join("xodus-home").join(".xodus-keyring.ron"),
@@ -3473,11 +3317,11 @@ mod tests {
             assert!(dir.join("xodus-home").is_symlink(), "профиль {label} ссылается на общий дом");
             assert!(bol_profile_signed_in(dir), "вход виден из профиля {label}");
         }
-        // Локальные копии не удалены, а retiring-переименованы
+        // локальные копии не удалены, а retiring-переименованы
         assert!(prof_a.join("xodus-home.local").is_dir() || prof_b.join("xodus-home.local").is_dir());
         assert!(!prof_a.join("xodus-home.local").join(".xodus-keyring.ron").exists(), "ключница из A переехала, копии не осталось");
 
-        // Повторный запуск — no-op: ссылки на месте, ничего не сломано
+        // повторный запуск — no-op: ссылки на месте, ничего не сломано
         share_xodus_keyring(&paths);
         assert!(shared_keyring.is_file());
         assert!(prof_b.join("xodus-home").is_symlink());
@@ -3567,7 +3411,7 @@ mod tests {
 
     #[test]
     fn log_ids_match_python_log_parser_contract() {
-        // Python: [A-Za-z0-9._-]{1,240}\.log, хвост «-bedrock-…» после
+        // python: [A-Za-z0-9._-]{1,240}\.log, хвост «-bedrock-…» после
         // <имя>-<sha24>-, и версия в хвосте [A-Za-z0-9._-]+.
         let log_id = new_log_id("bedrock-one");
         assert!(log_id.ends_with(".log"), "{log_id}");
@@ -3780,9 +3624,7 @@ mod tests {
     }
 
     #[test]
-    /// Живая проверка встроенной среды: настоящий pyz + python3 из репозитория.
-    /// Игнорируется по умолчанию (CI не зависит от дерева репозитория):
-    ///   cargo test --locked bol_probe_real_bundle -- --ignored --nocapture
+    /// живая проверка встроенной среды: настоящий pyz + python3 из репозитория.
     #[test]
     #[ignore = "нужен настоящий vendor/bedrock-on-linux-2.2.9.pyz из дерева репозитория"]
     fn bol_probe_real_bundle() {
@@ -3805,8 +3647,6 @@ mod tests {
         assert_eq!(probe.version, BEDROCK_ON_LINUX_BUNDLED_VERSION);
     }
 
-    /// Реальная проверка подмены notify-send: PATH из bol_environment указывает
-    /// на заглушку внутри профиля, а не на системный notify-send.
     #[cfg(target_os = "linux")]
     #[test]
     fn bol_environment_prepends_notify_send_stub() {
@@ -3834,10 +3674,7 @@ mod tests {
 
     #[test]
     fn launch_intercept_recognizes_real_bedrock_instance_directory() {
-        // Полный путь пользователя: settings.json → game_dir → каталог
-        // экземпляра → metadata → перехват. Регрессионный тест на случай
-        // рассинхронизации классификации Rust/Python: запуск Bedrock,
-        // провалившийся в Python-воркер, показывал заглушку вместо игры.
+        // полный путь пользователя: settings.json → game_dir → каталог
         let root = std::env::temp_dir().join(format!("nivora-intercept-{}", random_hex(6)));
         let config = root.join("config");
         let data = root.join("data");
@@ -3906,11 +3743,9 @@ mod tests {
         assert_eq!(request_field(&json!({}), "display_name").unwrap(), "");
     }
 
-    // ── молчаливые скачивания: читатель строк и watchdog ──
-
     #[test]
     fn clean_process_line_strips_ansi_and_nul_noise() {
-        // Прогресс-бары перерисовываются CSI-курсорами и цветами
+        // прогресс-бары перерисовываются CSI-курсорами и цветами
         assert_eq!(
             clean_process_line(b"\x1b[2K\x1b[1ADownloading 42%"),
             Some("Downloading 42%".to_owned())
@@ -3919,7 +3754,7 @@ mod tests {
         assert_eq!(clean_process_line(b"\0\0ok  \0"), Some("ok".to_owned()));
         // OSC-последовательность (заголовок окна) вырезается целиком
         assert_eq!(clean_process_line(b"\x1b]0;title\x07line"), Some("line".to_owned()));
-        // Только шум — не строка вовсе
+        // только шум — не строка вовсе
         assert_eq!(clean_process_line(b"\x1b[2K\r\r"), None);
         assert_eq!(clean_process_line(b"   "), None);
     }
@@ -3949,10 +3784,10 @@ mod tests {
         fs::write(&package, vec![0u8; 1024]).unwrap();
         let mut watchdog = DownloadWatchdog::with_interval(&home, Duration::ZERO);
 
-        // Первый обход — только снимок, вердикта ещё нет
+        // первый обход — только снимок, вердикта ещё нет
         assert_eq!(watchdog.check(), WatchdogVerdict::Pending);
 
-        // Дерево выросло — скачивание живо, хотя stdout молчит
+        // дерево выросло — скачивание живо, хотя stdout молчит
         let grown = home.join("package.part");
         fs::write(&grown, vec![0u8; 4096]).unwrap();
         match watchdog.check() {
@@ -3960,10 +3795,10 @@ mod tests {
             other => panic!("рост не замечен: {other:?}"),
         }
 
-        // Ничего не менялось — это настоящее зависание
+        // ничего не менялось — это настоящее зависание
         assert_eq!(watchdog.check(), WatchdogVerdict::Silent);
 
-        // Новый файл тоже признак работы
+        // новый файл тоже признак работы
         fs::write(home.join("second.part"), vec![0u8; 10]).unwrap();
         assert!(matches!(watchdog.check(), WatchdogVerdict::Active(_)));
 
@@ -3973,9 +3808,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn run_job_process_kills_stalled_installer() {
-        // Установщик, замолчавший навсегда: stall-детекция обязана остановить его
+        // установщик, замолчавший навсегда: stall-детекция обязана остановить его
         // быстрее жёсткого потолка и вернуть внятную ошибку.
-        let mut command = Command::new("sh");
+        let mut command = std::process::Command::new("sh");
         command.args(["-c", "echo start; sleep 60"]).stdout(Stdio::piped()).stderr(Stdio::piped());
         let started = Instant::now();
         let mut silent = |_line: &str| {};
@@ -3994,7 +3829,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn run_job_process_reports_zero_exit_for_chatty_process() {
-        let mut command = Command::new("sh");
+        let mut command = std::process::Command::new("sh");
         command.args(["-c", "echo line-one; echo line-two"]).stdout(Stdio::piped()).stderr(Stdio::piped());
         let mut seen: Vec<String> = Vec::new();
         let mut logger = |line: &str| seen.push(line.to_owned());

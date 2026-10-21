@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { pickFile, pickFiles } from '../services/fileBrowser'
 import CustomSelect from './CustomSelect.vue'
 import Icon from './Icon.vue'
 import { bridge } from '../services/bridge'
@@ -32,6 +33,7 @@ const workspaceTabs: Array<{ id: WorkspaceTab; label: string; icon: string }> = 
   { id: 'snapshots', label: 'Снапшоты', icon: 'archive' },
   { id: 'files', label: 'Файлы', icon: 'folder' },
 ]
+const visibleWorkspaceTabs = computed(() => workspaceTabs)
 const tab = ref<WorkspaceTab>('overview')
 
 function selectTab(value: WorkspaceTab) {
@@ -81,8 +83,6 @@ const loginPending = ref(false)
 const loginCancelBusy = ref(false)
 const loginCancelRequested = ref(false)
 const notice = ref('')
-const fileInput = ref<HTMLInputElement | null>(null)
-const workspaceFileInput = ref<HTMLInputElement | null>(null)
 const visibleItems = computed(() => items.value.filter((item) => item.category === activeCategory.value))
 const categoryCount = (category: BedrockCategory) => items.value.filter((item) => item.category === category).length
 const editionOptions: SelectOption[] = [
@@ -122,8 +122,6 @@ async function ensureLoaded() {
   await refresh()
 }
 
-// Состояние привязки аккаунта Microsoft (лицензия xodus): без неё игра
-// не стартует вовсе, поэтому показываем его в карточке лицензии всегда.
 const accountStatus = ref<{ signed_in: boolean; platform: string } | null>(null)
 
 async function refreshAccountStatus() {
@@ -179,8 +177,6 @@ async function loadVersions(refreshIndex = false) {
   }
 }
 
-// Поллинг живёт отдельно от installVersion: экран можно покинуть и вернуться —
-// статус продолжает опрашиваться заново смонтированным компонентом.
 let setupWatcherDisposed = false
 
 async function watchSetupJob(edition: string, version: string, resumed = false) {
@@ -194,7 +190,7 @@ async function watchSetupJob(edition: string, version: string, resumed = false) 
       status = await bridge.bedrockSetupStatus(props.instance.name)
       pollFailures = 0
     } catch (error) {
-      // Разовый сбой опроса не должен бросать наблюдение: установка живёт
+      // разовый сбой опроса не должен бросать наблюдение: установка живёт
       // в бэкенде и продолжается без нас. Только серия неудач — повод сдаться.
       pollFailures += 1
       if (pollFailures < 5) continue
@@ -232,8 +228,6 @@ async function watchSetupJob(edition: string, version: string, resumed = false) 
   }
 }
 
-// Возврат на экран версии в разгар установки: раньше компонент заново
-// монтировался, никто не спрашивал статус джобы — экран выглядел пустым.
 async function resumeSetupJob() {
   try {
     const status = await bridge.bedrockSetupStatus(props.instance.name)
@@ -261,9 +255,7 @@ async function installVersion() {
   notice.value = `Подготавливаю Minecraft ${edition === 'preview' ? 'Preview ' : ''}${version}…`
   emit('activity', { title: 'Установка Bedrock', detail: notice.value })
   try {
-    // Установка идёт в фоновой нити бэкенда: раньше весь лаунчер на это
-    // время «ломался» (воркер один), а BedrockOnLinux падает с кодом 0
-    // даже после собственных ошибок — успех подтверждается профилем.
+    // установка идёт в фоновой нити бэкенда: раньше весь лаунчер на это
     await bridge.bedrockSetupVersion(props.instance.name, edition, version)
     await watchSetupJob(edition, version)
   } catch (error) {
@@ -286,7 +278,7 @@ function finishSetupResult(
     return
   }
   if (result.failed || !result.installed) {
-    // BedrockOnLinux может выйти с кодом 0 после собственной «error»:
+    // bedrockOnLinux может выйти с кодом 0 после собственной «error»:
     // показываем настоящую причину, а не молчаливое «ничего не скачалось»
     const hint = result.error_hint || lastLogLine || ''
     notice.value = `Версия не установлена.${hint ? ` Причина: ${hint}` : ''} Полный ход установки — ниже.`
@@ -446,23 +438,21 @@ async function deleteWorkspaceFile(file: InstanceFile) {
   }
 }
 
-async function uploadWorkspaceFiles(event: Event) {
-  const input = event.target as HTMLInputElement
-  const selected = Array.from(input.files || [])
-  input.value = ''
-  if (!selected.length) return
+async function selectWorkspaceUpload() {
+  const picked = await pickFiles({ title: 'Загрузка файлов' })
+  if (!picked?.length) return
   fileMutationBusy.value = true
   try {
-    for (const file of selected) {
+    for (const file of picked) {
       if (file.size > 32 * 1024 * 1024) {
-        emit('toast', `${file.name}: превышен лимит 32 MiB`)
+        emit('toast', `${file.fileName}: превышен лимит 32 MiB`)
         continue
       }
-      await bridge.instanceFileUpload(props.instance.name, joinFilePath(file.name), await fileToBase64(file))
+      await bridge.instanceFileUpload(props.instance.name, joinFilePath(file.fileName), file.data)
     }
     await loadWorkspaceFiles()
     await pollMetrics()
-    if (selected.some((file) => file.size <= 32 * 1024 * 1024)) emit('toast', 'Файлы загружены')
+    if (picked.some((file) => file.size <= 32 * 1024 * 1024)) emit('toast', 'Файлы загружены')
   } catch (error) {
     emit('toast', error instanceof Error ? error.message : String(error))
   } finally {
@@ -471,7 +461,7 @@ async function uploadWorkspaceFiles(event: Event) {
 }
 
 function chooseWorkspaceFiles() {
-  workspaceFileInput.value?.click()
+  void selectWorkspaceUpload()
 }
 
 async function connectMicrosoftStore() {
@@ -480,7 +470,7 @@ async function connectMicrosoftStore() {
   loginCancelRequested.value = false
   notice.value = 'Откроется отдельное окно Microsoft. Войдите в аккаунт, которому принадлежит Minecraft.'
   try {
-    // Вход идёт в фоновой нити: браузерная авторизация занимает минуты,
+    // вход идёт в фоновой нити: браузерная авторизация занимает минуты,
     // и раньше это время намертво блокировало весь лаунчер.
     await bridge.bedrockStoreLogin(props.instance.name)
     for (;;) {
@@ -550,25 +540,26 @@ async function cancelMicrosoftStoreLogin() {
 }
 
 function chooseContentFile() {
-  fileInput.value?.click()
+  void pickFile({
+    accept: '.mcpack,.mcaddon,.mcworld,.mctemplate,.mcskin',
+    title: 'Bedrock-контент',
+  }).then((file) => {
+    if (file) void importContent(file)
+  })
 }
 
-async function importContent(event: Event) {
-  const input = event.target as HTMLInputElement
-  const file = input.files?.[0]
-  input.value = ''
-  if (!file) return
+async function importContent(file: { fileName: string; data: string; size: number }) {
   if (file.size > 128 * 1024 * 1024) {
     emit('toast', 'Файл больше 128 MiB')
     return
   }
   actionBusy.value = true
-  notice.value = `Импортирую ${file.name}…`
+  notice.value = `Импортирую ${file.fileName}…`
   try {
-    const result = await bridge.bedrockContentImport(props.instance.name, file.name, await fileToBase64(file))
+    const result = await bridge.bedrockContentImport(props.instance.name, file.fileName, file.data)
     items.value = result.items
     await pollMetrics()
-    notice.value = `Импорт завершён: ${file.name}`
+    notice.value = `Импорт завершён: ${file.fileName}`
     emit('toast', 'Bedrock-контент импортирован')
     emit('changed')
   } catch (error) {
@@ -602,15 +593,6 @@ function formatSize(bytes: number) {
   if (!bytes) return 'Папка'
   if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KiB`
   return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`
-}
-
-async function fileToBase64(file: File) {
-  const bytes = new Uint8Array(await file.arrayBuffer())
-  const chunks: string[] = []
-  for (let offset = 0; offset < bytes.length; offset += 0x8000) {
-    chunks.push(String.fromCharCode(...bytes.subarray(offset, offset + 0x8000)))
-  }
-  return btoa(chunks.join(''))
 }
 
 watch(() => props.instance.name, () => void ensureLoaded())
@@ -795,7 +777,7 @@ onBeforeUnmount(() => {
   if (metricsTimer !== undefined) window.clearInterval(metricsTimer)
   stopConsolePolling()
 })
-// App вызывает после неудачной установки из диалога создания:
+// app вызывает после неудачной установки из диалога создания:
 // запоминаем выбранную версию и доустанавливаем её после входа
 function applyPendingVersion(edition: 'release' | 'preview', version: string) {
   if (!version) return
@@ -830,7 +812,7 @@ defineExpose({ ensureLoaded, applyPendingVersion, refreshAccountStatus })
     </div>
 
     <nav class="workspace-tabs workspace-tabs--flat" role="tablist" aria-label="Разделы экземпляра Bedrock">
-      <button v-for="item in workspaceTabs" :key="item.id" class="workspace-tab" :class="{ 'workspace-tab--active': tab === item.id }" type="button" role="tab" :aria-selected="tab === item.id" @click="selectTab(item.id)">
+      <button v-for="item in visibleWorkspaceTabs" :key="item.id" class="workspace-tab" :class="{ 'workspace-tab--active': tab === item.id }" type="button" role="tab" :aria-selected="tab === item.id" @click="selectTab(item.id)">
         <Icon :name="item.icon" :size="14" />{{ item.label }}
         <small v-if="item.id === 'content'">{{ items.length }}</small>
       </button>
@@ -948,7 +930,7 @@ defineExpose({ ensureLoaded, applyPendingVersion, refreshAccountStatus })
               <span class="muted">Контент хранится отдельно от Java-модов и ресурсов других экземпляров.</span>
             </div>
             <div class="bedrock-import-actions">
-              <input ref="fileInput" class="workspace-file-input" type="file" accept=".mcpack,.mcaddon,.mcworld,.mctemplate,.mcskin" @change="importContent" />
+              
               <button class="button button--accent" type="button" :disabled="actionBusy || gameRunning || !status?.supported" @click="chooseContentFile">
                 <Icon name="upload" :size="15" />Импортировать
               </button>
@@ -1075,7 +1057,7 @@ defineExpose({ ensureLoaded, applyPendingVersion, refreshAccountStatus })
               <button class="button button--small button--outline" type="button" :disabled="gameRunning || fileMutationBusy" @click="chooseWorkspaceFiles"><Icon name="upload" :size="14" />Загрузить</button>
             </div>
           </div>
-          <input ref="workspaceFileInput" class="workspace-file-input" type="file" multiple @change="uploadWorkspaceFiles" />
+          
           <nav class="instance-file-breadcrumbs" aria-label="Путь к папке">
             <button type="button" :class="{ active: !fileDirectory }" @click="goToWorkspaceDirectory('')">Профиль</button>
             <template v-for="crumb in fileBreadcrumbs" :key="crumb.path"><Icon name="chevron" :size="12" /><button type="button" :class="{ active: fileDirectory === crumb.path }" @click="goToWorkspaceDirectory(crumb.path)">{{ crumb.name }}</button></template>

@@ -9,11 +9,10 @@ from unittest.mock import Mock, patch
 
 from nivora_launcher.errors import LauncherError
 from nivora_launcher.gui_service import handle
-from nivora_launcher.lan_sessions import LanSessionError
 
 
 class GuiCatalogIntegrationTests(unittest.TestCase):
-    def _handle(self, request: dict, *, plugin_store=None, lan_manager=None, plugin_catalog=None, config=None, instances=None, server_store=None, server_files=None, emit=None):
+    def _handle(self, request: dict, *, plugin_store=None, plugin_catalog=None, config=None, instances=None, server_store=None, server_files=None, emit=None):
         config = config or SimpleNamespace(settings=SimpleNamespace())
         instances = instances if instances is not None else object()
         patches = [
@@ -24,8 +23,6 @@ class GuiCatalogIntegrationTests(unittest.TestCase):
             patch("nivora_launcher.gui_service.ServerFiles", return_value=server_files or SimpleNamespace()),
             patch("nivora_launcher.gui_service.ServerProcessManager", return_value=SimpleNamespace()),
         ]
-        if lan_manager is not None:
-            patches.append(patch("nivora_launcher.gui_service._LAN_SESSION_MANAGER", lan_manager))
         if plugin_catalog is not None:
             patches.append(patch("nivora_launcher.gui_service.PluginCatalog", plugin_catalog))
         with ExitStack() as stack:
@@ -33,29 +30,11 @@ class GuiCatalogIntegrationTests(unittest.TestCase):
                 stack.enter_context(patcher)
             return handle(request, emit=emit)
 
-    def test_lan_session_routes_keep_manager_state_and_translate_errors(self) -> None:
-        status = {"room_name": "Friends", "host_control_port": 43120, "local_role": "host"}
-        manager = Mock()
-        manager.create.return_value = status
-        manager.status.return_value = status
-        manager.leave.return_value = {"left": True, "room_name": "Friends"}
-        payload = {
-            "room_name": "Friends",
-            "password": "long-enough-password",
-            "player_nickname": "Host",
-            "host_control_port": 0,
-            "minecraft_game_port": 25565,
-        }
-
-        self.assertEqual(self._handle({"operation": "lan_session_create", **payload}, lan_manager=manager), status)
-        self.assertEqual(self._handle({"operation": "lan_session_status", **payload}, lan_manager=manager), status)
-        self.assertEqual(self._handle({"operation": "lan_session_leave", **payload}, lan_manager=manager)["left"], True)
-        manager.create.assert_called_once_with("Friends", "long-enough-password", "Host", 0, 25565)
-        manager.status.assert_called_once_with("Friends", "long-enough-password", "Host", 0, 25565, host_address=None)
-
-        manager.join.side_effect = LanSessionError("room is unavailable")
-        with self.assertRaisesRegex(LauncherError, "room is unavailable"):
-            self._handle({"operation": "lan_session_join", **payload, "host_address": "192.168.1.20"}, lan_manager=manager)
+    def test_removed_lan_session_routes_are_not_handled(self) -> None:
+        payload = {"room_name": "Friends", "password": "long-enough-password", "player_nickname": "Host"}
+        for operation in ("lan_session_create", "lan_session_join", "lan_session_status", "lan_session_leave"):
+            with self.assertRaises(LauncherError):
+                self._handle({"operation": operation, **payload})
 
     def test_server_plugin_details_include_empty_compatible_versions_list(self) -> None:
         config = SimpleNamespace(

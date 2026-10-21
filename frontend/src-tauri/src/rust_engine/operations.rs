@@ -1,4 +1,4 @@
-// Отмена длительных операций: Tauri-команда создаёт marker-файл, движок
+// отмена длительных операций: Tauri-команда создаёт marker-файл, движок
 // проверяет его в точках, где безопасно прерваться.
 use std::fs;
 use std::path::PathBuf;
@@ -38,7 +38,7 @@ impl CancellationToken {
         Ok(())
     }
 
-    /// Ожидание с периодической проверкой отмены.
+    /// ожидание с периодической проверкой отмены.
     pub fn wait(&self, seconds: f64) -> Result<(), String> {
         let deadline = Instant::now() + Duration::from_secs_f64(seconds.max(0.0));
         loop {
@@ -59,9 +59,6 @@ impl CancellationToken {
     }
 }
 
-/// Отменить фоновую операцию по идентификатору: создаёт marker-файл, который
-/// CancellationToken::cancelled() увидит в ближайшей контрольной точке.
-/// Используется заданиями Bedrock (bedrock_setup_cancel и др.).
 pub fn request_cancel(operation_id: &str) -> bool {
     let token = CancellationToken::new(operation_id);
     match &token.path {

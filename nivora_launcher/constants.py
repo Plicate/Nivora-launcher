@@ -4,15 +4,17 @@ import re
 
 APP_ID = "nivora-launcher"
 APP_NAME = "Nivora Launcher"
-APP_VERSION = "1.0.0"
-# Метка сборки бэкенда. Фронтенд несёт такую же константу
-# (FRONTEND_BUILD_STAMP в frontend/src/services/bridge.ts) и сверяет её
-# с bootstrap-ответом: рассинхрон значит, что в собранное приложение
-# подменили только часть файлов — операции бэкенда не согласованы со
-# старым интерфейсом. Это надо показывать явно, а не «загадочными»
-# сбоями вида «код undefined».
-BUILD_STAMP = "r38"
-# Зарегистрированный Azure public-client ID лаунчера; на чужие (Mojang) ID не падаем никогда.
+APP_VERSION = "1.1.0"
+# репозиторий проекта: фолбэк-проверка обновлений ходит в GitHub Releases API,
+# когда файл latest.json в релизе ещё не выложен (ручная загрузка пакетов).
+GITHUB_OWNER = "vedrooou0"
+GITHUB_REPO = "Nivora-launcher"
+GITHUB_RELEASES_API_URL = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases/latest"
+GITHUB_RELEASES_PAGE_URL = f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}/releases/latest"
+# метка сборки: фронтенд (FRONTEND_BUILD_STAMP в bridge.ts) сверяет её с bootstrap-ответом.
+# рассинхрон = в приложение подменили часть файлов; молчать об этом нельзя.
+BUILD_STAMP = "r40"
+# зарегистрированный Azure public-client ID лаунчера; на чужие (Mojang) ID не падаем никогда.
 DEFAULT_MSA_CLIENT_ID = "ce777973-8920-4993-8b21-4a06dab23ba6"
 LEGACY_MSA_CLIENT_IDS = frozenset({"00000000402b5328", "c36a9fb6-4f2a-41ff-90bd-ae7cc92031eb"})
 MSA_LOGIN_API_URL = "https://login.microsoftonline.com/consumers/oauth2/v2.0"
@@ -40,7 +42,6 @@ MINECRAFT_RELEASE_RE = re.compile(
 MINECRAFT_WEEKLY_RE = re.compile(r"^(?P<year>[0-9]{2})w[0-9]{2}[a-z]$")
 MINECRAFT_ALPHA_BETA_RE = re.compile(r"^[ab][0-9]+\.[0-9]+(?:\.[0-9]+)?(?:_[0-9]+)?$")
 
-
 def version_key(version: str) -> tuple[int, ...]:
     """Return a numeric key suitable for the supported version range."""
     match = MINECRAFT_RELEASE_RE.fullmatch(version)
@@ -51,11 +52,10 @@ def version_key(version: str) -> tuple[int, ...]:
         return (int(weekly.group("year")), 0)
     return ()
 
-
 def is_supported_version(version: str) -> bool:
     if MINECRAFT_ALPHA_BETA_RE.fullmatch(version):
         return True
     key = version_key(version)
-    # The official manifest is the source of truth; a baked-in upper bound would
+    # the official manifest is the source of truth; a baked-in upper bound would
     # silently hide every future release until the launcher itself is rebuilt.
     return bool(key) and key >= version_key("1.0")

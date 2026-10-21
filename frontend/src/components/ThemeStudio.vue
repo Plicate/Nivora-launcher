@@ -27,7 +27,7 @@ const emit = defineEmits<{
   'update:fontFamily': [value: string]
   save: []
   resetAppearance: []
-  importWallpaper: [event: Event]
+  importWallpaperFile: [] | [void]
   clearWallpaper: []
   commitWallpaperBlur: []
   openPage: [view: ViewName]
@@ -79,6 +79,10 @@ const densityOptions: SelectOption[] = [
   { value: 'comfortable', label: 'Комфортная', meta: 'Стандарт' },
   { value: 'spacious', label: 'Просторная', meta: 'Больше отступов' },
 ]
+const instanceLayoutOptions: SelectOption[] = [
+  { value: 'default', label: 'Обычный список', meta: 'Строки с подборкой и действиями' },
+  { value: 'compact', label: 'Компактный режим', meta: 'Плитки как в Prism Launcher' },
+]
 const sidebarPositionOptions: SelectOption[] = [
   { value: 'left', label: 'Слева' },
   { value: 'right', label: 'Справа' },
@@ -121,7 +125,6 @@ const radiusPresets: Array<{ label: string; hint: string; value: Record<string, 
   { label: 'Мягкие', hint: 'Максимально плавные формы', value: { card: 18, button: 20, control: 22 } },
 ]
 
-// --- Workbench state: rail section + picked element ----------------------
 type RailSection = 'general' | 'colors' | 'shape' | 'wallpaper' | 'navigation' | 'motion' | 'pages'
 const railSections: Array<{ id: RailSection; label: string; icon: string; hint: string }> = [
   { id: 'general', label: 'Тема', icon: 'palette', hint: 'Режим, акцент, шрифт, масштаб' },
@@ -156,7 +159,6 @@ function handleEscape() {
 onMounted(() => { window.addEventListener('keydown', handleStudioKeydown) })
 onBeforeUnmount(() => { window.removeEventListener('keydown', handleStudioKeydown) })
 
-// --- Element editors ------------------------------------------------------
 type TargetEditor = {
   label: string
   description: string
@@ -268,7 +270,6 @@ const themeLabel = computed(() => themeOptions.find((option) => option.value ===
 const fontLabel = computed(() => fontFamilyOptions.find((option) => option.value === props.fontFamily)?.label || props.fontFamily)
 const radiusSummary = computed(() => `${props.appearance.radius_tokens.card}/${props.appearance.radius_tokens.button}/${props.appearance.radius_tokens.control}`)
 
-// --- Color editing --------------------------------------------------------
 function setAccentColor(value: string) {
   const normalized = value.trim().toLowerCase()
   if (!/^#[0-9a-f]{6}$/.test(normalized)) return
@@ -323,7 +324,6 @@ function resetColorTokens() {
   props.appearance.accent_color = props.defaultColorTokens.accent
 }
 
-// --- Radius editing -------------------------------------------------------
 const activeRadiusPreset = computed(() => {
   const tokens = props.appearance.radius_tokens
   return radiusPresets.findIndex((preset) =>
@@ -341,7 +341,6 @@ function resetRadiusTokens() {
   props.appearance.radius_tokens = { ...props.defaultRadiusTokens }
 }
 
-// --- История правок: undo/redo для палитры и радиусов -----------------------
 type StudioSnapshot = { accent: string; tokens: Record<string, string>; radius: Record<string, number> }
 const undoStack = ref<StudioSnapshot[]>([])
 const redoStack = ref<StudioSnapshot[]>([])
@@ -390,7 +389,6 @@ function handleStudioKeydown(event: KeyboardEvent) {
   else if (key === 'y' || (key === 'z' && event.shiftKey)) { event.preventDefault(); redoAppearance() }
 }
 
-// --- Аудит контраста (WCAG 2.1) ---------------------------------------------
 function relativeLuminance(hex: string): number {
   const match = /^#?([0-9a-f]{6})$/i.exec(hex.trim())
   if (!match) return 0
@@ -433,7 +431,7 @@ const contrastAudit = computed(() => contrastPairs.map((pair) => {
 const contrastFailures = computed(() => contrastAudit.value.filter((entry) => !entry.passes))
 
 function fixContrast(entry: { foreground: string; background: string }) {
-  // Сдвигаем яркость текста от фона, пока контраст не станет комфортным.
+  // сдвигаем яркость текста от фона, пока контраст не станет комфортным.
   const foregroundToken = entry.foreground
   const background = String(props.tokens[entry.background] || '#000000')
   const backgroundIsLight = relativeLuminance(background) > 0.5
@@ -456,7 +454,6 @@ function fixContrast(entry: { foreground: string; background: string }) {
   props.appearance.color_tokens[foregroundToken] = current
 }
 
-// --- Копирование палитры и подбор акцента ------------------------------------
 async function copyTokensJson() {
   const payload = JSON.stringify({
     accent: props.tokens.accent,
@@ -474,7 +471,7 @@ async function copyTokensJson() {
 const copiedTokens = ref(false)
 
 const accentSuggestions = computed(() => {
-  // Гармоничные оттенки от тона фона: приглушённые и достаточно контрастные.
+  // гармоничные оттенки от тона фона: приглушённые и достаточно контрастные.
   const background = String(props.tokens.background || '#191a17')
   const match = /^#?([0-9a-f]{6})$/i.exec(background.trim())
   if (!match) return []
@@ -511,7 +508,6 @@ const accentSuggestions = computed(() => {
   })
 })
 
-// --- Пресеты ширины превью ---------------------------------------------------
 type PreviewWidth = 'compact' | 'standard' | 'wide'
 const previewWidth = ref<PreviewWidth>('standard')
 const previewWidthOptions: Array<{ id: PreviewWidth; label: string; hint: string }> = [
@@ -519,10 +515,7 @@ const previewWidthOptions: Array<{ id: PreviewWidth; label: string; hint: string
   { id: 'standard', label: 'Стандарт', hint: 'Обычное окно' },
   { id: 'wide', label: 'Широкое', hint: 'Максимум места' },
 ]
-// Мок течёт по ширине сам (внутри — проценты, а не фиксированные пиксели),
-// пресет задаёт только потолок ширины. Никакого JS-масштабирования с
-// ResizeObserver и явными width/height: двойной скейл (внешний + собст
-// венный ui_scale мока) срывался в самоссылку, и мок налезал на соседей.
+// мок течёт по ширине сам (внутри — проценты, а не фиксированные пиксели),
 const previewDesignWidth = computed(() => ({ compact: 560, standard: 860, wide: 1180 }[previewWidth.value]))
 
 const radiusKeys: Array<{ key: 'card' | 'button' | 'control'; label: string; hint: string }> = [
@@ -531,17 +524,16 @@ const radiusKeys: Array<{ key: 'card' | 'button' | 'control'; label: string; hin
   { key: 'control', label: 'Поля ввода', hint: 'Поиск, поля, мелкие элементы' },
 ]
 
-// --- Sidebar / wallpaper / animation -------------------------------------
 const sidebarWidthDisabled = computed(() =>
   props.appearance.sidebar_position === 'top' ||
   props.appearance.sidebar_position === 'bottom' ||
   props.appearance.sidebar_width_mode !== 'manual',
 )
 
-const wallpaperFileInput = ref<HTMLInputElement | null>(null)
-
 function chooseWallpaper() {
-  wallpaperFileInput.value?.click()
+  // сам выбор файла ведёт App.vue: у него рабочий конвейер импорта.
+  // здесь достаточно попросить.
+  emit('importWallpaperFile')
 }
 
 const fontFamilyValue = computed({
@@ -654,7 +646,7 @@ const saveLabel = computed(() => {
             <div v-if="currentTarget.extras === 'wallpaper'" class="studio-inspector-group">
               <h4>Обои</h4>
               <div class="wallpaper-controls">
-                <input ref="wallpaperFileInput" class="workspace-file-input" type="file" accept="image/png,image/jpeg,image/webp" @change="emit('importWallpaper', $event)" />
+                
                 <button class="button button--small button--outline" type="button" @click="chooseWallpaper">Загрузить</button>
                 <button v-if="appearance.wallpaper_path" class="button button--small button--quiet" type="button" @click="emit('clearWallpaper')">Убрать</button>
               </div>
@@ -700,6 +692,7 @@ const saveLabel = computed(() => {
               </div>
             </div>
             <div class="studio-inspector-field"><div class="field"><span>Плотность</span><CustomSelect v-model="appearance.density" :options="densityOptions" /></div></div>
+            <div class="studio-inspector-field"><div class="field"><span>Экземпляры</span><CustomSelect v-model="appearance.instance_layout" :options="instanceLayoutOptions" /></div></div>
             <label class="field"><span>Масштаб интерфейса <strong>{{ appearance.ui_scale }}%</strong></span><input v-model.number="appearance.ui_scale" type="range" min="80" max="125" step="5" /></label>
           </template>
 
@@ -763,7 +756,7 @@ const saveLabel = computed(() => {
 
           <template v-else-if="activeSection === 'wallpaper'">
             <div class="wallpaper-controls">
-              <input ref="wallpaperFileInput" class="workspace-file-input" type="file" accept="image/png,image/jpeg,image/webp" @change="emit('importWallpaper', $event)" />
+              
               <button class="button button--small button--outline" type="button" @click="chooseWallpaper">Загрузить изображение</button>
               <button v-if="appearance.wallpaper_path" class="button button--small button--quiet" type="button" @click="emit('clearWallpaper')">Убрать обои</button>
             </div>

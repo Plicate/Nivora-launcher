@@ -1,4 +1,4 @@
-// Переносимая работа с путями: символические ссылки, junction и выход за
+// переносимая работа с путями: символические ссылки, junction и выход за
 // корневой каталог отвергаются; запись только атомарная.
 use std::fs;
 use std::io::Write;
@@ -12,7 +12,7 @@ const WINDOWS_RESERVED: &[&str] = &[
     "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
 ];
 
-/// Разрешает относительный путь, отвергая ссылки, junction и выход из корня.
+/// разрешает относительный путь, отвергая ссылки, junction и выход из корня.
 pub(crate) fn safe_path(root: &Path, parts: &[&str]) -> Result<PathBuf, String> {
     if is_reparse_point(root) {
         return Err("Корневой каталог является ссылкой".to_owned());
@@ -57,7 +57,7 @@ pub(crate) fn validate_component(part: &str) -> Result<(), String> {
 }
 
 pub(crate) fn atomic_write(root: &Path, parts: &[&str], content: &[u8]) -> Result<PathBuf, String> {
-    let Some((last, parents)) = parts.split_last() else {
+    let Some((_last, parents)) = parts.split_last() else {
         return Err("Укажите файл".to_owned());
     };
     let target = safe_path(root, parts)?;
@@ -94,7 +94,7 @@ pub(crate) fn atomic_write(root: &Path, parts: &[&str], content: &[u8]) -> Resul
     let Some(temporary) = temporary else {
         return Err("Не удалось создать временный файл".to_owned());
     };
-    // Путь мог измениться во время записи — сверяемся ещё раз перед заменой.
+    // путь мог измениться во время записи — сверяемся ещё раз перед заменой.
     if safe_path(root, parts).is_err() {
         let _ = fs::remove_file(&temporary);
         return Err("Путь выходит за пределы корневого каталога".to_owned());
@@ -191,7 +191,7 @@ fn remove_recursive(
     fs::remove_dir(path).map_err(|_| "Не удалось удалить папку".to_owned())
 }
 
-/// Проверка пути: обычный файл без ссылки, не больше заданного размера.
+/// проверка пути: обычный файл без ссылки, не больше заданного размера.
 pub(crate) fn regular_file(path: &Path, maximum_size: Option<u64>) -> Result<fs::Metadata, String> {
     if is_reparse_point(path) {
         return Err("Файл является ссылкой или junction".to_owned());
@@ -252,11 +252,11 @@ mod tests {
     fn atomic_write_replaces_content_safely() {
         let base = sandbox("atomic");
         fs::create_dir_all(base.join("dir")).unwrap();
-        atomic_write(&base, &["dir", "file.txt"], b"первый").unwrap();
-        assert_eq!(fs::read(base.join("dir/file.txt")).unwrap(), b"первый");
-        atomic_write(&base, &["dir", "file.txt"], b"второй").unwrap();
-        assert_eq!(fs::read(base.join("dir/file.txt")).unwrap(), b"второй");
-        // Временных файлов не осталось.
+        atomic_write(&base, &["dir", "file.txt"], "первый".as_bytes()).unwrap();
+        assert_eq!(fs::read(base.join("dir/file.txt")).unwrap(), "первый".as_bytes());
+        atomic_write(&base, &["dir", "file.txt"], "второй".as_bytes()).unwrap();
+        assert_eq!(fs::read(base.join("dir/file.txt")).unwrap(), "второй".as_bytes());
+        // временных файлов не осталось.
         let leftovers: Vec<_> = fs::read_dir(base.join("dir")).unwrap()
             .flatten()
             .filter(|entry| entry.file_name().to_string_lossy().starts_with(".nivora-"))
@@ -275,7 +275,7 @@ mod tests {
         remove_tree(&base, &["pack"], None, 100, 8).unwrap();
         assert!(!base.join("pack").exists());
 
-        // Служебные данные лаунчера не удаляются.
+        // служебные данные лаунчера не удаляются.
         fs::create_dir_all(base.join("keep")).unwrap();
         fs::write(base.join("keep/.trial-integrity"), b"").unwrap();
         let reserved = |name: &str| name.starts_with(".trial-");
@@ -289,9 +289,11 @@ mod tests {
         {
             let outside = sandbox("remove-outside");
             std::os::unix::fs::symlink(&outside, base.join("link")).unwrap();
+            // символьную ссылку-компонент отвергает safe_path — тем же
+            // сообщением, что и в Python (remove проверяет уже после него).
             assert_eq!(
                 remove_tree(&base, &["link"], None, 10, 8).unwrap_err(),
-                "Нельзя удалять символьные ссылки или junction"
+                "Путь содержит символьную ссылку или junction"
             );
             let _ = fs::remove_dir_all(&outside);
         }

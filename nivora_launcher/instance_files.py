@@ -19,7 +19,6 @@ from .portable_fs import atomic_write as atomic_write_path
 from .portable_fs import regular_file, remove_tree as remove_tree_path, safe_path
 from .process_guard import InstanceProcessLock
 
-
 MAX_INSTANCE_TEXT_BYTES = 2 * 1024 * 1024
 MAX_INSTANCE_PREVIEW_BYTES = 8 * 1024 * 1024
 MAX_INSTANCE_UPLOAD_BYTES = 32 * 1024 * 1024
@@ -43,10 +42,8 @@ _IMAGE_MIMES = (
     (b"\xff\xd8\xff", "image/jpeg"),
 )
 
-
 def instance_log_hash(name: str) -> str:
     return hashlib.sha256(name.encode("utf-8")).hexdigest()[:24]
-
 
 class InstanceFiles:
     """No-follow file access rooted at a single client profile."""
@@ -389,8 +386,8 @@ class InstanceFiles:
 
     def _client_instance(self, name: str) -> InstanceInfo:
         info = self.instances.get(name)
-        # Логи/консоль доступны и Bedrock-экземплярам: их сессии пишет
-        # Rust-движок тем же SessionLog (префикс <имя>-<hash>-bedrock-…).
+        # логи/консоль доступны и Bedrock-экземплярам: их сессии пишет
+        # rust-движок тем же SessionLog (префикс <имя>-<hash>-bedrock-…).
         if info.name != name or getattr(info, "kind", "client") != "client" or info.game_edition not in ("java", "bedrock"):
             raise LauncherError("Файловый доступ доступен только для игровых экземпляров")
         return info
@@ -415,7 +412,6 @@ class InstanceFiles:
             return self.bedrock_profiles.profile_path(info)
         return info.path
 
-
 def _path_parts(raw: str, *, allow_root: bool = False) -> tuple[str, ...]:
     if not isinstance(raw, str):
         raise LauncherError("Путь должен быть текстом")
@@ -436,7 +432,6 @@ def _path_parts(raw: str, *, allow_root: bool = False) -> tuple[str, ...]:
         raise LauncherError("Путь содержит недопустимый компонент")
     return parts
 
-
 def _reserved_name(name: str) -> bool:
     lowered = name.lower()
     return lowered in {
@@ -447,7 +442,6 @@ def _reserved_name(name: str) -> bool:
         "profile.json",
         "xodus-home",
     } or lowered.startswith(".trial-launcher")
-
 
 @contextmanager
 def _open_directory(root: Path, parts: tuple[str, ...]) -> Iterator[int]:
@@ -460,7 +454,6 @@ def _open_directory(root: Path, parts: tuple[str, ...]) -> Iterator[int]:
         if directory_fd >= 0:
             os.close(directory_fd)
         os.close(root_fd)
-
 
 @contextmanager
 def _open_parent(root: Path, parts: tuple[str, ...]) -> Iterator[tuple[int, str]]:
@@ -476,7 +469,6 @@ def _open_parent(root: Path, parts: tuple[str, ...]) -> Iterator[tuple[int, str]
             os.close(parent_fd)
         os.close(root_fd)
 
-
 def _open_directory_chain(root_fd: int, parts: tuple[str, ...]) -> int:
     current_fd = os.dup(root_fd)
     try:
@@ -488,7 +480,6 @@ def _open_directory_chain(root_fd: int, parts: tuple[str, ...]) -> int:
     except BaseException:
         os.close(current_fd)
         raise
-
 
 def _atomic_write_at(parent_fd: int, file_name: str, content: bytes) -> None:
     _ensure_regular_destination(parent_fd, file_name)
@@ -511,7 +502,6 @@ def _atomic_write_at(parent_fd: int, file_name: str, content: bytes) -> None:
         except FileNotFoundError:
             pass
 
-
 def _ensure_regular_destination(parent_fd: int, file_name: str) -> None:
     try:
         value = os.stat(file_name, dir_fd=parent_fd, follow_symlinks=False)
@@ -519,7 +509,6 @@ def _ensure_regular_destination(parent_fd: int, file_name: str) -> None:
         return
     if not stat.S_ISREG(value.st_mode):
         raise LauncherError("Файл является ссылкой или специальным объектом")
-
 
 def _preflight_delete_at(parent_fd: int, name: str, count: list[int], depth: int) -> None:
     if depth > _MAX_DELETE_DEPTH:
@@ -541,7 +530,6 @@ def _preflight_delete_at(parent_fd: int, name: str, count: list[int], depth: int
     finally:
         os.close(directory_fd)
 
-
 def _remove_entry_at(parent_fd: int, name: str, depth: int) -> None:
     if depth > _MAX_DELETE_DEPTH:
         raise LauncherError("Папка содержит слишком много уровней вложенности")
@@ -561,7 +549,6 @@ def _remove_entry_at(parent_fd: int, name: str, depth: int) -> None:
         os.close(directory_fd)
     os.rmdir(name, dir_fd=parent_fd)
 
-
 def _preview_image_mime(content: bytes) -> str | None:
     for signature, mime_type in _IMAGE_MIMES:
         if content.startswith(signature):
@@ -569,7 +556,6 @@ def _preview_image_mime(content: bytes) -> str | None:
     if len(content) >= 12 and content[:4] == b"RIFF" and content[8:12] == b"WEBP":
         return "image/webp"
     return None
-
 
 def _instance_process_running(root: Path) -> bool:
     if os.name == "nt":
@@ -616,11 +602,9 @@ def _instance_process_running(root: Path) -> bool:
         return True
     return process_exists(pid)
 
-
 def _log_component(value: str) -> str:
     normalized = re.sub(r"[^A-Za-z0-9._-]+", "_", str(value)).strip("._-")
     return normalized[:80] or "launcher"
-
 
 def _known_versions(info: InstanceInfo) -> set[str]:
     values = {info.version_id} if info.version_id else set()
@@ -647,7 +631,6 @@ def _known_versions(info: InstanceInfo) -> set[str]:
         pass
     return {value for value in values if re.fullmatch(r"[A-Za-z0-9._-]{1,128}", value)}
 
-
 def _log_belongs_to_instance(info: InstanceInfo, log_id: str, instances: list[InstanceInfo]) -> bool:
     modern_prefix = f"{_log_component(info.name)}-{instance_log_hash(info.name)}-"
     if log_id.startswith(modern_prefix):
@@ -664,7 +647,6 @@ def _log_belongs_to_instance(info: InstanceInfo, log_id: str, instances: list[In
                 break
     return matches == {info.name}
 
-
 def _pagination(offset: Any, limit: Any, *, maximum: int) -> tuple[int, int]:
     try:
         normalized_offset, normalized_limit = int(offset), int(limit)
@@ -673,7 +655,6 @@ def _pagination(offset: Any, limit: Any, *, maximum: int) -> tuple[int, int]:
     if normalized_offset < 0 or not 1 <= normalized_limit <= maximum:
         raise LauncherError(f"Размер страницы должен быть от 1 до {maximum}, смещение не может быть отрицательным")
     return normalized_offset, normalized_limit
-
 
 def _log_read_range(offset: Any, limit: Any) -> tuple[int, int]:
     try:

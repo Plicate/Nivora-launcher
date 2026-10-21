@@ -3,6 +3,7 @@ name: CI
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -32,91 +33,115 @@ jobs:
       - name: Install frontend dependencies
         working-directory: frontend
         run: npm ci --no-audit --no-fund
+      - name: Node tests (мост/реестр операций и утилиты UI)
+        working-directory: frontend
+        run: npm test
       - name: Typecheck and build frontend
         working-directory: frontend
         run: npm run build
 
   desktop-windows:
     runs-on: windows-latest
-    outputs:
-      artifact-digest: ${{ steps.upload.outputs.artifact-digest }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: "3.11"
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: "20"
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
-        with:
-          toolchain: 1.99.0
-          build-warnings: allow
-      - name: Install backend and freezer dependencies
-        run: python -m pip install ".[windows]" pyinstaller
-      - name: Run platform-specific Python tests
-        run: python -m unittest discover -s tests -p test_platform_packaging.py -v
-      - name: Build bundled Python backend
-        run: >-
-          python -m PyInstaller --noconfirm --clean --onefile
-          --name nivora-launcher-backend --paths . --distpath dist/backend
-          --workpath build/pyinstaller-backend --specpath build/pyinstaller-backend
-          --collect-all keyring
-          --hidden-import keyring.backends.Windows
-          nivora_launcher/backend_entrypoint.py
-      - name: Smoke-test packaged CLI mode
-        shell: pwsh
-        run: |
-          & dist/backend/nivora-launcher-backend.exe --cli --help | Out-Null
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Stage backend resource
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force frontend/src-tauri/resources/backend | Out-Null
-          Copy-Item dist/backend/nivora-launcher-backend.exe frontend/src-tauri/resources/backend/
-      - name: Install frontend dependencies
-        working-directory: frontend
-        run: npm ci --no-audit --no-fund
-      - name: Generate Tauri icons
-        working-directory: frontend
-        run: npm run tauri -- icon src/assets/uni.png --output src-tauri/icons
-      - name: Build Windows installers
-        working-directory: frontend
-        run: npm run desktop:build -- --bundles nsis,msi -- --locked
-      - name: Run Tauri Rust tests
-        working-directory: frontend/src-tauri
-        run: cargo test --locked
-      - name: Upload Windows installers
-        id: upload
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: nivora-launcher-windows
-          path: |
-            frontend/src-tauri/target/release/bundle/nsis/*.exe
-            frontend/src-tauri/target/release/bundle/msi/*.msi
-          if-no-files-found: error
-
-  attest-windows:
-    if: github.event_name == 'push'
-    needs: desktop-windows
-    runs-on: ubuntu-latest
     permissions:
       contents: read
       id-token: write
       attestations: write
     steps:
-      - name: Attest Windows installers
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+        with:
+          toolchain: 1.99.0
+          build-warnings: allow
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+      # nivora-turbo.exe собирается mingw-g++ (posix-потоки): берём UCRT64
+      # из MSYS2, но сам скрипт сборки продолжает работать в Git Bash.
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: false
+          install: git
+      - name: Expose MSYS2 UCRT64 g++ and python3 shim to Git Bash
+        shell: bash
+        run: |
+          echo "C:\msys64\ucrt64\bin" >> "$GITHUB_PATH"
+          # setup-python даёт python.exe, скрипты сборки зовут python3.
+          py_dir="$(dirname "$(command -v python)")"
+          cp "$py_dir/python.exe" "$py_dir/python3.exe"
+      - name: Run Tauri Rust tests
+        working-directory: frontend/src-tauri
+        run: cargo test --locked
+      - name: Build backend, helpers and Windows installers
+        shell: bash
+        run: bash scripts/build_windows_exe.sh
+        timeout-minutes: 60
+      - name: Smoke-test packaged app (portable exe, --smoke-test)
+        shell: bash
+        timeout-minutes: 10
+        run: |
+          rc=0
+          ./dist/windows/nivora-launcher.exe --smoke-test || rc=$?
+          echo "--- smoke-test.json ---"
+          cat "$LOCALAPPDATA/nivora-launcher/smoke-test.json" || true
+          exit $rc
+      - name: Install NSIS setup silently and smoke-test installed copy
+        shell: bash
+        timeout-minutes: 15
+        run: |
+          setup="$(ls -1 dist/windows/*-setup.exe | head -n 1)"
+          "$setup" /S
+          installed="$LOCALAPPDATA/Nivora Launcher/nivora-launcher.exe"
+          for _ in $(seq 1 60); do
+            [ -f "$installed" ] && break
+            sleep 2
+          done
+          [ -f "$installed" ] || { echo "установленная копия не найдена: $installed"; exit 1; }
+          rc=0
+          "$installed" --smoke-test || rc=$?
+          echo "--- smoke-test.json (установленная копия) ---"
+          cat "$LOCALAPPDATA/nivora-launcher/smoke-test.json" || true
+          exit $rc
+      - name: Upload Windows artifacts
+        id: upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nivora-launcher-windows
+          path: |
+            dist/windows/*
+            ${{ env.LOCALAPPDATA }}/nivora-launcher/smoke-test.json
+          if-no-files-found: error
+      - name: Attest Windows artifacts
+        if: github.event_name == 'push'
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-name: nivora-launcher-windows
-          subject-digest: sha256:${{ needs.desktop-windows.outputs.artifact-digest }}
+          subject-digest: sha256:${{ steps.upload.outputs.artifact-digest }}
 
-  desktop-linux-packages:
-    runs-on: ubuntu-24.04
-    outputs:
-      artifact-digest: ${{ steps.upload.outputs.artifact-digest }}
+  desktop-macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-latest
+          - arch: x86_64
+            # Intel-раннеры GitHub уходят; если метка исчезнет — собирайте
+            # x86_64 на arm64 через MACOS_ARCH=x86_64 (нужен x86_64-Python).
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -131,59 +156,92 @@ jobs:
         with:
           toolchain: 1.99.0
           build-warnings: allow
-      - name: Install Tauri and RPM build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential curl file libayatana-appindicator3-dev libssl-dev libwebkit2gtk-4.1-dev librsvg2-dev libxdo-dev patchelf rpm
-      - name: Install backend freezer dependency
-        run: python -m pip install . pyinstaller
-      - name: Build bundled Python backend
-        run: >-
-          python -m PyInstaller --noconfirm --clean --onefile
-          --name nivora-launcher-backend --paths . --distpath dist/backend
-          --workpath build/pyinstaller-backend --specpath build/pyinstaller-backend
-          --add-data nivora_launcher/vendor/bedrock-on-linux-2.2.9.pyz:nivora_launcher/vendor
-          --add-data nivora_launcher/vendor/LICENSE-BedrockOnLinux.txt:nivora_launcher/vendor
-          nivora_launcher/backend_entrypoint.py
-      - name: Smoke-test packaged CLI mode
-        run: dist/backend/nivora-launcher-backend --cli --help
-      - name: Stage backend resource
-        run: |
-          mkdir -p frontend/src-tauri/resources/backend
-          install -m 755 dist/backend/nivora-launcher-backend frontend/src-tauri/resources/backend/
-      - name: Install frontend dependencies
-        working-directory: frontend
-        run: npm ci --no-audit --no-fund
-      - name: Generate Tauri icons
-        working-directory: frontend
-        run: npm run tauri -- icon src/assets/uni.png --output src-tauri/icons
-      - name: Build Debian and Fedora packages
-        working-directory: frontend
-        run: npm run desktop:build -- --bundles deb,rpm -- --locked
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
       - name: Run Tauri Rust tests
         working-directory: frontend/src-tauri
         run: cargo test --locked
+      - name: Build app, DMG and verify (codesign, Info.plist, DMG mount)
+        run: MACOS_ARCH=${{ matrix.arch }} bash scripts/build_macos_app.sh
+        timeout-minutes: 60
+      - name: Smoke-test packaged app (--smoke-test)
+        timeout-minutes: 10
+        run: |
+          app="$(ls -1 frontend/src-tauri/target/*/release/bundle/macos/*.app | head -n 1)"
+          rc=0
+          "$app/Contents/MacOS/nivora-launcher" --smoke-test || rc=$?
+          echo "--- smoke-test.json ---"
+          cat "$HOME/.local/share/nivora-launcher/smoke-test.json" || true
+          exit $rc
+      - name: Upload macOS artifacts
+        id: upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nivora-launcher-macos-${{ matrix.arch }}
+          path: |
+            dist/macos/*
+            ${{ env.HOME }}/.local/share/nivora-launcher/smoke-test.json
+          if-no-files-found: error
+      - name: Attest macOS artifacts
+        if: github.event_name == 'push'
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: nivora-launcher-macos-${{ matrix.arch }}
+          subject-digest: sha256:${{ steps.upload.outputs.artifact-digest }}
+
+  desktop-linux-packages:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+        with:
+          toolchain: 1.99.0
+          build-warnings: allow
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+      - name: Install Tauri and RPM build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential curl file libayatana-appindicator3-dev libssl-dev libwebkit2gtk-4.1-dev librsvg2-dev libxdo-dev patchelf rpm xvfb
+      - name: Build deb and rpm (backend + helpers included)
+        run: bash scripts/build_all.sh deb rpm
+        timeout-minutes: 60
+      - name: Install deb and smoke-test packaged app (xvfb, --smoke-test)
+        timeout-minutes: 10
+        run: |
+          sudo dpkg -i dist/deb/*.deb || sudo apt-get install -f -y
+          rc=0
+          xvfb-run -a --server-args="-screen 0 1280x800x24" /usr/bin/nivora-launcher --smoke-test || rc=$?
+          echo "--- smoke-test.json ---"
+          cat "$HOME/.local/share/nivora-launcher/smoke-test.json" || true
+          exit $rc
       - name: Upload Linux packages
         id: upload
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: nivora-launcher-linux
           path: |
-            frontend/src-tauri/target/release/bundle/deb/*.deb
-            frontend/src-tauri/target/release/bundle/rpm/*.rpm
+            dist/deb/*.deb
+            dist/rpm/*.rpm
+            $HOME/.local/share/nivora-launcher/smoke-test.json
           if-no-files-found: error
-
-  attest-linux:
-    if: github.event_name == 'push'
-    needs: desktop-linux-packages
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write
-      attestations: write
-    steps:
       - name: Attest Linux packages
+        if: github.event_name == 'push'
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-name: nivora-launcher-linux
-          subject-digest: sha256:${{ needs.desktop-linux-packages.outputs.artifact-digest }}
+          subject-digest: sha256:${{ steps.upload.outputs.artifact-digest }}

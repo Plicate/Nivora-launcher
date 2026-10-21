@@ -18,15 +18,13 @@ from .net import HttpClient
 from .platform_support import is_reparse_point, set_private_fd
 from .portable_fs import regular_file, safe_path
 
-
 class JavaRuntimeManager:
     def __init__(self, config: ConfigStore, http: HttpClient | None = None) -> None:
         self.config = config
         self.http = http or HttpClient()
 
     def java_for(self, version_json: dict[str, Any], java_path: str | None = None) -> Path:
-        required_major = version_json.get("javaVersion", {}).get("majorVersion")
-        required_major = int(required_major) if required_major else None
+        required_major, component = _required_java(version_json)
         configured = (java_path if java_path is not None else self.config.settings.java_path).strip()
         if configured:
             path = validate_java_path(configured, allow_directory=True)
@@ -43,10 +41,9 @@ class JavaRuntimeManager:
         if system:
             system_path = validate_java_path(system)
             system_major = java_version(system_path)
-            if not required_major or system_major == required_major:
+            if required_major is None or system_major == required_major:
                 return system_path
 
-        component = version_json.get("javaVersion", {}).get("component")
         runtime_error: LauncherError | None = None
         if component:
             try:
@@ -115,7 +112,7 @@ class JavaRuntimeManager:
                 processed_files += 1
                 continue
             if file_type == "link":
-                # Runtime manifests can contain links; only allow a relative target inside the runtime.
+                # runtime manifests can contain links; only allow a relative target inside the runtime.
                 link_target = Path(str(metadata.get("target", "")).replace("\\", "/"))
                 resolved_target = (target.parent / link_target).resolve()
                 if link_target.is_absolute() or not _within(resolved_target, destination.resolve()):
@@ -207,7 +204,6 @@ class JavaRuntimeManager:
         _atomic_json_write(cache_path, {"fetched_at": time.time(), "manifest": manifest}, private=True)
         return manifest
 
-
 def discover_java_paths() -> list[Path]:
     candidates: list[Path] = []
     java_home = os.environ.get("JAVA_HOME", "").strip()
@@ -251,7 +247,6 @@ def discover_java_paths() -> list[Path]:
         result.append(resolved)
     return result
 
-
 def _runtime_platform() -> str:
     system = platform.system().lower()
     machine = platform.machine().lower()
@@ -261,12 +256,34 @@ def _runtime_platform() -> str:
         if machine in {"arm64", "aarch64"}:
             return "windows-arm64"
         raise LauncherError(f"Для Windows поддерживается x86_64 или ARM64, обнаружено: {machine}")
+    if system == "darwin":
+        if machine in {"arm64", "aarch64"}:
+            return "macos-arm64"
+        if machine in {"x86_64", "amd64"}:
+            return "macos"
+        raise LauncherError(f"Для macOS поддерживается x86_64 или ARM64, обнаружено: {machine}")
     if system == "linux":
         if machine in {"x86_64", "amd64"}:
             return "linux"
-        raise LauncherError(f"Для Linux поддерживается x86_64, обнаружено: {machine}")
+        if machine in {"arm64", "aarch64"}:
+            return "linux-arm64"
+        raise LauncherError(f"Для Linux поддерживается x86_64 или ARM64, обнаружено: {machine}")
     raise LauncherError(f"Nivora Launcher не поддерживает платформу: {platform.system()}")
 
+def _legacy_version_id(version_id: str) -> bool:
+    match = re.search(r"1\.(\d+)(?:[.\-]|$)", version_id)
+    return bool(match and int(match.group(1)) < 13)
+
+def _required_java(version_json: dict[str, Any]) -> tuple[int | None, str | None]:
+    """какую Java требует версия: major и runtime-компонент Mojang."""
+    block = version_json.get("javaVersion")
+    block = block if isinstance(block, dict) else {}
+    major = block.get("majorVersion")
+    major = int(major) if major else None
+    component = str(block.get("component") or "") or None
+    if major is None and _legacy_version_id(str(version_json.get("id") or "")):
+        return 8, component or "jre-legacy"
+    return major, component
 
 def _within(path: Path, root: Path) -> bool:
     try:
@@ -275,11 +292,9 @@ def _within(path: Path, root: Path) -> bool:
     except ValueError:
         return False
 
-
 def _safe_runtime_component(value: str, label: str) -> None:
     if not value or not re.fullmatch(r"[A-Za-z0-9._+-]+", value):
         raise LauncherError(f"Небезопасный {label}: {value}")
-
 
 def _runtime_path_without_symlink(path: Path, root: Path) -> bool:
     current = path
@@ -292,13 +307,12 @@ def _runtime_path_without_symlink(path: Path, root: Path) -> bool:
             return False
         current = current.parent
 
-
 def _ensure_runtime_path(path: Path, root: Path) -> None:
     if not _runtime_path_without_symlink(path, root):
         raise LauncherError(f"Небезопасный путь Java runtime: {path}")
 
-
-def java_version(java_path: Path) -> int | None:
+def _java_version_output(java_path: Path) -> str:
+    """Вывод `java -version`; пустая строка, если бинарник не ответил."""
     executable = java_path
     if os.name == "nt" and java_path.name.lower() == "javaw.exe":
         console_java = java_path.with_name("java.exe")
@@ -313,27 +327,42 @@ def java_version(java_path: Path) -> int | None:
             check=False,
         )
     except (OSError, subprocess.SubprocessError):
-        return None
-    output = result.stderr + result.stdout
-    match = re.search(r'version\s+"([^"]+)', output)
-    if not match:
-        return None
-    value = match.group(1)
-    if value.startswith("1."):
-        value = value.split(".", 2)[1]
-    try:
-        return int(value.split(".", 1)[0])
-    except ValueError:
-        return None
+        return ""
+    return (result.stderr or "") + (result.stdout or "")
 
+def java_probe(java_path: Path) -> tuple[int | None, int | None]:
+    """(major, разрядность) одним запуском `java -version`."""
+    output = _java_version_output(java_path)
+    if not output:
+        return None, None
+    major: int | None = None
+    match = re.search(r'version\s+"([^"]+)', output)
+    if match:
+        value = match.group(1)
+        if value.startswith("1."):
+            value = value.split(".", 2)[1]
+        try:
+            major = int(value.split(".", 1)[0])
+        except ValueError:
+            major = None
+    bitness: int | None = None
+    if "64-Bit" in output or "64-bit" in output:
+        bitness = 64
+    elif "VM" in output or "version" in output:
+        bitness = 32
+    return major, bitness
+
+def java_version(java_path: Path) -> int | None:
+    major, _ = java_probe(java_path)
+    return major
+
+def java_bitness(java_path: Path) -> int | None:
+    """разрядность Java (32/64) по выводу `java -version`."""
+    _, bitness = java_probe(java_path)
+    return bitness
 
 def validate_java_path(value: str | Path, *, allow_directory: bool = False) -> Path:
-    """Validate a Java executable without running it.
-
-    A launcher setting is untrusted input, including settings read from an old
-    instance or a cloud backup. Only a real java/javaw binary in a JDK/JRE
-    ``bin`` directory is accepted, and writable/unowned binaries are rejected.
-    """
+    """validate a Java executable without running it."""
     candidate = Path(value).expanduser()
     java_name = "java.exe" if os.name == "nt" else "java"
     if allow_directory and candidate.is_dir():
@@ -365,7 +394,6 @@ def validate_java_path(value: str | Path, *, allow_directory: bool = False) -> P
     if any(mode & (stat.S_IWGRP | stat.S_IWOTH) for mode in (executable_stat.st_mode, bin_stat.st_mode, root_stat.st_mode)):
         raise LauncherError("Java executable и каталог JDK/JRE не должны быть доступны для записи группе или всем")
     return resolved
-
 
 def safe_process_environment(*, compatibility: bool = False) -> dict[str, str]:
     if compatibility:

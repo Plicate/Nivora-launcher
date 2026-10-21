@@ -1,10 +1,4 @@
-// Серверные процессы лаунчера: запуск server.jar, консоль (кольцевой буфер
-// + сохранённая консоль), статус с метриками, мягкая остановка через stdin и
-// плановый перезапуск. Порт ServerProcessManager из nivora_launcher/server.py.
-//
-// Конфиг сервера читается по правилам Python-стора: публичная часть лежит в
-// каталоге экземпляра, секретные ключи (java_path, security) — в защищённом
-// хранилище вне экземпляра.
+// серверные процессы лаунчера: запуск server.jar, консоль (кольцевой буфер
 use regex::Regex;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
@@ -12,7 +6,7 @@ use std::collections::{HashMap, VecDeque};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Stdio};
 use std::sync::{Arc, Condvar, LazyLock, Mutex, MutexGuard, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -25,10 +19,10 @@ use super::operations::CancellationToken;
 use super::runtime::{self, JavaRuntimeManager};
 use super::state::{read_bounded_json, safe_instance_name};
 
-const SERVER_JAR: &str = "server.jar";
+pub(crate) const SERVER_JAR: &str = "server.jar";
 const SERVER_PROPERTIES_FILE: &str = "server.properties";
 const MAX_SERVER_PROPERTIES_BYTES: u64 = 2 * 1024 * 1024;
-const SERVER_CONFIG_FILE: &str = ".nivora-launcher-server.json";
+pub(crate) const SERVER_CONFIG_FILE: &str = ".nivora-launcher-server.json";
 const LIVE_STATE_FILE: &str = ".nivora-launcher-live.json";
 const CONSOLE_FILE: &str = ".nivora-launcher-server-console.json";
 const METRICS_FILE: &str = ".nivora-launcher-metrics.json";
@@ -46,13 +40,9 @@ const SERVER_CORE_IDS: [&str; 10] = [
 const PROTECTED_SETTINGS_FORMAT: i64 = 1;
 const MAX_PROTECTED_SETTINGS_BYTES: u64 = 64 * 1024;
 
-// Ключ реестра — имя экземпляра (id, под которым операция запуска зарегистри-
-// ровала процесс); уникальный launch_id внутри отличает перезапуски.
 static PROCESSES: LazyLock<Mutex<HashMap<String, ServerProcess>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 static LAUNCH_ERRORS: LazyLock<Mutex<HashMap<String, String>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
-// Потоки чтения живут дольше операций: отравленный замок восстанавливаем,
-// а не паникуем, иначе один сбой заблокирует весь реестр.
 fn lock_map<T>(lock: &Mutex<T>) -> MutexGuard<'_, T> {
     lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
@@ -84,6 +74,8 @@ struct ServerProcess {
     process_lock: Option<InstanceLock>,
     scheduled_restart_date: String,
     metrics: MetricsCache,
+    // наблюдаемые TCP-счётчики полезной нагрузки (rx/tx) этого запуска.
+    traffic: Option<super::server_traffic::TrafficHandle>,
 }
 
 impl ServerProcess {
@@ -95,8 +87,6 @@ impl ServerProcess {
     }
 }
 
-/// Событие «очистка запуска завершена»: stop/restart ждут его, чтобы не
-/// вернуть статус, пока живой файл и консоль ещё не перезаписаны.
 struct FinishFlag {
     done: Mutex<bool>,
     signal: Condvar,
@@ -123,8 +113,6 @@ impl FinishFlag {
     }
 }
 
-/// Межпроцессная блокировка «один запуск на экземпляр» (flock), как
-/// InstanceProcessLock в Python. Держится до завершения очистки запуска.
 struct InstanceLock {
     #[allow(dead_code)]
     handle: File,
@@ -186,8 +174,6 @@ impl Drop for InstanceLock {
         unsafe { libc::flock(self.handle.as_raw_fd(), libc::LOCK_UN); }
     }
 }
-
-// ------------------------------------------------------------- Операции ----
 
 pub fn server_start(request: &Value) -> Result<Value, String> {
     start_server(&py_str(request.get("name"), ""))
@@ -276,15 +262,13 @@ pub fn server_status(request: &Value) -> Result<Value, String> {
     status_server_with(&config, &instances, &name)
 }
 
-// ---------------------------------------------------------- Запуск/стоп ----
-
-fn stores() -> Result<(ConfigStore, InstanceStore), String> {
+pub(crate) fn stores() -> Result<(ConfigStore, InstanceStore), String> {
     let config = ConfigStore::load()?;
     let instances = InstanceStore::new(&config)?;
     Ok((config, instances))
 }
 
-fn server_instance(instances: &InstanceStore, name: &str) -> Result<InstanceInfo, String> {
+pub(crate) fn server_instance(instances: &InstanceStore, name: &str) -> Result<InstanceInfo, String> {
     let info = instances.get(name)?;
     if info.kind != "server" {
         return Err(format!("Экземпляр «{name}» не является сервером"));
@@ -374,7 +358,10 @@ fn start_server_inner(config: &ConfigStore, instances: &InstanceStore, name: &st
             Some(path) => path,
             None => {
                 let major = if required > 0 { json!(required) } else { Value::Null };
-                JavaRuntimeManager::new(config, None)?
+                // клиент с наблюдателями: докачка Java-рантайма (~180 МиБ)
+                // видна в панели ACTIVITY, а не проходит молча.
+                let http = super::net::progress_client_from_settings(config.settings(), "")?;
+                JavaRuntimeManager::new(config, Some(http))?
                     .java_for(&json!({ "javaVersion": { "majorVersion": major, "component": component } }), None)?
             }
         }
@@ -393,12 +380,13 @@ fn start_server_inner(config: &ConfigStore, instances: &InstanceStore, name: &st
     let memory = java_memory_value(&setting_str(&settings, "memory"))?;
     let environment = runtime::safe_process_environment(false);
     let core = setting_str(&settings, "core");
-    let mut arguments: Vec<String> = vec![
+    let mut arguments: Vec<String> = Vec::new();
+    arguments.extend([
         format!("-Xms{}", initial_server_heap(&memory)),
         format!("-Xmx{memory}"),
         "-jar".to_owned(),
         SERVER_JAR.to_owned(),
-    ];
+    ]);
     if core != "velocity" && core != "waterfall" {
         arguments.push("--nogui".to_owned());
     }
@@ -412,12 +400,14 @@ fn start_server_inner(config: &ConfigStore, instances: &InstanceStore, name: &st
         }
         let process_lock = InstanceLock::acquire(&config.paths.data_home, &info.name)?;
         apply_server_port(&info.path, setting_i64(&settings, "port", 25565), false)?;
-        let mut command = Command::new(&java);
+        let program = java.clone();
+        let mut command = super::platform::command(&program);
         command
             .args(&arguments)
             .current_dir(&info.path)
             .env_clear()
-            .envs(&environment)
+            .envs(&environment);
+        command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -461,6 +451,9 @@ fn start_server_inner(config: &ConfigStore, instances: &InstanceStore, name: &st
                 process_lock,
                 scheduled_restart_date: String::new(),
                 metrics: MetricsCache::default(),
+                traffic: Some(std::sync::Arc::new(std::sync::Mutex::new(
+                    super::server_traffic::ServerTrafficTracker::new(pid, setting_i64(&settings, "port", 25565) as u16),
+                ))),
             },
         );
         (launch_id, started_at, pid)
@@ -619,8 +612,6 @@ fn terminate_tree(key: &str, launch_id: &str, force: bool) {
     }
 }
 
-// ------------------------------------------------------------ Чтение вывода ----
-
 fn read_output_stream(key: String, launch_id: String, stream: ChildStdout) {
     for line in BufReader::new(stream).lines() {
         match line {
@@ -748,6 +739,7 @@ fn finish_process(key: String, launch_id: String) {
                 let mut snapshot = snapshot;
                 snapshot["ended_at"] = json!(epoch_seconds());
                 snapshot["exit_code"] = json!(exit_code);
+                merge_traffic(&mut snapshot, entry.traffic.as_ref(), false);
                 let _ = write_last_snapshot(&entry.root, &snapshot);
                 console_lines = entry.logs.iter().map(|(_, line)| line.clone()).collect();
             }
@@ -803,7 +795,16 @@ fn finish_process(key: String, launch_id: String) {
     }
 }
 
-// ---------------------------------------------------------------- Статус ----
+fn merge_traffic(target: &mut Value, traffic: Option<&super::server_traffic::TrafficHandle>, running: bool) {
+    let Some(handle) = traffic else { return };
+    let Ok(mut monitor) = handle.lock() else { return };
+    let sample = monitor.sample(running);
+    if let (Some(fields), Some(object)) = (sample.as_object(), target.as_object_mut()) {
+        for (key, value) in fields {
+            object.insert(key.clone(), value.clone());
+        }
+    }
+}
 
 struct EntrySnapshot {
     launch_id: String,
@@ -815,9 +816,10 @@ struct EntrySnapshot {
     tps: f64,
     exit_code: Option<i32>,
     metrics: MetricsCache,
+    traffic: Option<super::server_traffic::TrafficHandle>,
 }
 
-fn status_server_with(config: &ConfigStore, instances: &InstanceStore, name: &str) -> Result<Value, String> {
+pub(crate) fn status_server_with(config: &ConfigStore, instances: &InstanceStore, name: &str) -> Result<Value, String> {
     let info = server_instance(instances, name)?;
     let settings = server_config(config, instances, &info.name)?;
     let now = epoch_seconds();
@@ -836,6 +838,7 @@ fn status_server_with(config: &ConfigStore, instances: &InstanceStore, name: &st
                 tps: entry.tps,
                 exit_code: entry.exit_code,
                 metrics: entry.metrics.clone(),
+                traffic: entry.traffic.clone(),
             }),
             None => None,
         }
@@ -878,9 +881,20 @@ fn status_server_with(config: &ConfigStore, instances: &InstanceStore, name: &st
                     }
                 }
             }
+            // счётчики TCP полезной нагрузки сессии: rx/tx байты и скорость.
+            let mut value = value;
+            merge_traffic(&mut value, item.traffic.as_ref(), true);
             value
         }
-        _ => stopped_metrics(&info.path, setting_i64(&settings, "max_players", 20), &previous, now),
+        _ => {
+            // остановленный, но ещё известный запуск: последние итоги трафика.
+            let mut metrics =
+                stopped_metrics(&info.path, setting_i64(&settings, "max_players", 20), &previous, now);
+            if let Some(item) = snapshot.as_ref() {
+                merge_traffic(&mut metrics, item.traffic.as_ref(), false);
+            }
+            metrics
+        }
     };
 
     let saved_error = {
@@ -984,8 +998,6 @@ fn compute_metrics(
         "tps": (tps.max(0.0) * 100.0).round() / 100.0,
     })
 }
-
-// -------------------------------------------------- Плановый перезапуск ----
 
 fn maybe_scheduled_restart(key: &str, launch_id: &str, schedule: Value) {
     if !schedule.get("enabled").and_then(Value::as_bool).unwrap_or(false) {
@@ -1142,9 +1154,7 @@ fn parse_schedule_time(value: &str) -> Option<(i64, i64)> {
     Some((hours.parse().ok()?, minutes.parse().ok()?))
 }
 
-// ------------------------------------------------------ Конфиг сервера ----
-
-fn server_config(config: &ConfigStore, instances: &InstanceStore, name: &str) -> Result<Value, String> {
+pub(crate) fn server_config(config: &ConfigStore, instances: &InstanceStore, name: &str) -> Result<Value, String> {
     let info = server_instance(instances, name)?;
     let path = info.path.join(SERVER_CONFIG_FILE);
     if is_symlink(&path) {
@@ -1257,7 +1267,7 @@ fn load_protected_settings(config: &ConfigStore, instance_name: &str) -> Result<
     Ok(Value::Object(values))
 }
 
-fn save_protected_settings(config: &ConfigStore, instance_name: &str, settings: &Value) -> Result<(), String> {
+pub(crate) fn save_protected_settings(config: &ConfigStore, instance_name: &str, settings: &Value) -> Result<(), String> {
     let path = protected_settings_path(config, instance_name)?;
     let mut payload = settings.as_object().cloned().unwrap_or_default();
     let keys: Vec<String> = payload.keys().cloned().collect();
@@ -1270,7 +1280,7 @@ fn save_protected_settings(config: &ConfigStore, instance_name: &str, settings: 
     atomic_json_write(&path, &Value::Object(payload), true)
 }
 
-fn write_server_config(path: &Path, values: &Value) -> Result<(), String> {
+pub(crate) fn write_server_config(path: &Path, values: &Value) -> Result<(), String> {
     let filtered: Map<String, Value> = values
         .as_object()
         .cloned()
@@ -1290,6 +1300,10 @@ pub(crate) fn server_memory_limit_kib(total_kib: Option<i64>) -> i64 {
 }
 
 pub(crate) fn normalize_server_config(value: &Value, clamp_memory: bool) -> Result<Value, String> {
+    normalize_server_config_with_limit(value, clamp_memory, server_memory_limit_kib(None))
+}
+
+pub(crate) fn normalize_server_config_with_limit(value: &Value, clamp_memory: bool, memory_limit_kib: i64) -> Result<Value, String> {
     let mut core = py_str(value.get("core"), "custom").trim().to_lowercase();
     if core == "leaves" {
         core = "leaf".to_owned();
@@ -1310,9 +1324,10 @@ pub(crate) fn normalize_server_config(value: &Value, clamp_memory: bool) -> Resu
         if raw.is_empty() { "4GiB".to_owned() } else { raw }
     };
     let memory_kib = parse_memory_kib(&memory_text)?;
-    let memory_limit_kib = server_memory_limit_kib(None);
+    // дефолтные 4 GiB не должны валить конфиг на машине с ≤5,3 ГБ ОЗУ:
+    let default_memory = memory_kib == 4 * 1024 * 1024;
     let memory = if memory_kib > memory_limit_kib {
-        if !clamp_memory {
+        if !clamp_memory && !default_memory {
             return Err(format!(
                 "Память JVM сервера не может превышать {} (75% физической памяти; остальное оставлено системе)",
                 format_memory_kib(memory_limit_kib)
@@ -1406,8 +1421,6 @@ fn normalize_restart_schedule(value: Option<&Value>) -> Value {
     })
 }
 
-// ------------------------------------------------------------ Java/память ----
-
 pub(crate) fn server_java_requirement(version: &str) -> (i64, &'static str) {
     let value = version.trim();
     let parts: Vec<&str> = value.split('.').collect();
@@ -1494,9 +1507,7 @@ fn is_executable_file(path: &Path) -> bool {
     }
 }
 
-// ------------------------------------------------------------- server.port ----
-
-fn apply_server_port(root: &Path, port: i64, public_bind: bool) -> Result<(), String> {
+pub(crate) fn apply_server_port(root: &Path, port: i64, public_bind: bool) -> Result<(), String> {
     if !(1..=65535).contains(&port) {
         return Err("Порт сервера должен быть от 1 до 65535".to_owned());
     }
@@ -1606,8 +1617,6 @@ fn split_keepends(text: &str) -> Vec<&str> {
     parts
 }
 
-// ------------------------------------------------ Консоль и live-состояние ----
-
 fn saved_console(root: &Path) -> Value {
     let path = root.join(CONSOLE_FILE);
     let Ok(meta) = fs::symlink_metadata(&path) else {
@@ -1666,7 +1675,7 @@ fn select_console_lines(lines: &[String]) -> Vec<String> {
     selected
 }
 
-fn server_is_running(root: &Path) -> bool {
+pub(crate) fn server_is_running(root: &Path) -> bool {
     let Some(state) = read_bounded_json(&root.join(LIVE_STATE_FILE), MAX_LIVE_STATE_JSON_BYTES) else {
         return false;
     };
@@ -1715,8 +1724,6 @@ fn write_live(root: &Path, running: bool, pid: i64, started_at: f64) -> Result<(
         true,
     )
 }
-
-// ----------------------------------------------------------- Метрики ----
 
 fn last_metrics(root: &Path) -> Value {
     read_bounded_json(&root.join(METRICS_FILE), MAX_METRICS_JSON_BYTES)
@@ -1837,8 +1844,6 @@ fn directory_size(root: &Path) -> u64 {
     total
 }
 
-// ------------------------------------------------------------- Утилиты ----
-
 fn epoch_seconds() -> f64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1918,7 +1923,192 @@ fn log_response(entries: &[(u64, String)], since: i64, cursor: i64, running: boo
     json!({ "lines": lines, "running": running, "cursor": cursor, "reset": since != 0 })
 }
 
-// ---------------------------------------------------------------- Тесты ----
+const MAX_CORE_VERSIONS: usize = 200;
+
+/// числовой ключ версии Minecraft («1.20.4» -> [1, 20, 4]).
+fn minecraft_version_key(version: &str) -> Option<Vec<u32>> {
+    let mut parts = Vec::new();
+    for part in version.split('.') {
+        let value: u32 = part.parse().ok()?;
+        parts.push(value);
+    }
+    if parts.is_empty() || parts.len() > 3 {
+        return None;
+    }
+    Some(parts)
+}
+
+/// уникальные «чистые» релизы, отсортированные от новых к старым.
+fn unique_core_versions(values: &[String]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut result: Vec<String> = Vec::new();
+    for value in values {
+        let version = value.trim();
+        if version.is_empty() || !seen.insert(version.to_owned()) {
+            continue;
+        }
+        // вместе с релизами попадаются rc/pre-сборки — ключа не имеют, из
+        // выбора убираем, как и в Python-реализации.
+        if minecraft_version_key(version).is_some() {
+            result.push(version.to_owned());
+        }
+    }
+    result.sort_by(|left, right| {
+        let left_key = minecraft_version_key(left).unwrap_or_default();
+        let right_key = minecraft_version_key(right).unwrap_or_default();
+        right_key.cmp(&left_key)
+    });
+    result.truncate(MAX_CORE_VERSIONS);
+    result
+}
+
+fn versions_from_payload(value: &Value) -> Vec<String> {
+    let mut raw: Vec<String> = Vec::new();
+    if let Some(versions) = value.get("versions") {
+        match versions {
+            Value::Array(items) => {
+                for item in items {
+                    if let Some(text) = item.as_str() {
+                        raw.push(text.to_owned());
+                    }
+                }
+            }
+            Value::Object(groups) => {
+                for group in groups.values() {
+                    if let Some(items) = group.as_array() {
+                        for item in items {
+                            if let Some(text) = item.as_str() {
+                                raw.push(text.to_owned());
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    raw
+}
+
+fn github_branch_versions(value: &Value, prefix: &str) -> Vec<String> {
+    let mut raw: Vec<String> = Vec::new();
+    let Some(branches) = value.as_array() else {
+        return raw;
+    };
+    let pattern = format!(r"^{}(\d+(?:\.\d+){{1,2}})$", regex::escape(prefix));
+    let Ok(re) = Regex::new(&pattern) else {
+        return raw;
+    };
+    for branch in branches {
+        let Some(name) = branch.get("name").and_then(Value::as_str) else {
+            continue;
+        };
+        if let Some(captures) = re.captures(name) {
+            raw.push(captures.get(1).map(|value| value.as_str().to_owned()).unwrap_or_default());
+        }
+    }
+    raw
+}
+
+fn patina_release_versions(value: &Value) -> Vec<String> {
+    let mut raw: Vec<String> = Vec::new();
+    let Ok(re) = Regex::new(r"\b\d+\.\d+(?:\.\d+)?\b") else {
+        return raw;
+    };
+    let Some(releases) = value.as_array() else {
+        return raw;
+    };
+    for release in releases {
+        let tag = release.get("tag_name").and_then(Value::as_str).unwrap_or("");
+        let name = release.get("name").and_then(Value::as_str).unwrap_or("");
+        let text = format!("{tag} {name}");
+        for capture in re.captures_iter(&text) {
+            raw.push(capture.get(0).map(|value| value.as_str().to_owned()).unwrap_or_default());
+        }
+    }
+    raw
+}
+
+fn mojang_release_versions(http: &std::sync::Arc<super::net::HttpClient>) -> Result<Vec<String>, String> {
+    let value = http.get_json(super::constants::VERSION_MANIFEST_URL, None)?;
+    let mut raw: Vec<String> = Vec::new();
+    if let Some(versions) = value.get("versions").and_then(Value::as_array) {
+        for item in versions {
+            if item.get("type").and_then(Value::as_str) == Some("release") {
+                if let Some(id) = item.get("id").and_then(Value::as_str) {
+                    raw.push(id.to_owned());
+                }
+            }
+        }
+    }
+    Ok(unique_core_versions(&raw))
+}
+
+fn core_versions(http: &std::sync::Arc<super::net::HttpClient>, core: &str) -> Result<Vec<String>, String> {
+    match core {
+        "paper" | "folia" | "velocity" | "waterfall" => {
+            let value = http.get_json(&format!("https://fill.papermc.io/v3/projects/{core}"), None)?;
+            Ok(unique_core_versions(&versions_from_payload(&value)))
+        }
+        "purpur" => {
+            let value = http.get_json("https://api.purpurmc.org/v2/purpur", None)?;
+            Ok(unique_core_versions(&versions_from_payload(&value)))
+        }
+        "leaf" => {
+            let value = http.get_json("https://api.leafmc.one/v2/projects/leaf", None)?;
+            Ok(unique_core_versions(&versions_from_payload(&value)))
+        }
+        "pufferfish" => {
+            let branches = http
+                .get_json("https://api.github.com/repos/pufferfish-gg/Pufferfish/branches?per_page=100", None)
+                .ok();
+            if let Some(branches) = branches {
+                let majors = github_branch_versions(&branches, "ver/");
+                if !majors.is_empty() {
+                    let releases = mojang_release_versions(http)?;
+                    return Ok(releases
+                        .into_iter()
+                        .filter(|version| {
+                            majors.iter().any(|major| version == major || version.starts_with(&format!("{major}.")))
+                        })
+                        .collect());
+                }
+            }
+            mojang_release_versions(http)
+        }
+        "patina" => {
+            if let Ok(branches) = http.get_json("https://api.github.com/repos/PatinaMC/Patina/branches?per_page=100", None) {
+                let versions = github_branch_versions(&branches, "ver/");
+                if !versions.is_empty() {
+                    return Ok(unique_core_versions(&versions));
+                }
+            }
+            if let Ok(releases) = http.get_json("https://api.github.com/repos/PatinaMC/Patina/releases?per_page=30", None) {
+                let versions = patina_release_versions(&releases);
+                if !versions.is_empty() {
+                    return Ok(unique_core_versions(&versions));
+                }
+            }
+            mojang_release_versions(http)
+        }
+        "spigot" => mojang_release_versions(http),
+        _ => Ok(Vec::new()),
+    }
+}
+
+/// операция «server_core_versions»: список доступных версий выбранного ядра.
+pub fn server_core_versions(request: &Value) -> Result<Value, String> {
+    let core = request
+        .get("core")
+        .and_then(Value::as_str)
+        .unwrap_or("custom")
+        .trim()
+        .to_lowercase();
+    let operation_id = request.get("operation_id").and_then(Value::as_str).unwrap_or("");
+    let config = ConfigStore::load()?;
+    let http = super::net::client_from_settings(config.settings(), operation_id)?;
+    Ok(json!({ "core": core, "versions": core_versions(&http, &core)? }))
+}
 
 #[cfg(test)]
 mod tests {
@@ -1944,7 +2134,39 @@ mod tests {
             process_lock: None,
             scheduled_restart_date: String::new(),
             metrics: MetricsCache::default(),
+            traffic: None,
         }
+    }
+
+    #[test]
+    fn core_versions_sort_and_filter_like_python() {
+        // rc/pre-сборки без числового ключа из выбора убираются, дубликаты
+        // схлопываются, порядок — от новых к старым.
+        let versions = unique_core_versions(&[
+            "1.20.4".to_owned(),
+            "1.21".to_owned(),
+            "1.20.4-rc1".to_owned(),
+            "1.20.4".to_owned(),
+            "1.20".to_owned(),
+            "мусор".to_owned(),
+        ]);
+        assert_eq!(versions, vec!["1.21", "1.20.4", "1.20"]);
+        assert_eq!(minecraft_version_key("1.20.4"), Some(vec![1, 20, 4]));
+        assert_eq!(minecraft_version_key("24w14a"), None);
+        assert_eq!(minecraft_version_key("1.20.4.5"), None);
+    }
+
+    #[test]
+    fn github_branch_versions_extract_supported_majors() {
+        let branches = json!([
+            { "name": "ver/1.21.4" },
+            { "name": "ver/1.20" },
+            { "name": "main" },
+            { "name": "ver/abc" }
+        ]);
+        let mut versions = github_branch_versions(&branches, "ver/");
+        versions.sort();
+        assert_eq!(versions, vec!["1.20".to_owned(), "1.21.4".to_owned()]);
     }
 
     #[test]
@@ -1989,6 +2211,21 @@ mod tests {
     }
 
     #[test]
+    fn default_memory_survives_low_ram_even_without_clamp() {
+        // машина на 4 ГБ: потолок 3 ГБ. Дефолт мастера обязан ужиматься
+        let limit = server_memory_limit_kib(Some(4 * 1024 * 1024));
+        for memory in ["", "4GiB", "4G", "4096MiB", "4.0GiB"] {
+            let value = normalize_server_config_with_limit(&json!({ "memory": memory }), false, limit).unwrap();
+            assert_eq!(value["memory"], "3GiB", "memory={memory:?}");
+        }
+        let error = normalize_server_config_with_limit(&json!({ "memory": "6GiB" }), false, limit).unwrap_err();
+        assert!(error.contains("75% физической памяти"));
+        // осознанное значение ниже потолка сохраняется как есть
+        let value = normalize_server_config_with_limit(&json!({ "memory": "2GiB" }), false, limit).unwrap();
+        assert_eq!(value["memory"], "2GiB");
+    }
+
+    #[test]
     fn validates_security_profile() {
         let error = normalize_server_config(&json!({ "security_profile": "paranoid" }), true).unwrap_err();
         assert_eq!(error, "Серверный security profile должен быть manual, strict или off");
@@ -2029,7 +2266,7 @@ mod tests {
 
     #[test]
     fn lax_schedule_time_matches_python() {
-        // Python разбирает (\d{1,2}):(\d{2}) без проверки диапазона
+        // python разбирает (\d{1,2}):(\d{2}) без проверки диапазона
         assert_eq!(parse_schedule_time("25:99"), Some((25, 99)));
         assert_eq!(parse_schedule_time("4:00"), Some((4, 0)));
         assert_eq!(parse_schedule_time("04:00"), Some((4, 0)));

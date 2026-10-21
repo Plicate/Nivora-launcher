@@ -107,6 +107,16 @@ class SkinProfileTests(unittest.TestCase):
         self.assertEqual(result["capes"][0]["state"], "ACTIVE")
         self.assertEqual(result["capes"][0]["name"], "Migrator")
 
+    def test_profile_upgrades_mojang_http_texture_urls_and_keeps_unequipped_capes(self) -> None:
+        from nivora_launcher.skins import _secure_texture_url
+
+        self.assertEqual(_secure_texture_url("http://textures.minecraft.net/texture/abc"), "https://textures.minecraft.net/texture/abc")
+        self.assertEqual(_secure_texture_url("https://example.com/x.png"), "https://example.com/x.png")
+        http = FakeHttp({"capes": [{"id": "a", "state": "INACTIVE", "url": "http://textures.minecraft.net/texture/cape"}]})
+        result = profile(http, _account())
+        self.assertEqual(result["capes"][0]["state"], "INACTIVE")
+        self.assertTrue(result["capes"][0]["url"].startswith(("https://textures.minecraft.net/", "data:image/png")))
+
     def test_profile_retries_once_with_refreshed_token_after_unauthorized_response(self) -> None:
         http = UnauthorizedOnceHttp(
             {

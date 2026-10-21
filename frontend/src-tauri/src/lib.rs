@@ -7,10 +7,11 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::{Mutex, OnceLock};
 
 use serde_json::Value;
+use tauri::{AppHandle, Emitter, Manager};
+#[cfg(desktop)]
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Emitter, Manager,
 };
 
 #[cfg(unix)]
@@ -21,8 +22,14 @@ use std::os::windows::process::CommandExt;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
+/// Есть ли живой значок в трее. Если нет, крестик закрывает приложение
+/// по-настоящему — прятать окно «в никуда» без способа вернуть было бы хуже.
+static TRAY_AVAILABLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 // Операции GUI, обслуживаемые локально, без воркера.
 mod rust_engine;
+// Дымовой прогон упакованного приложения (`--smoke-test`).
+mod smoke;
 
 #[cfg(not(windows))]
 fn python_path() -> Option<String> {
@@ -121,23 +128,35 @@ fn bundled_backend_path(app: &AppHandle) -> Option<PathBuf> {
             candidates.push(exe_dir.join(backend_executable_name()));
         }
     }
-    candidates.into_iter().find(|path| path.is_file())
+    // Пустые файлы — заглушки из репозитория исходников: реальный бэкенд
+    // кладут сборочные скрипты. На такую нечестно «наткнуться» — иначе
+    // запуск падает с невнятной ошибкой exec вместо запасного пути (python3).
+    candidates.into_iter().find(|path| path.is_file() && fs::metadata(path).map(|meta| meta.len() > 0).unwrap_or(false))
 }
 
-// Встроенный бэкенд: nivora-launcher-backend.exe упаковывается внутрь самого
-// nivora-launcher.exe (include_bytes!), поэтому портативная сборка — ОДИН файл.
-// На Linux (dev и Arch-пакет) файла нет и он не нужен — там работает системный
-// python3, поэтому const и функция целиком выключены через cfg(windows).
+// Встроенный бэкенд: zip-архив onedir-сборки PyInstaller упаковывается внутрь
+// nivora-launcher.exe, поэтому портативная сборка — ОДИН файл. Архив, а не
+// «голый» exe: вложенный исполняемый файл внутри другого — классический
+// признак дроппера, за который эвристики антивирусов рвали экзешник на части
+// (10+ срабатываний на VirusTotal). Onedir-сборка сама по себе детектируется
+// на порядок реже onefile.
+// На Linux (dev и Arch-пакет) архива нет и он не нужен — там работает
+// системный python3, поэтому const и функция целиком выключены через cfg(windows).
 // Для dev-сборки на Windows бэкенд собирается заранее: scripts/build_windows_exe.sh --only-backend.
-#[cfg(windows)]
-const EMBEDDED_BACKEND_EXE: &[u8] =
-    include_bytes!("../resources/backend/nivora-launcher-backend.exe");
+#[cfg(all(windows, embedded_backend))]
+const EMBEDDED_BACKEND_ARCHIVE: &[u8] =
+    include_bytes!("../resources/backend/nivora-launcher-backend.zip");
 
-// Распаковывает встроенный бэкенд в %LOCALAPPDATA%\nivora-launcher\backend\
+// Распаковывает встроенный бэкенд в %LOCALAPPDATA%\nivora-launcher\backend\v<версия>\
 // (писать рядом с exe нельзя: Program Files доступен только для чтения) и
-// возвращает путь. Имя файла содержит версию приложения; при несовпадении
-// размера/хеша бэкенд перезаписывается, файлы прошлых версий удаляются.
-#[cfg(windows)]
+// возвращает путь к exe. Пересобирается при смене версии или несовпадении
+// контрольной суммы архива; каталоги прошлых версий удаляются.
+#[cfg(all(windows, not(embedded_backend)))]
+fn embedded_backend_exe() -> Result<PathBuf, String> {
+    Err("Бэкенд не найден рядом с приложением, а эта сборка собрана без встроенного архива. Переустановите Nivora Launcher установщиком.".to_owned())
+}
+
+#[cfg(all(windows, embedded_backend))]
 fn embedded_backend_exe() -> Result<PathBuf, String> {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::Hasher as _;
@@ -152,35 +171,90 @@ fn embedded_backend_exe() -> Result<PathBuf, String> {
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("TEMP").map(PathBuf::from))
         .unwrap_or_else(std::env::temp_dir);
-    let directory = base.join(rust_engine::state::LAUNCHER_DIR).join("backend");
-    fs::create_dir_all(&directory)
-        .map_err(|error| format!("Не удалось создать каталог бэкенда: {error}"))?;
-    let file_name = format!("nivora-launcher-backend-v{}.exe", env!("CARGO_PKG_VERSION"));
-    let target = directory.join(&file_name);
-    let up_to_date = match fs::read(&target) {
-        Ok(existing) => {
-            existing.len() == EMBEDDED_BACKEND_EXE.len()
-                && content_hash(&existing) == content_hash(EMBEDDED_BACKEND_EXE)
-        }
-        Err(_) => false,
-    };
+    let version_dir = base
+        .join(rust_engine::state::LAUNCHER_DIR)
+        .join("backend")
+        .join(format!("v{}", env!("CARGO_PKG_VERSION")));
+    let marker = version_dir.join(".archive-hash");
+    let expected_hash = content_hash(EMBEDDED_BACKEND_ARCHIVE).to_string();
+    let up_to_date = fs::read_to_string(&marker).ok().as_deref() == Some(expected_hash.as_str());
     if !up_to_date {
-        let temporary = directory.join(format!("{file_name}.tmp"));
-        fs::write(&temporary, EMBEDDED_BACKEND_EXE)
-            .and_then(|()| fs::rename(&temporary, &target))
+        if version_dir.exists() {
+            fs::remove_dir_all(&version_dir)
+                .map_err(|error| format!("Не удалось обновить каталог бэкенда: {error}"))?;
+        }
+        fs::create_dir_all(&version_dir)
+            .map_err(|error| format!("Не удалось создать каталог бэкенда: {error}"))?;
+        extract_backend_archive(&version_dir)
             .map_err(|error| format!("Не удалось распаковать встроенный backend: {error}"))?;
+        fs::write(&marker, expected_hash)
+            .map_err(|error| format!("Не удалось зафиксировать распаковку backend: {error}"))?;
     }
-    if let Ok(entries) = fs::read_dir(&directory) {
-        for entry in entries.flatten() {
-            let raw_name = entry.file_name();
-            let name = raw_name.to_string_lossy();
-            let name: &str = &name;
-            if name.starts_with("nivora-launcher-backend") && name != file_name.as_str() {
-                let _ = fs::remove_file(entry.path());
+    let executable = version_dir.join(backend_executable_name());
+    if !executable.is_file() {
+        return Err("В архиве бэкенда нет nivora-launcher-backend.exe".to_owned());
+    }
+    // Распаковки прошлых версий больше не нужны.
+    if let Some(parent) = version_dir.parent() {
+        let keep = version_dir.file_name().map(|value| value.to_os_string());
+        if let Ok(entries) = fs::read_dir(parent) {
+            for entry in entries.flatten() {
+                if entry.path().is_dir() && Some(entry.file_name()) != keep {
+                    let _ = fs::remove_dir_all(entry.path());
+                }
             }
         }
     }
-    Ok(target)
+    Ok(executable)
+}
+
+#[cfg(all(windows, embedded_backend))]
+fn extract_backend_archive(target: &Path) -> Result<(), String> {
+    let reader = std::io::Cursor::new(EMBEDDED_BACKEND_ARCHIVE);
+    let mut archive = zip::ZipArchive::new(reader).map_err(|error| error.to_string())?;
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index).map_err(|error| error.to_string())?;
+        if entry.is_dir() {
+            continue;
+        }
+        // Внутри архива может быть как корень onedir-каталога, так и его
+        // содержимое — приводим к плоской раскладке «рядом с exe».
+        let name = entry.name().replace('\\', "/");
+        let stripped = name
+            .strip_prefix("nivora-launcher-backend/")
+            .unwrap_or(&name)
+            .trim_start_matches('/')
+            .to_owned();
+        if stripped.is_empty() || stripped.contains("..") {
+            continue;
+        }
+        let destination = target.join(&stripped);
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        }
+        let mut file = fs::File::create(&destination).map_err(|error| error.to_string())?;
+        std::io::copy(&mut entry, &mut file).map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+const BACKEND_LOG_LIMIT: u64 = 5 * 1024 * 1024;
+const BACKEND_LOG_KEEP: u32 = 3;
+
+/// Ротация журнала: backend.log → backend.log.1 → … → backend.log.<keep>.
+/// Без неё stderr воркера рос бесконечно (логи пишутся только в файл —
+/// консоли в production-сборке нет).
+fn rotate_log(path: &Path, limit: u64, keep: u32) {
+    let Ok(meta) = fs::metadata(path) else { return };
+    if meta.len() < limit || keep == 0 {
+        return;
+    }
+    let numbered = |index: u32| PathBuf::from(format!("{}.{index}", path.display()));
+    let _ = fs::remove_file(numbered(keep));
+    for index in (1..keep).rev() {
+        let _ = fs::rename(numbered(index), numbered(index + 1));
+    }
+    let _ = fs::rename(path, numbered(1));
 }
 
 struct BackendWorker {
@@ -192,6 +266,7 @@ struct BackendWorker {
 impl BackendWorker {
     fn spawn(app: &AppHandle) -> Result<Self, String> {
         let stderr_path = backend_log_path()?;
+        rotate_log(&stderr_path, BACKEND_LOG_LIMIT, BACKEND_LOG_KEEP);
         let stderr_file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -400,29 +475,33 @@ async fn backend_call(app: AppHandle, request: Value) -> Result<Value, String> {
 }
 
 fn backend_call_sync(app: AppHandle, request: Value) -> Result<Value, String> {
-    // Родные Rust-операции (хеширование, инвентаризация каталогов) идут
-    // мимо Python-воркера: тот же allowlist-гейт, но обслуживаются нативно —
-    // без spawn, без блокировки воркера и без python3 вообще. Ветке воркера
-    // отдаются и нативные операции, которым нужен WebDAV (см. needs_worker).
-    if let Some(operation) = request.get("operation").and_then(Value::as_str) {
-        if rust_engine::is_native(operation) && !rust_engine::needs_worker(operation, &request) {
-            validate_backend_request(&request)?;
+    // На случай операций, начатых до setup (или в тестовых сборках без
+    // окна), sink обновляется на каждый вызов: AppHandle клонируется
+    // дёшево, а гарантированно живой мост важнее сэкономленных наносекунд.
+    {
+        let handle = app.clone();
+        rust_engine::events::set_event_sink(std::sync::Arc::new(move |value| {
+            let _ = handle.emit("backend-event", value);
+        }));
+    }
+    // Единая точка диспетчеризации: белый список и маршрут выбирает
+    // rust_engine::registry::route. Нативные операции идут мимо воркера
+    // (без spawn и очереди), воркер поднимается лениво и только для операций,
+    // которых движок ещё не перенял.
+    match rust_engine::registry::route(&request)? {
+        rust_engine::registry::Route::Native => {
+            let operation = rust_engine::registry::operation_of(&request)?;
             return rust_engine::handle(operation, &request);
         }
-    }
-
-    // Запуск Bedrock-экземпляров ведёт Rust-движок (Linux — BedrockOnLinux,
-    // Windows — официальный Minecraft for Windows): игровая сессия больше не
-    // требует отдельного Python-воркера. Allowlist проверяется ДО запуска.
-    if rust_engine::bedrock::should_intercept_launch(&request) {
-        validate_backend_request(&request)?;
-        return rust_engine::bedrock::launch_intercepted(&request);
-    }
-
-    if uses_transient_backend_worker(&request) {
-        let mut worker = BackendWorker::spawn(&app)?;
-        let response = worker.request(&app, &request)?;
-        return parse_backend_response(response);
+        rust_engine::registry::Route::BedrockLaunch => {
+            return rust_engine::bedrock::launch_intercepted(&request);
+        }
+        rust_engine::registry::Route::TransientWorker => {
+            let mut worker = BackendWorker::spawn(&app)?;
+            let response = worker.request(&app, &request)?;
+            return parse_backend_response(response);
+        }
+        rust_engine::registry::Route::Worker => {}
     }
 
     let worker_mutex = backend_worker();
@@ -436,17 +515,46 @@ fn backend_call_sync(app: AppHandle, request: Value) -> Result<Value, String> {
         Ok(value) => value,
         Err(error) => {
             worker_guard.take();
-            return Err(error);
+            // Воркер умер прямо посреди запроса (краш Python, битый пайп,
+            // антивирус прибил процесс) — это не приговор операции: поднимаем
+            // новый процесс и повторяем запрос один раз, чтобы пользователь
+            // не увидел ошибку там, где хватает перезапуска подсистемы.
+            if !is_worker_death(&error) {
+                return Err(error);
+            }
+            startup_trace(&format!("бэкенд: воркер умер ({error}) — перезапускаю и повторяю запрос"));
+            let mut worker = match BackendWorker::spawn(&app) {
+                Ok(worker) => worker,
+                Err(spawn_error) => {
+                    return Err(format!("{error}. Перезапуск не удался: {spawn_error}"));
+                }
+            };
+            match worker.request(&app, &request) {
+                Ok(value) => {
+                    *worker_guard = Some(worker);
+                    value
+                }
+                Err(retry_error) => return Err(retry_error),
+            }
         }
     };
     parse_backend_response(response)
 }
 
+/// Смерть/поломка канала связи с Python-воркером — когда повтор через новый
+/// процесс имеет смысл. Ошибки самой операции (валидация, allowlist) сюда
+/// не входят: их повтор бессмыслен.
+fn is_worker_death(message: &str) -> bool {
+    message.contains("неожиданно завершился")
+        || message.contains("закрыл stdout")
+        || message.contains("Не удалось прочитать Python backend")
+        || message.contains("Не удалось передать GUI-запрос")
+        || message.contains("Некорректное событие Python backend")
+}
+
+#[cfg(test)]
 fn uses_transient_backend_worker(request: &Value) -> bool {
-    matches!(
-        request.get("operation").and_then(Value::as_str),
-        Some("launch") | Some("launch_instance")
-    )
+    rust_engine::registry::uses_transient_worker(request)
 }
 
 fn parse_backend_response(response: Value) -> Result<Value, String> {
@@ -462,38 +570,8 @@ fn parse_backend_response(response: Value) -> Result<Value, String> {
 }
 
 fn validate_backend_request(request: &Value) -> Result<(), String> {
-    let operation = request
-        .get("operation")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "GUI-запрос не содержит operation".to_owned())?;
-    const ALLOWED: &[&str] = &[
-        "bootstrap", "versions", "java_options", "java_validate", "graphics_diagnostics", "security_status", "loader_choices", "save_settings",
-        "cloud_status", "cloud_configure", "cloud_test", "cloud_list", "cloud_sync", "cloud_restore", "cloud_delete", "cloud_disconnect",
-        "wallpaper_import", "wallpaper_clear", "create_offline_account", "login_microsoft", "microsoft_login_status", "delete_account", "set_default_account", "move_account",
-        "server_network_diagnose", "server_network_status", "server_network_prepare", "server_network_open", "server_network_close",
-        "server_cores", "server_core_versions", "server_plugin_catalogs", "save_server_plugin_catalogs", "server_create", "server_details", "server_save_config", "server_upload_core", "server_core_download", "server_start", "server_stop", "server_restart", "server_command", "server_log", "server_status", "server_file_list", "server_file_read", "server_file_write", "server_file_mkdir", "server_file_upload", "server_file_delete", "server_plugin_search", "server_plugin_details", "server_plugin_updates", "server_plugin_update", "server_plugin_install", "server_plugin_remove", "server_snapshot_list", "server_snapshot_create", "server_snapshot_restore", "server_snapshot_delete",
-        "delete_instance", "duplicate_instance", "external_instances_scan", "external_instance_import", "instance_details", "instance_snapshot_list", "instance_snapshot_create", "instance_snapshot_restore", "instance_snapshot_delete", "instance_groups", "create_instance_group", "delete_instance_group", "update_instance_profile", "instance_log", "instance_file_list", "instance_file_read", "instance_file_write", "instance_file_mkdir", "instance_file_upload", "instance_file_delete", "instance_log_archives", "instance_log_archive_read", "save_instance_settings",
-        "plugin_dev_changes", "plugin_api_operation_trace", "plugin_list", "plugin_install", "plugin_set_enabled", "plugin_uninstall", "plugin_security_status", "plugin_permission_grants_set", "plugin_local_untrusted_execution", "plugin_publisher_pin", "plugin_publisher_unpin", "plugin_local_revoke", "plugin_local_unrevoke", "plugin_api_source", "plugin_api_runtime_info", "plugin_api_capabilities", "plugin_api_quota_usage", "plugin_api_permissions_get", "plugin_api_permissions_set", "plugin_api_authorize", "plugin_api_open_external", "open_external", "plugin_api_files_list", "plugin_api_files_read", "plugin_api_files_write", "plugin_api_files_remove", "plugin_api_config_projected_read", "plugin_http_request", "plugin_api_instances_list", "plugin_api_process_metrics", "plugin_api_proxy_routes_get", "plugin_api_proxy_routes_save", "plugin_api_proxy_routes_add", "plugin_api_proxy_routes_remove", "plugin_network_fetch", "plugin_network_dns", "plugin_network_ping", "plugin_network_port_check", "plugin_server_list_get", "plugin_server_list_save", "plugin_server_list_add", "plugin_server_list_remove", "plugin_storage_get", "plugin_storage_set", "plugin_storage_remove", "plugin_config_get", "plugin_config_set", "plugin_config_remove", "plugin_file_list", "plugin_file_read", "plugin_file_write", "plugin_file_remove", "plugin_database_query", "plugin_database_execute", "lan_session_create", "lan_session_join", "lan_session_status", "lan_session_leave", "github_plugin_status", "github_plugin_search", "github_plugin_details", "github_plugin_install", "github_plugin_oauth_start", "github_plugin_oauth_poll", "github_plugin_sign_out", "github_plugin_publish",
-        "remove_instance_asset", "toggle_mod", "import_asset", "install", "launch", "launch_instance", "open_folder", "modpack_import", "mods_search", "mods_details", "mods_check_updates", "mods_update", "mods_install", "mods_remove", "mod_audit_prepare", "mod_audit_accept", "mod_audit_cancel", "mod_audit_status", "skins_list", "skins_import", "skin_profile", "apply_skin", "clear_skin", "apply_cape", "clear_cape", "open_skins_folder",
-        "bedrock_runtime_status", "bedrock_versions", "bedrock_setup_version", "bedrock_setup_status", "bedrock_setup_cancel", "bedrock_create_instance", "bedrock_content_list", "bedrock_content_import", "bedrock_content_remove", "bedrock_store_login", "bedrock_store_login_status", "bedrock_store_login_cancel", "bedrock_account_status", "bedrock_screenshots_list", "bedrock_stop", "rename_instance_group",
-        "system_notify", "recording_start", "recording_stop", "recording_status",
-        // Профили настроек, бэкапы миров, темы оформления и обслуживание кеша
-        // раньше отбивались ошибкой «Операция GUI не разрешена desktop bridge»,
-        // хотя бэкенд их полностью поддерживает.
-        "settings_profiles_list", "settings_profile_save", "settings_profile_apply", "settings_profile_delete", "settings_profile_export", "settings_profile_import",
-        "world_backup_list", "world_backup_create", "world_backup_restore", "world_backup_delete", "world_backup_schedule_get", "world_backup_schedule_set",
-        "theme_list", "theme_preview", "theme_save", "theme_delete", "theme_import", "theme_export", "github_theme_search", "github_theme_install",
-        "mod_dependency_graph", "mod_removal_impact", "export_modpack", "optimization_analyze", "optimization_apply",
-        "plugin_publisher_revocation_authority_set", "plugin_revocations_import",
-        // Родные Rust-операции: обслуживаются движком в rust_engine.rs
-        // и не требуют Python-воркера. Список = rust_engine::NATIVE_OPS.
-        "hash_file", "hash_directory", "engine_info", "system_metrics", "overlay_state",
-        "jvm_presets_list", "launch_history", "cache_stats", "cache_prune",
-    ];
-    if !ALLOWED.contains(&operation) {
-        return Err("Операция GUI не разрешена desktop bridge".to_owned());
-    }
-    Ok(())
+    // Белый список = rust_engine::registry (NATIVE_OPS ∪ WORKER_OPS).
+    rust_engine::registry::validate(request).map(|_| ())
 }
 
 /// Любой сбой старта обязан быть ВИДИМЫМ. У оконной подсистемы нет консоли,
@@ -521,12 +599,48 @@ fn fatal_dialog(message: &str) {
 }
 
 #[cfg(not(windows))]
-fn fatal_dialog(_message: &str) {}
+fn fatal_dialog(message: &str) {
+    // На Linux «тихая смерть» была нормой: ошибка запуска писалась в stderr,
+    // которого при запуске из .desktop нет вовсе. macOS без графических
+    // helpers — то же самое. Показываем текст любым доступным способом;
+    // если helpers нет — остаётся лог.
+    #[cfg(target_os = "macos")]
+    let script = format!(
+        "display dialog \"{}\" with title \"Nivora Launcher — ошибка запуска\" buttons {{\"OK\"}} with icon stop",
+        message.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n")
+    );
+    #[cfg(target_os = "macos")]
+    let attempts: Vec<(&str, Vec<&str>)> = vec![("osascript", vec!["-e", script.as_str()])];
+    #[cfg(not(target_os = "macos"))]
+    let attempts: Vec<(&str, Vec<&str>)> = vec![
+        (
+            "zenity",
+            vec!["--error", "--title", "Nivora Launcher — ошибка запуска", "--text", message],
+        ),
+        (
+            "kdialog",
+            vec!["--title", "Nivora Launcher — ошибка запуска", "--error", message],
+        ),
+        ("notify-send", vec!["-u", "critical", "Nivora Launcher", message]),
+    ];
+    for (program, args) in attempts {
+        if Command::new(program)
+            .args(&args)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok()
+        {
+            return;
+        }
+    }
+    eprintln!("{message}");
+}
 
 /// Паники оконной сборки никто не видит: у windows-подсистемы нет консоли,
 /// stderr отброшен, и падение на старте выглядит как «лаунчер просто
-/// закрывается». Хук дописывает панику с местом и трассировкой в
-/// %LOCALAPPDATA%\nivora-launcher\panic.log (на unix — во временный каталог),
+/// закрывается». Хук дописывает панику с местом и трассировкой рядом с
+/// остальной диагностикой (Windows — %LOCALAPPDATA%, Linux — ~/.local/share),
 /// чтобы краш можно было диагностировать по файлу. В release на Windows
 /// паника дополнительно показывается окном — «молча» приложение больше
 /// не умирает никогда.
@@ -542,11 +656,7 @@ fn install_panic_hook() {
             .map(|value| (*value).to_owned())
             .or_else(|| info.payload().downcast_ref::<String>().cloned())
             .unwrap_or_else(|| "паника без текста".to_owned());
-        let base = std::env::var_os("LOCALAPPDATA")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("TMPDIR").map(PathBuf::from))
-            .unwrap_or_else(std::env::temp_dir);
-        let directory = base.join(rust_engine::state::LAUNCHER_DIR);
+        let directory = diagnostic_dir();
         let _ = fs::create_dir_all(&directory);
         let trace = std::backtrace::Backtrace::force_capture();
         let content = format!(
@@ -559,7 +669,8 @@ fn install_panic_hook() {
             static DIALOG_SHOWN: AtomicBool = AtomicBool::new(false);
             if !DIALOG_SHOWN.swap(true, Ordering::SeqCst) {
                 fatal_dialog(&format!(
-                    "Внутренняя ошибка Nivora Launcher (паника):\n\n{payload}\n\nМесто: {location}\n\nПодробности: %LOCALAPPDATA%\\nivora-launcher\\panic.log"
+                    "Внутренняя ошибка Nivora Launcher (паника):\n\n{payload}\n\nМесто: {location}\n\nПодробности: {}",
+                    diagnostic_dir().join("panic.log").display()
                 ));
             }
         }
@@ -609,22 +720,15 @@ fn install_native_crash_filter() {
     }
 }
 
-/// Трассировка старта: установленная (setup) версия падала молча, и было
-/// невозможно узнать, как далеко она дошла. Каждая веха запуска дописывается
-/// в %LOCALAPPDATA%\\nivora-launcher\\startup.log (на unix — в каталог данных
-/// окружения) — при любом странном поведении файл сразу даёт картину.
+/// Трассировка старта: каждая веха запуска дописывается в startup.log рядом
+/// с данными лаунчера — при любом странном поведении файл сразу даёт картину.
 fn startup_trace(message: &str) {
-    let base = std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("XDG_DATA_HOME").map(PathBuf::from))
-        .or_else(|| std::env::var_os("TMPDIR").map(PathBuf::from))
-        .unwrap_or_else(std::env::temp_dir);
-    let directory = base.join(rust_engine::state::LAUNCHER_DIR);
-    let _ = fs::create_dir_all(&directory);
+    let base = diagnostic_dir();
+    let _ = fs::create_dir_all(&base);
     let Ok(mut file) = OpenOptions::new()
         .create(true)
         .append(true)
-        .open(directory.join("startup.log"))
+        .open(base.join("startup.log"))
     else {
         return;
     };
@@ -635,6 +739,32 @@ fn startup_trace(message: &str) {
     let _ = writeln!(file, "[{seconds}] v{} {message}", env!("CARGO_PKG_VERSION"));
 }
 
+/// Каталог диагностики: %LOCALAPPDATA% на Windows, ~/.local/share — на Linux
+/// (временный каталог затирается при перезагрузке, логи там не ищут).
+fn diagnostic_dir() -> PathBuf {
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        return PathBuf::from(local).join(rust_engine::state::LAUNCHER_DIR);
+    }
+    if let Some(data_home) = std::env::var_os("XDG_DATA_HOME") {
+        return PathBuf::from(data_home).join(rust_engine::state::LAUNCHER_DIR);
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        return PathBuf::from(home)
+            .join(".local/share")
+            .join(rust_engine::state::LAUNCHER_DIR);
+    }
+    std::env::temp_dir().join(rust_engine::state::LAUNCHER_DIR)
+}
+
+/// Путь к логу для сообщений об ошибках — платформозависимый, чтобы не
+/// отправлять Linux-пользователя искать %LOCALAPPDATA%.
+fn diagnostic_log_hint() -> String {
+    diagnostic_dir()
+        .join("startup.log")
+        .display()
+        .to_string()
+}
+
 pub fn run() {
     install_panic_hook();
     #[cfg(windows)]
@@ -643,9 +773,22 @@ pub fn run() {
         .map(|path| path.display().to_string())
         .unwrap_or_else(|_| "?".to_owned());
     startup_trace(&format!("запуск: exe={executable}"));
-    if let Err(error) = tauri::Builder::default()
+    // Ярлык экземпляра стартует лаунчер с `--launch-instance <имя>`:
+    // валидное имя запоминается для UI (холодный старт) или уходит живой
+    // копии через guard (вторая копия), невалидное — молча отбрасывается.
+    let launch_argument = rust_engine::shortcuts::launch_argument(std::env::args().skip(1));
+    if let Some(name) = &launch_argument {
+        if !rust_engine::shortcuts::set_pending_launch(name) {
+            startup_trace(&format!("run: --launch-instance отброшен (невалидное имя): {name}"));
+        }
+    }
+    let app = match tauri::Builder::default()
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() != "main" || !TRAY_AVAILABLE.load(std::sync::atomic::Ordering::SeqCst) {
+                    // Без трея прятать окно нельзя — его никто не вернёт.
+                    return;
+                }
                 // Крестик НЕ завершает приложение: игрок часто закрывает
                 // лаунчер «на время игры», а вместе с ним умирали глобальные
                 // клавиши и оверлей. Прячем окно в трей; полный выход —
@@ -655,36 +798,80 @@ pub fn run() {
                 let _ = window.emit("nivora-hidden-to-tray", ());
             }
         })
-        .setup(|app| {
+        .setup(move |app| {
+            // Защита от второй копии — раньше всего: второй запуск будит
+            // окно живого лаунчера и тихо выходит, не поднимая свой воркер.
+            // Ярлык экземпляра дополнительно передаёт цель запуска.
+            if let Err(reason) =
+                rust_engine::instance_guard::acquire(app.handle().clone(), launch_argument.as_deref())
+            {
+                if reason == "already-running" {
+                    startup_trace("run: уже запущено — показываю окно первой копии и выхожу");
+                    std::process::exit(0);
+                }
+                startup_trace(&format!("run: guard недоступен ({reason}) — продолжаю без него"));
+            }
             // Ошибка setup раньше уходила в никуда: окно не создавалось, и
             // приложение «просто закрывалось». Теперь — лог + видимое окно.
             if let Err(error) = setup_app(app) {
                 let message = error.to_string();
                 startup_trace(&format!("setup: ошибка: {message}"));
                 fatal_dialog(&format!(
-                    "Не удалось инициализировать приложение:\n\n{message}\n\nПодробности: %LOCALAPPDATA%\\nivora-launcher\\startup.log"
+                    "Не удалось инициализировать приложение:\n\n{message}\n\nПодробности: {}",
+                    diagnostic_log_hint()
                 ));
                 return Err(error);
+            }
+            // Дымовой прогон для CI: тот же мост, что у UI; отчёт и код
+            // выхода — в diagnostic_dir()/smoke-test.json.
+            if smoke::requested() {
+                let handle = app.handle().clone();
+                std::thread::spawn(move || smoke::run(handle));
             }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![backend_call, cancel_operation, overlay_attempt_log])
-        .run(tauri::generate_context!())
+        .build(tauri::generate_context!())
     {
-        // Раньше здесь стоял .expect(): паника писалась в panic.log, но на
-        // экране (оконная подсистема, без консоли) выглядела мгновенным
-        // закрытием. Показываем причину и выходим с явным кодом.
-        let message = error.to_string();
-        startup_trace(&format!("run: ошибка: {message}"));
-        fatal_dialog(&format!(
-            "Не удалось запустить интерфейс:\n\n{message}\n\nПодробности: %LOCALAPPDATA%\\nivora-launcher\\startup.log"
-        ));
-        std::process::exit(1);
-    }
+        Ok(app) => app,
+        Err(error) => {
+            // Без консоли паника выглядит мгновенным закрытием — показываем
+            // причину диалогом и выходим с явным кодом.
+            let message = error.to_string();
+            startup_trace(&format!("run: ошибка: {message}"));
+            fatal_dialog(&format!(
+                "Не удалось запустить интерфейс:\n\n{message}\n\nПодробности: {}",
+                diagnostic_log_hint()
+            ));
+            std::process::exit(1);
+        }
+    };
+    app.run(|_app_handle, event| {
+        // Чистый выход обязан снимать лок единственного экземпляра сразу:
+        // иначе файл переживает процесс, и запуск в течение нескольких
+        // секунд после выхода «молча» считал лаунчер живым и не открывал
+        // окно. Протухание сердцебиения остаётся запасным путём на случай
+        // жёсткого падения, когда обработать выход некому.
+        if let tauri::RunEvent::Exit = event {
+            rust_engine::instance_guard::release();
+        }
+    });
 }
 
 fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     startup_trace("setup: начало");
+    // Мост прогресса нативных операций: rust_engine сообщает о загрузках и
+    // стадиях установки через единый sink, который прозрачно доносит их до
+    // webview как события "backend-event" — в том же формате, что и
+    // Python-воркер. Без этого панель ACTIVITY при установке экземпляра
+    // молчала все минуты загрузки (прогресс и логи появлялись только
+    // с финальным ответом).
+    {
+        let handle = app.handle().clone();
+        rust_engine::events::set_event_sink(std::sync::Arc::new(move |value| {
+            let _ = handle.emit("backend-event", value);
+        }));
+    }
     // Апдейтер не должен убивать лаунчер: сервера обновлений в этой
     // сборке нет (endpoints пустые), а отсутствие/кривизна его конфига
     // раньше валила всё приложение до создания окна. UI при вызове
@@ -708,6 +895,23 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         Some(note) => startup_trace(&format!("setup: legacy-миграция — {note}")),
         None => startup_trace("setup: legacy-миграция не требуется"),
     }
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+    }
+    #[cfg(desktop)]
+    match setup_tray(app) {
+        Ok(()) => TRAY_AVAILABLE.store(true, std::sync::atomic::Ordering::SeqCst),
+        // Трей — не критичная подсистема: на некоторых сборках Windows он
+        // падает (занятый идентификатор, битые иконки шелла), и раньше это
+        // убивало запуск целиком. Продолжаем без трея: крестик тогда будет
+        // закрывать окно по-настоящему, а не прятать его в никуда.
+        Err(error) => startup_trace(&format!("setup: трей недоступен ({error}) — без трея")),
+    }
+    Ok(())
+}
+
+#[cfg(desktop)]
+fn setup_tray(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let show = MenuItem::with_id(app, "show", "Показать Nivora Launcher", true, None::<&str>)?;
     // Запасной способ открыть оверлей: на Wayland глобальные клавиши
     // не работают в принципе, а пункт меню в трее — работает везде.
@@ -745,8 +949,10 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+#[cfg(desktop)]
 fn show_main_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
+        let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();
     }
@@ -754,7 +960,7 @@ fn show_main_window(app: &AppHandle) {
 
 #[cfg(test)]
 mod tests {
-    use super::{backend_resource_path, uses_transient_backend_worker, validate_backend_request};
+    use super::{backend_resource_path, rotate_log, uses_transient_backend_worker, validate_backend_request};
     use crate::rust_engine;
     use serde_json::json;
     use std::path::Path;
@@ -772,6 +978,28 @@ mod tests {
             );
             assert!(!uses_transient_backend_worker(&json!({ "operation": operation })));
         }
+    }
+
+    #[test]
+    fn backend_log_rotates_and_keeps_a_bounded_history() {
+        let directory = std::env::temp_dir().join(format!("nivora-rotate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        let log = directory.join("backend.log");
+        for round in 0..5 {
+            std::fs::write(&log, vec![b'x'; 64 + round]).unwrap();
+            rotate_log(&log, 32, 3);
+        }
+        assert!(!log.exists());
+        for index in 1..=3 {
+            assert!(directory.join(format!("backend.log.{index}")).exists(), "{index}");
+        }
+        assert!(!directory.join("backend.log.4").exists());
+        assert_eq!(std::fs::metadata(directory.join("backend.log.1")).unwrap().len(), 68);
+        std::fs::write(&log, b"small").unwrap();
+        rotate_log(&log, 32, 3);
+        assert!(log.exists());
+        let _ = std::fs::remove_dir_all(&directory);
     }
 
     #[test]
@@ -796,12 +1024,8 @@ mod tests {
     }
 
     #[test]
-    fn lan_and_github_catalog_operations_are_allowed() {
+    fn github_catalog_operations_are_allowed() {
         for operation in [
-            "lan_session_create",
-            "lan_session_join",
-            "lan_session_status",
-            "lan_session_leave",
             "github_plugin_status",
             "github_plugin_search",
             "github_plugin_details",
@@ -813,6 +1037,19 @@ mod tests {
         ] {
             assert!(validate_backend_request(&json!({"operation": operation})).is_ok(), "{operation}");
         }
+    }
+
+    #[test]
+    fn removed_lan_session_operations_are_rejected() {
+        for operation in ["lan_session_create", "lan_session_join", "lan_session_status", "lan_session_leave"] {
+            assert!(validate_backend_request(&json!({"operation": operation})).is_err(), "{operation}");
+        }
+    }
+
+    #[test]
+    fn instance_repair_version_operation_is_allowed() {
+        assert!(validate_backend_request(&json!({"operation": "instance_repair_version"})).is_ok());
+        assert!(!uses_transient_backend_worker(&json!({"operation": "instance_repair_version"})));
     }
 
     #[test]

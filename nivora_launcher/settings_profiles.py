@@ -1,8 +1,4 @@
-"""Пресеты глобальных настроек: снимок, применение, JSON-импорт/экспорт.
-
-Машинно-зависимые ключи (game_dir, client_id, launcher_version) в пресет не
-попадают: перенос между компьютерами не должен ломать пути и авторизацию.
-"""
+"""пресеты глобальных настроек: снимок, применение, JSON-импорт/экспорт."""
 from __future__ import annotations
 
 import json
@@ -20,7 +16,6 @@ PROFILE_DIR_NAME = "settings-profiles"
 MAX_PROFILE_JSON_BYTES = 1024 * 1024
 EXCLUDED_KEYS = frozenset({"game_dir", "client_id", "launcher_version"})
 
-
 def _settings_field_names() -> frozenset[str]:
     from dataclasses import fields as dc_fields
 
@@ -28,12 +23,10 @@ def _settings_field_names() -> frozenset[str]:
 
     return frozenset(item.name for item in dc_fields(Settings))
 
-
 def _profile_dir(config: ConfigStore) -> Path:
     directory = config.paths.config_home / PROFILE_DIR_NAME
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     return directory
-
 
 def _safe_profile_name(name: str) -> str:
     value = re.sub(r"[^A-Za-z0-9А-Яа-яЁё0-9._ -]+", "-", str(name).strip())[:48].strip(" .-")
@@ -41,14 +34,11 @@ def _safe_profile_name(name: str) -> str:
         raise LauncherError("Имя профиля настроек не может быть пустым")
     return value
 
-
 def _profile_path(config: ConfigStore, name: str) -> Path:
     return _profile_dir(config) / f"{_safe_profile_name(name)}.json"
 
-
 def _dump_profile(document: dict[str, Any]) -> str:
     return json.dumps(document, ensure_ascii=False, indent=2)
-
 
 def _read_profile(path: Path) -> dict[str, Any]:
     try:
@@ -62,7 +52,6 @@ def _read_profile(path: Path) -> dict[str, Any]:
     if not isinstance(document, dict) or document.get("format") != PROFILE_FORMAT or not isinstance(document.get("settings"), dict):
         raise LauncherError("Файл не похож на профиль настроек Nivora")
     return document
-
 
 def list_profiles(config: ConfigStore) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
@@ -82,7 +71,6 @@ def list_profiles(config: ConfigStore) -> list[dict[str, Any]]:
         )
     return result
 
-
 def save_profile(config: ConfigStore, name: str) -> dict[str, Any]:
     payload = {key: value for key, value in asdict(config.settings).items() if key not in EXCLUDED_KEYS}
     now = time.time()
@@ -96,7 +84,6 @@ def save_profile(config: ConfigStore, name: str) -> dict[str, Any]:
     path.write_text(_dump_profile(document), encoding="utf-8")
     return {"profiles": list_profiles(config)}
 
-
 def apply_profile(config: ConfigStore, name: str) -> dict[str, Any]:
     document = _read_profile(_profile_path(config, name))
     valid = _settings_field_names()
@@ -106,14 +93,12 @@ def apply_profile(config: ConfigStore, name: str) -> dict[str, Any]:
     config.set_values(payload)
     return {**payload}
 
-
 def delete_profile(config: ConfigStore, name: str) -> dict[str, Any]:
     path = _profile_path(config, name)
     if path.is_symlink() or not path.exists():
         raise LauncherError("Профиль настроек не найден")
     path.unlink()
     return {"profiles": list_profiles(config)}
-
 
 def export_profile(config: ConfigStore, name: str) -> dict[str, str]:
     path = _profile_path(config, name)
@@ -123,7 +108,6 @@ def export_profile(config: ConfigStore, name: str) -> dict[str, str]:
         "file_name": f"{path.stem}.json",
         "json": _dump_profile(document),
     }
-
 
 def import_profile(config: ConfigStore, json_text: str, *, name: str = "") -> dict[str, Any]:
     if not json_text.strip() or len(json_text.encode("utf-8")) > MAX_PROFILE_JSON_BYTES:

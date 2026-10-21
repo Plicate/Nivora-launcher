@@ -5,7 +5,9 @@ import http.client
 import ipaddress
 import json
 import socket
+import ssl
 import struct
+import sys
 import threading
 import time
 from pathlib import Path
@@ -33,13 +35,74 @@ _DEFAULT_RATE_LIMIT_INTERVALS = {
     "edge.forgecdn.net": 0.1,
     "mediafilez.forgecdn.net": 0.1,
 }
-# Batch operations (update checks, modpack imports) reserve many future slots. Without a
-# cap, a single interactive search queued behind them - or behind a 429 cooldown push -
-# could block for minutes and look like an endless spinner in the UI.
+# пачечные операции (проверки обновлений, импорт модпаков) занимают слоты надолго.
+# интерактивный поиск не должен ждать их дольше этого.
 _MAX_RATE_LIMIT_WAIT_SECONDS = 15.0
 _RATE_LIMIT_LOCK = threading.Lock()
-_RATE_LIMIT_NEXT_ALLOWED_AT: dict[str, float] = {}
+_CONNECT_TIMEOUT_PER_ADDRESS = 10.0
+DOWNLOAD_SOURCES = ("auto", "official", "mirror")
+# зеркало BMCLAPI отдаёт файлы Mojang и загрузчиков по тем же путям.
+# подлинность проверяется хешами из метаданных.
+MIRROR_BASE = "https://bmclapi2.bangbang93.com"
+_MIRROR_RULES: tuple[tuple[str, str, str], ...] = (
+    ("piston-meta.mojang.com", "", ""),
+    ("piston-data.mojang.com", "", ""),
+    ("launchermeta.mojang.com", "", ""),
+    ("launcher.mojang.com", "", ""),
+    ("resources.download.minecraft.net", "", "/assets"),
+    ("libraries.minecraft.net", "", "/maven"),
+    ("maven.minecraftforge.net", "", "/maven"),
+    ("files.minecraftforge.net", "/maven", "/maven"),
+    ("maven.neoforged.net", "/releases", "/maven"),
+    ("meta.fabricmc.net", "", "/fabric-meta"),
+    ("maven.fabricmc.net", "", "/maven"),
+    ("meta.quiltmc.org", "", "/quilt-meta"),
+    ("maven.quiltmc.org", "/repository/release", "/maven"),
+)
 
+def mirror_url(url: str) -> str | None:
+    try:
+        parsed = urlsplit(url)
+        port = parsed.port
+    except ValueError:
+        return None
+    if parsed.scheme.lower() != "https" or port is not None:
+        return None
+    host = (parsed.hostname or "").lower()
+    for rule_host, from_prefix, to_prefix in _MIRROR_RULES:
+        if host != rule_host or not parsed.path.startswith(from_prefix):
+            continue
+        rest = parsed.path[len(from_prefix):]
+        if rest and not rest.startswith("/"):
+            continue
+        mirrored = f"{MIRROR_BASE}{to_prefix}{rest}"
+        if parsed.query:
+            mirrored += f"?{parsed.query}"
+        return mirrored
+    return None
+
+_TLS_CONTEXT_LOCK = threading.Lock()
+_TLS_CONTEXT: list[ssl.SSLContext | None] = []
+
+def _platform_tls_context() -> ssl.SSLContext | None:
+    """на Windows сертификаты проверяет сама система (truststore → CryptoAPI)."""
+    if sys.platform != "win32":
+        return None
+    with _TLS_CONTEXT_LOCK:
+        if not _TLS_CONTEXT:
+            context: ssl.SSLContext | None = None
+            try:
+                import truststore
+
+                context = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            except Exception:
+                context = None
+            _TLS_CONTEXT.append(context)
+        return _TLS_CONTEXT[0]
+
+class _SourceUnavailable(LauncherError):
+    """Источник ответил окончательно (404/410): зеркало не поможет."""
+_RATE_LIMIT_NEXT_ALLOWED_AT: dict[str, float] = {}
 
 class _SafeRedirectHandler(HTTPRedirectHandler):
     def __init__(self, *, resolve_dns: bool = True, validate_redirect: Callable[[str], None] | None = None):
@@ -64,7 +127,6 @@ class _SafeRedirectHandler(HTTPRedirectHandler):
                     redirected.headers.pop(header, None)
         return redirected
 
-
 class _PinnedHTTPSConnection(http.client.HTTPSConnection):
     def __init__(
         self,
@@ -85,17 +147,25 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
     ) -> socket.socket:
         _, port = address
         last_error: OSError | None = None
-        for pinned in self.pinned_addresses:
+        # IPv4 первым и короткий таймаут подключения на адрес: на Windows
+        # «полуживой» IPv6 иначе съедал полный таймаут на каждом AAAA-адресе.
+        ordered = sorted(self.pinned_addresses, key=lambda item: item.version)
+        connect_timeout = timeout
+        if len(ordered) > 1 and isinstance(timeout, (int, float)):
+            connect_timeout = min(float(timeout), _CONNECT_TIMEOUT_PER_ADDRESS)
+        for pinned in ordered:
             family = socket.AF_INET6 if pinned.version == 6 else socket.AF_INET
             sockaddr = (str(pinned), port, 0, 0) if family == socket.AF_INET6 else (str(pinned), port)
             connection: socket.socket | None = None
             try:
                 connection = socket.socket(family, socket.SOCK_STREAM)
-                if timeout is not socket._GLOBAL_DEFAULT_TIMEOUT:
-                    connection.settimeout(timeout)
+                if connect_timeout is not socket._GLOBAL_DEFAULT_TIMEOUT:
+                    connection.settimeout(connect_timeout)
                 if source_address:
                     connection.bind(source_address)
                 connection.connect(sockaddr)
+                if timeout is not socket._GLOBAL_DEFAULT_TIMEOUT:
+                    connection.settimeout(timeout)
                 return connection
             except OSError as exc:
                 last_error = exc
@@ -107,7 +177,6 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
         if last_error:
             raise last_error
         raise OSError("No vetted DNS addresses are available for this HTTPS request")
-
 
 class _PinnedHTTPSHandler(HTTPSHandler):
     def https_open(self, request):
@@ -124,14 +193,7 @@ class _PinnedHTTPSHandler(HTTPSHandler):
             context=self._context,
         )
 
-
-# ── SOCKS5 без внешних зависимостей ─────────────────────────────────────────
-#
-# Имена всегда резолвит прокси (режим socks5h): локальный DNS-pinning через
-# туннель всё равно невозможен, зато приватность сохраняется.
-
 _SOCKS5_TIMEOUT_SECONDS = 30.0
-
 
 def _socks_read_exact(sock: socket.socket, size: int) -> bytes:
     chunks: list[bytes] = []
@@ -143,7 +205,6 @@ def _socks_read_exact(sock: socket.socket, size: int) -> bytes:
         chunks.append(chunk)
         remaining -= len(chunk)
     return b"".join(chunks)
-
 
 def make_socks5_factory(proxy_url: str) -> Callable[[str, int, float | None], socket.socket]:
     parsed = urlsplit(proxy_url)
@@ -200,7 +261,6 @@ def make_socks5_factory(proxy_url: str) -> Callable[[str, int, float | None], so
 
     return factory
 
-
 class _SocksHTTPConnection(http.client.HTTPConnection):
     def __init__(self, host, port=None, *, socket_factory=None, **kwargs) -> None:
         super().__init__(host, port, **kwargs)
@@ -208,7 +268,6 @@ class _SocksHTTPConnection(http.client.HTTPConnection):
 
     def connect(self) -> None:
         self.sock = self._socks_factory(self.host, self.port, self.timeout)
-
 
 class _SocksHTTPSConnection(http.client.HTTPSConnection):
     def __init__(self, host, port=None, *, socket_factory=None, **kwargs) -> None:
@@ -220,7 +279,6 @@ class _SocksHTTPSConnection(http.client.HTTPSConnection):
         server_hostname = self.host if isinstance(self.host, str) else None
         self.sock = self._context.wrap_socket(sock, server_hostname=server_hostname)
 
-
 class _SocksHTTPHandler(HTTPHandler):
     def __init__(self, factory) -> None:
         super().__init__()
@@ -231,7 +289,6 @@ class _SocksHTTPHandler(HTTPHandler):
             lambda host, **kwargs: _SocksHTTPConnection(host, socket_factory=self._factory, **kwargs),
             request,
         )
-
 
 class _SocksHTTPSHandler(HTTPSHandler):
     def __init__(self, factory, context=None) -> None:
@@ -245,7 +302,6 @@ class _SocksHTTPSHandler(HTTPSHandler):
             context=self._context,
         )
 
-
 class HttpClient:
     def __init__(
         self,
@@ -255,8 +311,11 @@ class HttpClient:
         request_observer: RequestObserver | None = None,
         proxy: str = "",
         cancellation: CancellationToken | None = None,
+        download_source: str = "auto",
     ) -> None:
         self.timeout = max(1, timeout)
+        source = str(download_source or "auto").strip().lower()
+        self.download_source = source if source in DOWNLOAD_SOURCES else "auto"
         self.retries = max(1, retries)
         self.user_agent = f"{APP_NAME}/{APP_VERSION}"
         self.download_observer = download_observer
@@ -269,14 +328,15 @@ class HttpClient:
         self.opener = self._build_opener()
 
     def _build_opener(self, redirect_validator: Callable[[str], None] | None = None):
-        # Do not inherit HTTP(S)_PROXY from the desktop environment silently.
+        # do not inherit HTTP(S)_PROXY from the desktop environment silently.
+        context = _platform_tls_context()
         if self.proxy_scheme in {"socks5", "socks5h"}:
             # через SOCKS DNS резолвит прокси, поэтому пиннинг адресов не применяется
             factory = make_socks5_factory(self.proxy)
             return build_opener(
                 ProxyHandler({}),
                 _SocksHTTPHandler(factory),
-                _SocksHTTPSHandler(factory),
+                _SocksHTTPSHandler(factory, context=context),
                 _SafeRedirectHandler(resolve_dns=False, validate_redirect=redirect_validator),
             )
         handlers: list[Any] = [
@@ -284,7 +344,9 @@ class HttpClient:
             _SafeRedirectHandler(resolve_dns=self.resolve_dns, validate_redirect=redirect_validator),
         ]
         if self.resolve_dns:
-            handlers.append(_PinnedHTTPSHandler())
+            handlers.append(_PinnedHTTPSHandler(context=context))
+        elif context is not None:
+            handlers.append(HTTPSHandler(context=context))
         return build_opener(*handlers)
 
     def _notify_request(self, event: str, url: str, attempt: int) -> None:
@@ -352,10 +414,60 @@ class HttpClient:
         try:
             self.download_observer(event, url, destination, current, total)
         except Exception:
-            # Logging must never make a verified download fail.
+            # logging must never make a verified download fail.
             return
 
+    def _candidates(self, url: str, method: str = "GET") -> list[tuple[str, bool]]:
+        if method.upper() != "GET" or self.download_source == "official":
+            return [(url, False)]
+        mirrored = mirror_url(url)
+        if not mirrored:
+            return [(url, False)]
+        if self.download_source == "mirror":
+            return [(mirrored, True), (url, False)]
+        return [(url, False), (mirrored, True)]
+
+    def _with_sources(self, url: str, method: str, call: Callable[[str, bool], Any]) -> Any:
+        candidates = self._candidates(url, method)
+        failures: list[str] = []
+        for candidate, is_mirror in candidates:
+            self.check_cancelled()
+            if is_mirror:
+                self._notify_request("mirror", candidate, 1)
+            try:
+                return call(candidate, is_mirror)
+            except LauncherError as exc:
+                self.check_cancelled()
+                definitive = isinstance(exc, _SourceUnavailable) and not is_mirror
+                if len(candidates) == 1 or definitive:
+                    raise
+                label = "зеркало" if is_mirror else "официальный сервер"
+                failures.append(f"{label} {urlsplit(candidate).hostname}: {exc}")
+        raise LauncherError(f"Не удалось получить {url} ни с одного источника: {'; '.join(failures)}")
+
     def request(
+        self,
+        url: str,
+        method: str = "GET",
+        data: bytes | None = None,
+        headers: dict[str, str] | None = None,
+        max_bytes: int | None = None,
+        redirect_validator: Callable[[str], None] | None = None,
+    ) -> bytes:
+        return self._with_sources(
+            url,
+            method,
+            lambda candidate, is_mirror: self._request_single(
+                candidate,
+                method=method,
+                data=data,
+                headers=headers,
+                max_bytes=max_bytes,
+                redirect_validator=None if is_mirror else redirect_validator,
+            ),
+        )
+
+    def _request_single(
         self,
         url: str,
         method: str = "GET",
@@ -367,11 +479,15 @@ class HttpClient:
         pinned_addresses = _validate_url(url, resolve_dns=self.resolve_dns)
         request_headers = {"User-Agent": self.user_agent, "Accept": "application/json"}
         request_headers.update(headers or {})
-        request = Request(url, data=data, headers=request_headers, method=method)
-        setattr(request, _DNS_PIN_ATTRIBUTE, pinned_addresses)
         last_error: Exception | None = None
         for attempt in range(self.retries):
             self.check_cancelled()
+            if attempt:
+                # сервис мог сменить адреса между попытками — резолвим
+                # DNS заново, а не долбим в тот же недоступный IP.
+                pinned_addresses = _validate_url(url, resolve_dns=self.resolve_dns)
+            request = Request(url, data=data, headers=request_headers, method=method)
+            setattr(request, _DNS_PIN_ATTRIBUTE, pinned_addresses)
             self._rate_limit_before_request(url)
             self._notify_request("start", url, attempt + 1)
             try:
@@ -409,7 +525,8 @@ class HttpClient:
                     self._notify_request("retry", url, attempt + 1)
                     self.wait(1.0 + attempt)
                     continue
-                raise LauncherError(f"HTTP {exc.code} при запросе {url}") from exc
+                error_type = _SourceUnavailable if exc.code in {404, 410} else LauncherError
+                raise error_type(f"HTTP {exc.code} при запросе {url}") from exc
             except (URLError, TimeoutError, OSError) as exc:
                 last_error = exc
                 if attempt + 1 < self.retries:
@@ -507,10 +624,7 @@ class HttpClient:
             raise LauncherError(f"Сервер авторизации вернул некорректный ответ: {url}") from exc
 
     def post_form_soft(self, url: str, values: dict[str, str]) -> tuple[int, Any]:
-        """Post a form and return the HTTP status as well as the parsed body.
-
-        OAuth device-code polling intentionally uses HTTP 400 for pending states.
-        """
+        """post a form and return the HTTP status as well as the parsed body."""
         pinned_addresses = _validate_url(url, resolve_dns=self.resolve_dns)
         body = urlencode(values).encode("utf-8")
         request = Request(
@@ -588,6 +702,35 @@ class HttpClient:
         headers: dict[str, str] | None = None,
         redirect_validator: Callable[[str], None] | None = None,
     ) -> bool:
+        return self._with_sources(
+            url,
+            "GET",
+            lambda candidate, is_mirror: self._download_single(
+                candidate,
+                destination,
+                sha1=sha1,
+                sha256=sha256,
+                sha512=sha512,
+                size=size,
+                progress=progress,
+                headers=headers,
+                redirect_validator=None if is_mirror else redirect_validator,
+            ),
+        )
+
+    def _download_single(
+        self,
+        url: str,
+        destination: Path,
+        *,
+        sha1: str | None = None,
+        sha256: str | None = None,
+        sha512: str | None = None,
+        size: int | None = None,
+        progress: Progress | None = None,
+        headers: dict[str, str] | None = None,
+        redirect_validator: Callable[[str], None] | None = None,
+    ) -> bool:
         pinned_addresses = _validate_url(url, resolve_dns=self.resolve_dns)
         self.check_cancelled()
         if size is not None and size > MAX_DOWNLOAD_BYTES:
@@ -610,24 +753,39 @@ class HttpClient:
 
         temporary = destination.with_name(f".{destination.name}.part")
         _reject_symlink_path(temporary)
-        if temporary.exists():
-            temporary.unlink()
         last_error: Exception | None = None
+        # оборванные загрузки продолжаются с места обрыва (Range): часть
+        integrity_restarts = 0
         for attempt in range(self.retries):
             self.check_cancelled()
             self._notify_request("download", url, attempt + 1)
+            offset = _partial_download_offset(temporary)
             try:
                 request_headers = {"User-Agent": self.user_agent}
                 request_headers.update(headers or {})
+                if attempt and offset:
+                    # зеркало могло сменить адреса между попытками —
+                    # резолвим DNS заново, а не долбим в тот же IP.
+                    pinned_addresses = _validate_url(url, resolve_dns=self.resolve_dns)
+                if offset:
+                    request_headers["Range"] = f"bytes={offset}-"
                 request = Request(url, headers=request_headers)
                 setattr(request, _DNS_PIN_ATTRIBUTE, pinned_addresses)
                 with self._open(request, redirect_validator=redirect_validator) as response:
-                    total = response.headers.get("Content-Length")
-                    total_size = int(total) if total and total.isdigit() else size
+                    status = getattr(response, "status", None) or getattr(response, "code", None)
+                    remaining = _content_length(response)
+                    resumed = bool(offset) and status == 206
+                    if offset and not resumed:
+                        # зеркало игнорирует Range — качаем файл целиком.
+                        offset = 0
+                    if resumed and remaining is not None:
+                        total_size = offset + remaining
+                    else:
+                        total_size = remaining if remaining is not None else size
                     if total_size is not None and total_size > MAX_DOWNLOAD_BYTES:
                         raise LauncherError("Файл загрузки слишком большой")
-                    written = 0
-                    with temporary.open("wb") as handle:
+                    written = offset
+                    with temporary.open("ab" if resumed else "wb") as handle:
                         while True:
                             self.check_cancelled()
                             chunk = response.read(1024 * 1024)
@@ -640,6 +798,10 @@ class HttpClient:
                             if progress:
                                 progress(written, total_size)
                             self._notify_download("progress", url, destination, written, total_size)
+                    if size is not None and written != size:
+                        # соединение закрылось раньше конца файла: частичный
+                        # .part остаётся и следующая попытка докачает его.
+                        raise _IncompleteDownloadError(f"Зеркало закрыло соединение на {written} из {size} байт")
                 if not verify_file(temporary, sha1=sha1, sha256=sha256, sha512=sha512, size=size):
                     raise IntegrityError(f"Проверка хеша не пройдена: {url}")
                 temporary.replace(destination)
@@ -647,20 +809,89 @@ class HttpClient:
                     sidecar.unlink()
                 self._notify_download("complete", url, destination, written, total_size)
                 return True
-            except (HTTPError, URLError, TimeoutError, OSError, IntegrityError, LauncherError) as exc:
+            except HTTPError as exc:
                 last_error = exc
-                if temporary.exists():
-                    temporary.unlink()
-                if isinstance(exc, (IntegrityError, LauncherError)) or attempt + 1 >= self.retries:
+                if exc.code == 429:
+                    retry_after = (exc.headers or {}).get("Retry-After", "") if exc.headers else ""
+                    try:
+                        delay = min(60.0, max(1.0, float(retry_after)))
+                    except (TypeError, ValueError):
+                        delay = 2.0 + attempt
+                    if attempt + 1 < self.retries:
+                        self._rate_limit_after_429(url, delay)
+                        self._notify_request("retry", url, attempt + 1)
+                        self.wait(delay)
+                        continue
+                    raise LauncherError(f"HTTP 429: сервер временно ограничил загрузки {url}. Повторите позже.") from exc
+                if exc.code == 416 and offset:
+                    # зеркало не подтвердило докачку (файл уже заменили или
+                    # кеш отдаёт другой контент) — уходим на полную загрузку.
+                    _discard_partial(temporary)
+                    self._notify_request("retry", url, attempt + 1)
+                    self.wait(0.5)
+                    continue
+                if exc.code >= 500 and attempt + 1 < self.retries:
+                    self._notify_request("retry", url, attempt + 1)
+                    self.wait(1.0 + attempt)
+                    continue
+                error_type = _SourceUnavailable if exc.code in {404, 410} else LauncherError
+                raise error_type(f"HTTP {exc.code} при загрузке {url}") from exc
+            except IntegrityError as exc:
+                last_error = exc
+                # повреждённая докачка (зеркало подмешало чужие байты)
+                # заслуживает одну чистую попытку с нуля.
+                _discard_partial(temporary)
+                if integrity_restarts >= 1 or attempt + 1 >= self.retries:
+                    break
+                integrity_restarts += 1
+                self._notify_request("retry", url, attempt + 1)
+                continue
+            except (URLError, TimeoutError, OSError) as exc:
+                last_error = exc
+                if attempt + 1 >= self.retries:
                     break
                 self._notify_request("retry", url, attempt + 1)
                 self.wait(1.0 + attempt)
+            except LauncherError as exc:
+                last_error = exc
+                break
         if isinstance(last_error, IntegrityError):
             raise last_error
         if isinstance(last_error, LauncherError):
             raise last_error
         raise LauncherError(f"Не удалось скачать {url}: {last_error}") from last_error
 
+class _IncompleteDownloadError(OSError):
+    """Зеркало закрыло соединение до конца файла (обрыв посреди загрузки)."""
+
+def _partial_download_offset(temporary: Path) -> int:
+    """Размер недокачанного .part для докачки, 0 — качать с нуля."""
+    if not temporary.exists():
+        return 0
+    if temporary.is_symlink():
+        raise LauncherError(f"Небезопасный временный файл загрузки: {temporary}")
+    if not temporary.is_file():
+        raise LauncherError(f"Временный файл загрузки не является файлом: {temporary}")
+    try:
+        partial_size = temporary.stat().st_size
+    except OSError:
+        return 0
+    if partial_size <= 0 or partial_size > MAX_DOWNLOAD_BYTES:
+        _discard_partial(temporary)
+        return 0
+    return partial_size
+
+def _discard_partial(temporary: Path) -> None:
+    try:
+        temporary.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+def _content_length(response: Any) -> int | None:
+    value = response.headers.get("Content-Length")
+    if value and str(value).isdigit():
+        return int(value)
+    return None
 
 def file_hash(path: Path, algorithm: str) -> str:
     digest = hashlib.new(algorithm)
@@ -668,7 +899,6 @@ def file_hash(path: Path, algorithm: str) -> str:
         for block in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
-
 
 def verify_file(
     path: Path,
@@ -690,7 +920,6 @@ def verify_file(
         return False
     return True
 
-
 def _verify_sidecar(destination: Path, sidecar: Path) -> bool:
     if sidecar.is_symlink() or not sidecar.exists():
         return False
@@ -699,7 +928,6 @@ def _verify_sidecar(destination: Path, sidecar: Path) -> bool:
         return verify_file(destination, sha512=metadata.get("sha512"), size=metadata.get("size"))
     except (OSError, ValueError, TypeError):
         return False
-
 
 def _validate_url(
     url: str,
@@ -742,16 +970,12 @@ def _validate_url(
     for address in addresses:
         mapped = getattr(address, "ipv4_mapped", None)
         checked = mapped or address
-        # Python's address tables can mark a publicly routable IPv6 allocation
-        # as reserved. Mojang's manifest currently resolves to such an address.
-        # Keep the exception hostname-scoped; private, loopback and link-local
-        # addresses remain blocked for every host.
+        # python's address tables can mark a publicly routable IPv6 allocation
         public_reserved = checked.version == 6 and checked.is_reserved and host in _PUBLIC_RESERVED_HOSTS
         non_global = not checked.is_global and not public_reserved
         if non_global or checked.is_private or checked.is_loopback or checked.is_link_local or checked.is_unspecified or checked.is_multicast:
             raise LauncherError(f"Сетевой запрос к непубличному адресу запрещён: {host} ({checked})")
     return tuple(addresses)
-
 
 def _reject_symlink_path(path: Path) -> None:
     current = path

@@ -16,7 +16,6 @@ from .errors import LauncherError
 from .platform_support import is_reparse_point, set_private_fd
 from .portable_fs import regular_file, safe_path
 
-
 SNAPSHOT_DIR = ".trial-launcher-snapshots"
 SNAPSHOT_RETENTION_HOURS = 5
 SNAPSHOT_MAX_COUNT = 1
@@ -36,13 +35,10 @@ _DIRECTORY_OPEN_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os
 _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _NONBLOCK = getattr(os, "O_NONBLOCK", 0)
 
-
 class SnapshotStore:
     def __init__(self, instance_root: Path, categories: dict[str, str] | None = None) -> None:
         self.root = instance_root
-        # Bedrock снапшотирует контент com.mojang (resource_packs/
-        # behavior_packs/minecraftWorlds) — свои категории; Java-каталоги
-        # там не существуют.
+        # bedrock снапшотирует контент com.mojang (resource_packs/
         self.categories = categories if categories is not None else SNAPSHOT_CATEGORIES
         if is_reparse_point(self.root) or not self.root.is_dir():
             raise LauncherError("Каталог экземпляра недоступен для снапшотов")
@@ -204,7 +200,6 @@ class SnapshotStore:
             if expired or index >= limit:
                 self.delete(category, str(value.get("id", "")))
 
-
 def _extract_archive(archive_path: Path, temporary: Path) -> None:
     if os.name == "nt":
         _extract_archive_windows(archive_path, temporary)
@@ -247,7 +242,6 @@ def _extract_archive(archive_path: Path, temporary: Path) -> None:
                     os.close(parent_fd)
     finally:
         os.close(root_fd)
-
 
 def _write_directory_archive(target: Path, archive: zipfile.ZipFile) -> tuple[int, int]:
     root_fd = os.open(target, _DIRECTORY_OPEN_FLAGS)
@@ -295,7 +289,6 @@ def _write_directory_archive(target: Path, archive: zipfile.ZipFile) -> tuple[in
         os.close(root_fd)
     return file_count, total_size
 
-
 def _write_directory_archive_windows(target: Path, archive: zipfile.ZipFile) -> tuple[int, int]:
     file_count = 0
     total_size = 0
@@ -330,7 +323,6 @@ def _write_directory_archive_windows(target: Path, archive: zipfile.ZipFile) -> 
     visit(target, ())
     return file_count, total_size
 
-
 def _list_windows(directory: Path, target: Path, category: str) -> list[dict[str, Any]]:
     values: list[dict[str, Any]] = []
     candidates: list[tuple[float, Path]] = []
@@ -362,7 +354,6 @@ def _list_windows(directory: Path, target: Path, category: str) -> list[dict[str
         except (OSError, UnicodeError, ValueError, TypeError, RecursionError, LauncherError):
             continue
     return values[:50]
-
 
 def _extract_archive_windows(archive_path: Path, temporary: Path) -> None:
     seen: set[str] = set()
@@ -416,7 +407,6 @@ def _extract_archive_windows(archive_path: Path, temporary: Path) -> None:
     except zipfile.BadZipFile as exc:
         raise LauncherError("Архив снапшота повреждён") from exc
 
-
 def _replace_directory_contents(root: Path, target: Path, temporary: Path) -> None:
     if os.name == "nt":
         relative = tuple(target.relative_to(root).parts)
@@ -458,7 +448,6 @@ def _replace_directory_contents(root: Path, target: Path, temporary: Path) -> No
             os.close(target_fd)
         os.close(root_fd)
 
-
 def _archive_parts(member_name: str) -> tuple[str, ...]:
     value = str(member_name).replace("\\", "/")
     path = Path(value)
@@ -467,10 +456,8 @@ def _archive_parts(member_name: str) -> tuple[str, ...]:
         raise LauncherError("Снапшот содержит небезопасный путь")
     return parts
 
-
 def _archive_member_is_symlink(member: zipfile.ZipInfo) -> bool:
     return stat.S_ISLNK((member.external_attr >> 16) & 0o170000)
-
 
 def _open_directory_chain(root_fd: int, parts: tuple[str, ...], *, create: bool) -> int:
     current_fd = os.dup(root_fd)
@@ -493,7 +480,6 @@ def _open_directory_chain(root_fd: int, parts: tuple[str, ...], *, create: bool)
         os.close(current_fd)
         raise
 
-
 def _remove_entry_at(parent_fd: int, name: str) -> None:
     item_stat = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
     if stat.S_ISLNK(item_stat.st_mode):
@@ -513,14 +499,12 @@ def _remove_entry_at(parent_fd: int, name: str) -> None:
         return
     raise LauncherError("Снапшот содержит неподдерживаемый тип файла")
 
-
 def _within(path: Path, root: Path) -> bool:
     try:
         path.relative_to(root)
         return True
     except ValueError:
         return False
-
 
 def _remove_tree(path: Path) -> None:
     if is_reparse_point(path) or path.is_file():

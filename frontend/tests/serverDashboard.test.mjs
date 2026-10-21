@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { readFileSync } from 'node:fs'
+import { bridgeAllowList } from './helpers/registry.mjs'
 const workspace = readFileSync(new URL('../src/components/ServerWorkspace.vue', import.meta.url), 'utf8')
 const bridge = readFileSync(new URL('../src/services/bridge.ts', import.meta.url), 'utf8')
 
@@ -21,8 +22,7 @@ test('incoming and outgoing server traffic have separate charts and honest unava
 })
 
 test('restart crosses the desktop boundary and exposes its busy state', () => {
-  const rust = readFileSync(new URL('../src-tauri/src/lib.rs', import.meta.url), 'utf8')
-  const allowed = rust.slice(rust.indexOf('const ALLOWED:'), rust.indexOf('if !ALLOWED.contains'))
+  const allowed = [...bridgeAllowList()].map((operation) => `"${operation}"`).join(' ')
   assert.ok(allowed.includes('"server_restart"'))
   assert.ok(bridge.includes("request<ServerStatus>('server_restart'"))
   assert.ok(workspace.includes('bridge.restartServer('))

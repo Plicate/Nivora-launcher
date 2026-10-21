@@ -1,10 +1,4 @@
-"""Запись игрового процесса для оверлея Nivora (F7).
-
-Захват выполняется внешним ffmpeg: x11grab для картинки, pulse для звука и
-аппаратный кодирователь, когда он доступен (NVENC на NVIDIA, VAAPI на
-Intel/AMD), иначе быстрый пресет libx264. Аргументы собирает чистая функция
-`build_recording_args` — она покрыта юнит-тестами и не трогает процессы.
-"""
+"""запись игрового процесса для оверлея Nivora (F7)."""
 
 from __future__ import annotations
 
@@ -21,7 +15,6 @@ from .errors import LauncherError
 _ENCODER_NVENC = "h264_nvenc"
 
 RECORDING_STATE_FILE = "recording-state.json"
-
 
 def write_recording_state(output_dir: Path, payload: dict[str, Any]) -> Path:
     """Атомарно записать файл состояния записи (см. GameRecorder._state_file)."""
@@ -43,7 +36,6 @@ def write_recording_state(output_dir: Path, payload: dict[str, Any]) -> Path:
         raise
     return state_path
 
-
 def remove_recording_state(state_path: Path) -> None:
     try:
         state_path.unlink()
@@ -52,7 +44,6 @@ def remove_recording_state(state_path: Path) -> None:
 _ENCODER_VAAPI = "h264_vaapi"
 _ENCODER_X264 = "libx264"
 _DEFAULT_VAAPI_DEVICE = "/dev/dri/renderD128"
-
 
 def build_recording_args(
     *,
@@ -65,11 +56,7 @@ def build_recording_args(
     output: str,
     vaapi_device: str = _DEFAULT_VAAPI_DEVICE,
 ) -> list[str]:
-    """Собрать аргументы ffmpeg для записи экрана с минимальной нагрузкой.
-
-    Порядок важен: глобальные опции, входы, кодеки, выход. Качество `quality`
-    — это CRF/CQ: меньше — лучше.
-    """
+    """собрать аргументы ffmpeg для записи экрана с минимальной нагрузкой."""
     fps = max(15, min(120, int(fps)))
     quality = max(15, min(35, int(quality)))
     # stdin остаётся открытым: остановка записи — это буква «q» в stdin ffmpeg.
@@ -117,7 +104,6 @@ def build_recording_args(
     args.append(output)
     return args
 
-
 def detect_encoders(ffmpeg: str) -> set[str]:
     """Названия кодировщиков, которые собирает этот ffmpeg."""
     known = {_ENCODER_NVENC, _ENCODER_VAAPI, _ENCODER_X264}
@@ -136,14 +122,11 @@ def detect_encoders(ffmpeg: str) -> set[str]:
     text = completed.stdout or ""
     return {name for name in known if name in text}
 
-
 def _vaapi_available() -> bool:
     return Path(_DEFAULT_VAAPI_DEVICE).exists()
 
-
 def pick_encoder(requested: str, encoders: set[str]) -> str:
-    """Выбрать тип кодировщика («nvenc»/«vaapi»/«x264»): приоритет
-    аппаратному, форс можно в настройках."""
+    """выбрать тип кодировщика («nvenc»/«vaapi»/«x264»): приоритет"""
     if requested == "nvenc":
         return "nvenc" if _ENCODER_NVENC in encoders else "x264"
     if requested == "vaapi":
@@ -158,7 +141,6 @@ def pick_encoder(requested: str, encoders: set[str]) -> str:
         return "vaapi"
     return "x264"
 
-
 class GameRecorder:
     """Один активный процесс ffmpeg на весь лаунчер (воркер сериален)."""
 
@@ -170,11 +152,10 @@ class GameRecorder:
         self._started_at = 0.0
         self._instance = ""
         self._encoders_cache: set[str] | None = None
-        # Статус записи читается с диска (recordings/recording-state.json),
+        # статус записи читается с диска (recordings/recording-state.json),
         # а не из памяти этого процесса: живость ffmpeg проверяется по pid.
         self._state_file: Path | None = None
 
-    # --- Состояние ---------------------------------------------------------
     def status(self) -> dict[str, Any]:
         active = self._process is not None and self._process.poll() is None
         file_size = 0
@@ -193,7 +174,6 @@ class GameRecorder:
             "instance": self._instance,
         }
 
-    # --- Управление --------------------------------------------------------
     def start(self, config: ConfigStore, instance_name: str = "") -> dict[str, Any]:
         if self._process is not None and self._process.poll() is None:
             raise LauncherError("Запись уже идёт — сначала остановите текущую")
@@ -233,7 +213,7 @@ class GameRecorder:
                 stdout=subprocess.DEVNULL,
                 stderr=self._log_handle,
                 text=True,
-                # Бэкенд работает без консоли (--noconsole), поэтому ffmpeg
+                # бэкенд работает без консоли (--noconsole), поэтому ffmpeg
                 # без этого флага получил бы собственное окно консоли.
                 **(
                     {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)}
@@ -249,7 +229,7 @@ class GameRecorder:
         self._encoder = encoder_name
         self._started_at = time.time()
         self._instance = instance_name
-        # Ошибка записи файла состояния не должна ломать саму запись:
+        # ошибка записи файла состояния не должна ломать саму запись:
         # состояние вторично, ffmpeg уже работает.
         try:
             try:
@@ -309,6 +289,5 @@ class GameRecorder:
         if self._state_file is not None:
             remove_recording_state(self._state_file)
             self._state_file = None
-
 
 recorder = GameRecorder()

@@ -1,10 +1,10 @@
-// Системные справочники и пробы окружения: выбор Java для запуска,
+// системные справочники и пробы окружения: выбор Java для запуска,
 // состояние песочницы bubblewrap и каталог серверных ядер.
 use regex::Regex;
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
@@ -42,7 +42,7 @@ fn version_output_re() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r#"version\s+"([^"]+)"#).expect("regex версии"))
 }
 
-/// Поиск исполняемого файла в PATH (первый существующий и исполняемый).
+/// поиск исполняемого файла в PATH (первый существующий и исполняемый).
 fn which(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     for dir in std::env::split_paths(&path) {
@@ -66,7 +66,7 @@ fn expanduser(value: &str) -> PathBuf {
     PathBuf::from(value)
 }
 
-/// Запуск с таймаутом: зависший процесс убивается, а не вешает операцию.
+/// запуск с таймаутом: зависший процесс убивается, а не вешает операцию.
 struct RunOutcome {
     status: Option<i32>,
     stderr_tail: String,
@@ -74,7 +74,7 @@ struct RunOutcome {
 }
 
 fn run_with_timeout(program: &Path, args: &[&str], timeout: Duration) -> Option<RunOutcome> {
-    let mut child = Command::new(program)
+    let mut child = super::platform::command(program)
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -108,19 +108,20 @@ fn run_with_timeout(program: &Path, args: &[&str], timeout: Duration) -> Option<
     }
 }
 
-/// Проверка Java-executable без запуска: имя java/javaw внутри bin,
-/// владелец — текущий пользователь или root, без записи для группы/всех.
 fn validate_java(resolved: &Path) -> Result<(), String> {
     let name = resolved.file_name().and_then(|value| value.to_str()).unwrap_or("").to_lowercase();
     let parent_name = resolved.parent().and_then(|value| value.file_name()).and_then(|value| value.to_str()).unwrap_or("").to_lowercase();
     let meta = std::fs::metadata(resolved).map_err(|_| err("Java executable не найден"))?;
-    if !["java", "javaw"].contains(&name.as_str()) || parent_name != "bin" || !meta.is_file() {
+    // набор имён как в validate_java_path (runtime.py): на Windows бинарники
+    // носят суффикс .exe.
+    let allowed_names: &[&str] = if cfg!(windows) { &["java.exe", "javaw.exe"] } else { &["java", "javaw"] };
+    if !allowed_names.contains(&name.as_str()) || parent_name != "bin" || !meta.is_file() {
         return Err(err("Java должна быть исполняемым файлом java/javaw внутри каталога JDK/JRE/bin"));
     }
     if !super::platform::is_executable(&meta) {
         return Err(err("Java должна быть исполняемым файлом java/javaw внутри каталога JDK/JRE/bin"));
     }
-    // Владение и group/world-запись — Unix-специфика; на Windows каталоги
+    // владение и group/world-запись — Unix-специфика; на Windows каталоги
     // JDK закрыты ACL профиля пользователя, проверять нечего.
     #[cfg(unix)]
     {
@@ -146,7 +147,7 @@ fn err(message: &str) -> String {
     message.to_owned()
 }
 
-/// Обнаружение установленных Java: JAVA_HOME, PATH, /usr/lib/jvm, /opt.
+/// обнаружение установленных Java: JAVA_HOME, PATH, /usr/lib/jvm, /opt.
 fn discover_java_paths() -> Vec<PathBuf> {
     let mut candidates: Vec<PathBuf> = Vec::new();
     if let Ok(java_home) = std::env::var("JAVA_HOME") {
@@ -184,7 +185,7 @@ fn discover_java_paths() -> Vec<PathBuf> {
     result
 }
 
-/// Версия Java из вывода `-version`: главная цифра (для 1.8 — вторая).
+/// версия Java из вывода `-version`: главная цифра (для 1.8 — вторая).
 fn java_version(java_path: &Path) -> Option<u32> {
     let outcome = run_with_timeout(java_path, &["-version"], Duration::from_secs(10))?;
     let output = format!("{}{}", outcome.stderr_tail, outcome.stdout);
@@ -205,6 +206,34 @@ fn configured_java_path() -> String {
         .unwrap_or_default()
         .trim()
         .to_owned()
+}
+
+pub fn java_validate(request: &Value) -> Result<Value, String> {
+    let raw = request.get("path").and_then(Value::as_str).unwrap_or_default().trim();
+    if raw.is_empty() {
+        return Err(err("Укажите путь к Java executable"));
+    }
+    let path = expanduser(raw);
+    // allow_directory: каталог JDK/JRE дополняется до bin/java — как в
+    // validate_java_path (runtime.py).
+    let resolved = if path.is_dir() {
+        path.join("bin").join(if cfg!(windows) { "java.exe" } else { "java" })
+    } else {
+        path
+    };
+    validate_java(&resolved)?;
+    // javaw не пишет в stderr/stdout — версию спрашиваем у консольного
+    // собрата из того же bin.
+    let probe = if resolved.file_name().and_then(|value| value.to_str()).map(|value| value.to_lowercase() == "javaw.exe").unwrap_or(false) {
+        resolved.with_file_name("java.exe")
+    } else {
+        resolved.clone()
+    };
+    let version = java_version(&probe).ok_or_else(|| err(&format!("Не удалось определить версию Java: {}", resolved.to_string_lossy())))?;
+    let canonical = super::platform_support::canonical_path(&resolved)
+        .map(|value| value.to_string_lossy().to_string())
+        .unwrap_or_else(|_| resolved.to_string_lossy().to_string());
+    Ok(json!({ "path": canonical, "version": version }))
 }
 
 pub fn java_options(_request: &Value) -> Result<Value, String> {
@@ -238,7 +267,23 @@ pub fn java_options(_request: &Value) -> Result<Value, String> {
     Ok(json!({ "options": options }))
 }
 
+/// Отвечает состояние платформы безопасности. Проба bubblewrap запускает
+/// процесс с таймаутом до 3 секунд: без кеша каждый bootstrap (включая
+/// дымовые прогоны и автоповторы фронтенда) платил это заново, хотя
+/// окружение внутри жизни процесса не меняется.
+static SECURITY_STATUS_CACHE: OnceLock<Result<Value, String>> = OnceLock::new();
+
 pub fn security_status(_request: &Value) -> Result<Value, String> {
+    if let Some(cached) = SECURITY_STATUS_CACHE.get() {
+        return cached.clone();
+    }
+    let computed = security_status_uncached();
+    let _ = SECURITY_STATUS_CACHE.set(computed.clone());
+    computed
+}
+
+fn security_status_uncached() -> Result<Value, String> {
+    {
     let bubblewrap = which("bwrap");
     let mut strict_available = false;
     let mut probe_error = String::new();
@@ -276,7 +321,7 @@ pub fn security_status(_request: &Value) -> Result<Value, String> {
         }
     }
     Ok(json!({
-        "platform": "linux",
+        "platform": if cfg!(windows) { "windows" } else if cfg!(target_os = "macos") { "darwin" } else { "linux" },
         "bubblewrap": bubblewrap.is_some(),
         "bubblewrap_path": bubblewrap.map(|path| path.to_string_lossy().to_string()).unwrap_or_default(),
         "strict_available": strict_available,
@@ -284,6 +329,7 @@ pub fn security_status(_request: &Value) -> Result<Value, String> {
         "profiles": SECURITY_PROFILES,
         "permissions": SECURITY_PERMISSIONS,
     }))
+    }
 }
 
 pub fn server_cores(_request: &Value) -> Result<Value, String> {
@@ -330,6 +376,10 @@ mod tests {
         let root = temp_root("java");
         let jdk = root.join("jdk-17");
         fs::create_dir_all(jdk.join("bin")).expect("bin");
+        // права каталогов фиксируем явно: umask окружения тестов может
+        // давать group-writable 0o775, который валидатор обязан отвергать.
+        fs::set_permissions(&jdk, fs::Permissions::from_mode(0o755)).expect("jdk 755");
+        fs::set_permissions(jdk.join("bin"), fs::Permissions::from_mode(0o755)).expect("bin 755");
         let java = jdk.join("bin").join("java");
         fs::write(&java, b"#!/bin/sh\necho 'openjdk version \"17.0.2\" 2022-01-18' >&2\n").expect("java");
         fs::set_permissions(&java, fs::Permissions::from_mode(0o755)).expect("+x");

@@ -485,3 +485,136 @@ class TestLauncherJvmInjection(unittest.TestCase):
         cmd = gl.build_command(install, account, {"jvm_preset": "none", "memory": "2GiB"})
         cmd_str = " ".join(str(c) for c in cmd)
         assert "UseG1GC" not in cmd_str
+
+
+class TestLegacyJvmSafeguards(unittest.TestCase):
+    """Старые версии стартуют на Java 8: лишний флаг или большая куча на
+    32-бит сборке убивают JVM до main() («Error occurred during
+    initialization of VM»). Проверяем обе страховки."""
+
+    def _launcher(self):
+        from unittest.mock import MagicMock
+        import importlib
+        launcher_mod = importlib.import_module("nivora_launcher.launcher")
+        gl = launcher_mod.GameLauncher.__new__(launcher_mod.GameLauncher)
+        config = MagicMock()
+        config.settings.java_path = ""
+        config.settings.memory = "2GiB"
+        config.settings.launcher_version = "0.1.0"
+        config.settings.client_id = "client-id"
+        config.paths.data_home = Path("/tmp")
+        gl.config = config
+        gl.runtime = MagicMock()
+        gl.runtime.java_for.return_value = MagicMock()
+        return launcher_mod, gl
+
+    def _install(self, launcher_mod, version_id, version_json):
+        from unittest.mock import MagicMock
+        install = MagicMock()
+        install.version_id = version_id
+        install.version_json = version_json
+        install.assets_root = Path("/tmp/assets")
+        install.asset_index_name = "17"
+        install.natives_dir = Path("/tmp/natives")
+        install.libraries = []
+        install.client_jar = Path("/tmp/client.jar")
+        install.logging_file = None
+        install.instance_dir = Path("/tmp")
+        return install
+
+    def _account(self):
+        from unittest.mock import MagicMock
+        account = MagicMock()
+        account.username = "Player"
+        account.uuid = "uuid"
+        account.access_token = ""
+        account.xuid = ""
+        account.kind = "offline"
+        return account
+
+    def test_legacy_version_starts_with_ignore_unrecognized_vm_options(self):
+        launcher_mod, gl = self._launcher()
+        version_json = {
+            "minecraftArguments": "${auth_uuid} ${auth_player_name}",
+            "mainClass": "net.minecraft.client.main.Main",
+            "assetIndex": {"id": "17"},
+        }
+        install = self._install(launcher_mod, "1.12.2", version_json)
+        cmd = gl.build_command(install, self._account(), {"memory": "2GiB"})
+        self.assertEqual(cmd[1], "-XX:+IgnoreUnrecognizedVMOptions")
+
+    def test_modern_version_keeps_arguments_untouched(self):
+        launcher_mod, gl = self._launcher()
+        version_json = {
+            "arguments": {"jvm": [], "game": []},
+            "mainClass": "net.minecraft.client.main.Main",
+            "assetIndex": {"id": "17"},
+        }
+        install = self._install(launcher_mod, "1.20.1", version_json)
+        cmd = gl.build_command(install, self._account(), {"memory": "2GiB"})
+        self.assertNotIn("-XX:+IgnoreUnrecognizedVMOptions", cmd)
+
+    def test_heap_is_capped_on_32bit_java(self):
+        launcher_mod, gl = self._launcher()
+        notes: list[str] = []
+        command = ["/opt/java32/bin/java", "-Xmx2G", "-cp", "client.jar", "Main"]
+        with patch("nivora_launcher.launcher.java_bitness", return_value=32):
+            capped = launcher_mod._cap_heap_for_32bit_java(command, notes.append)
+        self.assertIn("-Xmx1024M", capped)
+        self.assertNotIn("-Xmx2G", capped)
+        self.assertTrue(notes)
+
+    def test_heap_is_kept_on_64bit_java(self):
+        launcher_mod, _ = self._launcher()
+        command = ["/opt/java/bin/java", "-Xmx4G", "-cp", "client.jar", "Main"]
+        with patch("nivora_launcher.launcher.java_bitness", return_value=64):
+            capped = launcher_mod._cap_heap_for_32bit_java(command)
+        self.assertEqual(capped, command)
+
+    def test_unknown_bitness_keeps_command(self):
+        launcher_mod, _ = self._launcher()
+        command = ["/opt/java/bin/java", "-Xmx4G", "Main"]
+        with patch("nivora_launcher.launcher.java_bitness", return_value=None):
+            self.assertEqual(launcher_mod._cap_heap_for_32bit_java(command), command)
+
+    def test_java8_gets_ignore_unrecognized_even_on_modern_mc(self):
+        # MC 1.13–1.16.5 ходит на Java 8, но «legacy»-веткой не считается.
+        # Пресет FPS подсовывает -XX:+ParallelRefProcEnabled (JDK 9+) —
+        # без приёмника неизвестных флагов JVM умирает на старте.
+        launcher_mod, _ = self._launcher()
+        command = ["/opt/java8/bin/java", "-XX:+ParallelRefProcEnabled", "-cp", "client.jar", "Main"]
+        with patch("nivora_launcher.launcher.java_probe", return_value=(8, 64)):
+            adapted = launcher_mod._adapt_command_for_old_java(command)
+        self.assertEqual(adapted[0], "-XX:+IgnoreUnrecognizedVMOptions")
+        self.assertIn("-XX:+ParallelRefProcEnabled", adapted)
+
+    def test_modern_java_command_is_untouched(self):
+        launcher_mod, _ = self._launcher()
+        command = ["/opt/java/bin/java", "-XX:+ParallelRefProcEnabled", "Main"]
+        with patch("nivora_launcher.launcher.java_probe", return_value=(17, 64)):
+            self.assertEqual(launcher_mod._adapt_command_for_old_java(command), command)
+
+    def test_java8_32bit_gets_both_heap_cap_and_flag(self):
+        launcher_mod, _ = self._launcher()
+        notes: list[str] = []
+        command = ["/opt/java8/bin/java", "-Xmx2G", "-XX:+ParallelRefProcEnabled", "Main"]
+        with patch("nivora_launcher.launcher.java_probe", return_value=(8, 32)):
+            adapted = launcher_mod._adapt_command_for_old_java(command, notes.append)
+        self.assertEqual(adapted[0], "-XX:+IgnoreUnrecognizedVMOptions")
+        self.assertIn("-Xmx1024M", adapted)
+        self.assertNotIn("-Xmx2G", adapted)
+        self.assertTrue(notes)
+
+    def test_silent_java_probe_keeps_command(self):
+        launcher_mod, _ = self._launcher()
+        command = ["/opt/java/bin/java", "-Xmx2G", "Main"]
+        with patch("nivora_launcher.launcher.java_probe", return_value=(None, None)):
+            self.assertEqual(launcher_mod._adapt_command_for_old_java(command), command)
+
+    def test_jvm_xmx_parsing(self):
+        launcher_mod, _ = self._launcher()
+        self.assertEqual(launcher_mod._jvm_xmx_kib("2G"), 2 * 1024 * 1024)
+        self.assertEqual(launcher_mod._jvm_xmx_kib("512m"), 512 * 1024)
+        self.assertEqual(launcher_mod._jvm_xmx_kib("4096k"), 4096)
+        self.assertEqual(launcher_mod._jvm_xmx_kib("1024"), 1024 * 1024)
+        self.assertIsNone(launcher_mod._jvm_xmx_kib("banana"))

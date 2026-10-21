@@ -779,7 +779,7 @@ export class PluginRuntimeService {
     try {
       record.options.onError(error)
     } catch {
-      // An application error callback must not destabilize other plugin runtimes.
+      // an application error callback must not destabilize other plugin runtimes.
     }
   }
 
@@ -810,7 +810,7 @@ export class PluginRuntimeService {
       try {
         pending.controller.abort()
       } catch {
-        // Cancellation is best effort if a host abort listener throws.
+        // cancellation is best effort if a host abort listener throws.
       }
       pending.cancel(failure)
     }

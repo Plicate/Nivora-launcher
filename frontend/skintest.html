@@ -1,0 +1,22 @@
+<!doctype html><html><body style="background:#222;margin:0;display:flex;gap:10px;flex-wrap:wrap">
+<canvas id="a" style="width:260px;height:300px;background:#333"></canvas>
+<canvas id="b" style="width:260px;height:300px;background:#333"></canvas>
+<canvas id="c" style="width:260px;height:300px;background:#333"></canvas>
+<canvas id="d" style="width:260px;height:300px;background:#333"></canvas>
+<pre id="log" style="color:#eee;width:100%"></pre>
+<script>window.onerror=(m,s,l,c,e)=>{document.getElementById("log").textContent+="ERR "+m+" "+l+"\n"}; window.addEventListener("unhandledrejection",e=>{document.getElementById("log").textContent+="REJ "+e.reason+"\n"})</script>
+<script type="module">
+import { SkinRenderer } from '/src/services/skinRenderer.ts'
+const scenes = [
+  { id: 'a', yaw: -0.5, pitch: 0.1, back: null },
+  { id: 'b', yaw: Math.PI - 0.5, pitch: 0.1, back: 'cape' },
+  { id: 'c', yaw: Math.PI - 0.5, pitch: 0.2, back: 'elytra' },
+  { id: 'd', yaw: Math.PI / 2, pitch: 0, back: 'cape' },
+]
+const log=(t)=>document.getElementById('log').textContent+=t+'\n'; log('webgl: '+!!document.createElement('canvas').getContext('webgl'));
+for (const s of scenes) { try {
+  const r = new SkinRenderer(document.getElementById(s.id))
+  const draw = () => r.render({ skin: '/__skintest/jeb.png', cape: '/__skintest/cape.png', model: 'classic', back: s.back, yaw: s.yaw, pitch: s.pitch }, 520, 600)
+  r.onChange(()=>{draw(); log(s.id+' status '+r.skinStatus('/__skintest/jeb.png'))}); draw()
+} catch(e) { log('fail '+e) } }
+</script></body></html>

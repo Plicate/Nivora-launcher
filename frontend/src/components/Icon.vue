@@ -11,7 +11,7 @@ const props = withDefaults(
   { size: 20, strokeWidth: 1.6 },
 )
 
-// Keep the Lucide SVG paths local so the desktop build stays offline-friendly.
+// keep the Lucide SVG paths local so the desktop build stays offline-friendly.
 const paths: Record<string, string> = {
   home: '<path d="M3 11.99V14.5c0 3.3 0 4.95 1.025 5.975C5.05 21.5 6.7 21.5 10 21.5h4c3.3 0 4.95 0 5.975-1.025C21 19.45 21 17.8 21 14.5v-2.51c0-1.682 0-2.522-.356-3.25-.356-.728-1.02-1.244-2.346-2.276l-2-1.556C14.234 3.302 13.2 2.5 12 2.5s-2.234.802-4.298 2.408l-2 1.556C4.376 7.496 3.712 8.012 3.356 8.74 3 9.468 3 10.309 3 11.99Z"/>',
   instances: '<path d="M12 22c-.818 0-1.6-.33-3.163-.99C4.946 19.645 3 18.543 3 17.161V7"/><path d="M12 22c.818 0 1.6-.33 3.163-.99C19.054 19.645 21 18.543 21 17.161V7M12 22V11.355"/><path d="m8.326 9.691-2.921-1.413C3.802 7.502 3 7.114 3 6.5s.802-1.002 2.405-1.778l2.921-1.413C10.129 2.436 11.03 2 12 2s1.872.436 3.674 1.309l2.921 1.413C20.198 5.498 21 5.886 21 6.5s-.802 1.002-2.405 1.778l-2.921 1.413C13.872 10.564 12.97 11 12 11s-1.872-.436-3.674-1.309Z"/><path d="m6 12 2 1M17 4 7 9"/>',
@@ -67,6 +67,9 @@ const paths: Record<string, string> = {
   moon: '<path d="M20.9 13A9 9 0 0 1 11 3.1 9 9 0 1 0 20.9 13Z"/>',
   sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.42 1.42m11.3 11.3 1.42 1.42M2 12h2m16 0h2M4.93 19.07l1.42-1.42m11.3-11.3 1.42-1.42"/>',
   user: '<circle cx="12" cy="8" r="4"/><path d="M5 21a7 7 0 0 1 14 0"/>',
+  list: '<path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/>',
+  grid: '<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/>',
+  more: '<circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/>',
 }
 
 const markup = computed(() => paths[props.name] ?? paths.info)

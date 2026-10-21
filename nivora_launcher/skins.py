@@ -18,7 +18,6 @@ PROFILE_URL = "https://api.minecraftservices.com/minecraft/profile"
 PROFILE_CAPE_URL = "https://api.minecraftservices.com/minecraft/profile/capes/active"
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
-
 @dataclass
 class SkinInfo:
     skin_id: str
@@ -26,7 +25,6 @@ class SkinInfo:
     path: Path
     model: str = "classic"
     image: str = ""
-
 
 class SkinStore:
     def __init__(self, config: ConfigStore) -> None:
@@ -105,7 +103,6 @@ class SkinStore:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(json.dumps(values, ensure_ascii=False, indent=2) + "\n")
 
-
 def apply_skin(http: HttpClient, account: Account, skin: SkinInfo, model: str) -> None:
     if account.kind != "microsoft" or not account.access_token:
         raise LauncherError("Скин можно установить только на Microsoft-аккаунт")
@@ -132,7 +129,6 @@ def apply_skin(http: HttpClient, account: Account, skin: SkinInfo, model: str) -
         },
     )
 
-
 def profile(
     http: HttpClient,
     account: Account,
@@ -144,7 +140,7 @@ def profile(
         value = _profile_data(http, account)
     except LauncherError as exc:
         # A Minecraft token can be revoked before its local expiry timestamp.
-        # Retry once with a freshly exchanged token instead of showing an empty profile.
+        # retry once with a freshly exchanged token instead of showing an empty profile.
         if refresh_account is None or "HTTP 401" not in str(exc):
             raise
         account = refresh_account()
@@ -155,13 +151,11 @@ def profile(
     _hydrate_profile_images(http, value)
     return value
 
-
 def _profile_data(http: HttpClient, account: Account) -> dict[str, Any]:
     value = http.get_json(PROFILE_URL, headers={"Authorization": f"Bearer {account.access_token}"})
     if not isinstance(value, dict):
         raise LauncherError("Minecraft Services вернул некорректный профиль")
     return value
-
 
 def _normalize_profile_entries(profile_data: dict[str, Any]) -> None:
     for key in ("skins", "capes"):
@@ -183,10 +177,12 @@ def _normalize_profile_entries(profile_data: dict[str, Any]) -> None:
             if key == "capes" and alias and not name:
                 entry["name"] = alias
             normalized.append(entry)
-        if normalized and active_index is None:
+        # плащ может быть не надет вовсе (все INACTIVE) — тогда ничего не
+        # «надеваем» за пользователя; угадываем только если API не прислал state.
+        states_reported = any(str(item.get("state", "")).strip() for item in normalized)
+        if normalized and active_index is None and (key == "skins" or not states_reported):
             normalized[0]["state"] = "ACTIVE"
         profile_data[key] = normalized
-
 
 def _hydrate_profile_images(http: HttpClient, profile_data: dict[str, Any]) -> None:
     """Return same-origin data URLs so the WebGL preview is not blocked by CORS."""
@@ -197,9 +193,12 @@ def _hydrate_profile_images(http: HttpClient, profile_data: dict[str, Any]) -> N
         for entry in entries:
             if not isinstance(entry, dict):
                 continue
-            url = str(entry.get("url", "")).strip()
+            url = _secure_texture_url(str(entry.get("url", "")).strip())
             if not url:
                 continue
+            # даже если загрузка не удастся, интерфейс получит https-адрес:
+            # http:// блокируется CSP, и превью оставалось без текстуры.
+            entry["url"] = url
             try:
                 content = http.request(url, max_bytes=4 * 1024 * 1024)
                 if key == "skins":
@@ -210,6 +209,12 @@ def _hydrate_profile_images(http: HttpClient, profile_data: dict[str, Any]) -> N
                 continue
             entry["url"] = f"data:image/png;base64,{base64.b64encode(content).decode('ascii')}"
 
+def _secure_texture_url(url: str) -> str:
+    """minecraft Services отдаёт текстуры как http://textures.minecraft.net/…;"""
+    lowered = url.lower()
+    if lowered.startswith("http://textures.minecraft.net/") or lowered.startswith("http://textures.mojang.com/"):
+        return "https://" + url[len("http://"):]
+    return url
 
 def apply_cape(http: HttpClient, account: Account, cape_id: str) -> None:
     if account.kind != "microsoft" or not account.access_token:
@@ -232,18 +237,15 @@ def apply_cape(http: HttpClient, account: Account, cape_id: str) -> None:
         headers={"Authorization": f"Bearer {account.access_token}", "Content-Type": "application/json"},
     )
 
-
 def clear_cape(http: HttpClient, account: Account) -> None:
     if account.kind != "microsoft" or not account.access_token:
         raise LauncherError("Плащ можно снять только на Microsoft-аккаунте")
     http.request(PROFILE_CAPE_URL, method="DELETE", headers={"Authorization": f"Bearer {account.access_token}"})
 
-
 def clear_skin(http: HttpClient, account: Account) -> None:
     if account.kind != "microsoft" or not account.access_token:
         raise LauncherError("Скин можно сбросить только на Microsoft-аккаунте")
     http.request(PROFILE_SKINS_URL + "/active", method="DELETE", headers={"Authorization": f"Bearer {account.access_token}"})
-
 
 def _validate_png_skin(path: Path) -> None:
     try:
@@ -251,8 +253,8 @@ def _validate_png_skin(path: Path) -> None:
     except OSError as exc:
         raise LauncherError(f"Не удалось прочитать PNG-скин: {exc}") from exc
 
-
-def _validate_png_skin_bytes(content: bytes) -> None:
+def validate_png_skin_bytes(content: bytes) -> None:
+    """Проверить, что содержимое — корректный PNG-скин поддерживаемого размера."""
     header = content[:24]
     if len(header) < 24 or header[:8] != _PNG_SIGNATURE or header[12:16] != b"IHDR":
         raise LauncherError("Файл не является корректным PNG-скином")
@@ -261,6 +263,7 @@ def _validate_png_skin_bytes(content: bytes) -> None:
     if (width, height) not in {(64, 32), (64, 64), (128, 64), (128, 128)}:
         raise LauncherError("Поддерживаются PNG-скины 64x32, 64x64, 128x64 или 128x128")
 
+_validate_png_skin_bytes = validate_png_skin_bytes
 
 def _image_data_url(path: Path) -> str:
     try:
@@ -268,7 +271,6 @@ def _image_data_url(path: Path) -> str:
     except OSError:
         return ""
     return f"data:image/png;base64,{encoded}"
-
 
 def _safe_skin_path(root: Path, filename: str) -> Path | None:
     candidate = Path(filename)

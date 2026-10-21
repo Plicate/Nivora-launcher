@@ -1,19 +1,4 @@
-"""Лёгкие Python-хелперы Minecraft Bedrock.
-
-Вся логика Bedrock переехала в Rust-движок desktop-приложения
-(frontend/src-tauri/src/rust_engine/bedrock.rs): установка версий,
-вход в Microsoft Store, запуск игры, контент и фоновые задания
-обслуживаются нативно на всех платформах:
-
-* Linux   — встроенная среда BedrockOnLinux (профили Wine/GDK-Proton);
-* Windows — ОФИЦИАЛЬНЫЙ «Minecraft for Windows» из Microsoft Store;
-* macOS   — официальный Bedrock не выпускается.
-
-Здесь остались только функции, которые нужны Python-воркеру для смешанных
-операций (вкладка «Файлы» и метрики для экземпляров Bedrock, а также
-удаление BoL-профиля при сносе экземпляра в Linux): чистая арифметика
-путей и тривиальная очистка файлов — без запуска процессов.
-"""
+"""лёгкие Python-хелперы Minecraft Bedrock."""
 from __future__ import annotations
 
 import hashlib
@@ -32,8 +17,6 @@ from .instances import InstanceInfo, InstanceStore
 if TYPE_CHECKING:
     from .operations import CancellationToken
 
-# Лимит импорта контента: валидацией занимается Rust-движок,
-# но воркер должен отклонять гигантские запросы до передачи в движок.
 MAX_CONTENT_UPLOAD_BYTES = 128 * 1024 * 1024
 
 BEDROCK_ON_LINUX_URL = "https://github.com/Wyze3306/BedrockOnLinux"
@@ -42,24 +25,20 @@ _PROFILE_FILE = "profile.json"
 _PROFILE_NAME_RE = re.compile(r"nivora-[0-9a-f]{16}\Z")
 _MAX_PROFILE_JSON_BYTES = 64 * 1024
 
-# Windows: официальные пакеты Microsoft Store и их каталог контента.
+# windows: официальные пакеты Microsoft Store и их каталог контента.
 _WINDOWS_PACKAGE_FAMILIES = {
     "release": "Microsoft.MinecraftUWP_8wekyb3d8bbwe",
     "preview": "Microsoft.MinecraftWindowsBeta_8wekyb3d8bbwe",
 }
 
-# Путь до per-account каталогов контента внутри профиля BoL (зеркалит
-# BOL_CONTENT_ROOT_PARTS в rust_engine/bedrock.rs — не рассинхронизировать).
 BOL_CONTENT_ROOT_PARTS = (
     "compatdata", "pfx", "drive_c", "users", "steamuser", "AppData", "Roaming",
     "Minecraft Bedrock", "Users",
 )
 
-
 def _profile_name(instance_name: str) -> str:
     digest = hashlib.sha256(instance_name.encode("utf-8")).hexdigest()
     return f"nivora-{digest[:16]}"
-
 
 def windows_content_root(edition: str = "release") -> Path:
     """Каталог com.mojang официальной игры Windows (данные пакета Store)."""
@@ -69,12 +48,8 @@ def windows_content_root(edition: str = "release") -> Path:
         raise LauncherError("Не удалось определить каталог данных Minecraft (LOCALAPPDATA)")
     return Path(local_appdata) / "Packages" / family / "LocalState" / "games" / "com.mojang"
 
-
 def _require_profile_idle(profile_path: Path) -> None:
-    """Профиль не должен использоваться запущенной игрой (env BoL + flock).
-
-    Дёшево и без процессов: чтение /proc и одна неблокирующая проверка flock.
-    """
+    """профиль не должен использоваться запущенной игрой (env BoL + flock)."""
     if sys.platform != "linux":
         raise LauncherError("Управление профилем Minecraft Bedrock доступно только в Linux")
     resolved = str(profile_path.resolve())
@@ -115,14 +90,8 @@ def _require_profile_idle(profile_path: Path) -> None:
     except OSError as exc:
         raise LauncherError("Не удалось проверить блокировку профиля Bedrock") from exc
 
-
 class BedrockProfileStore:
-    """Лёгкий доступ к путям профилей Bedrock.
-
-    Тяжёлая работа (установка/запуск/контент) — в Rust-движке; этот стор
-    используется Python-воркером для вкладки «Файлы», метрик и удаления
-    профиля при сносе экземпляра.
-    """
+    """лёгкий доступ к путям профилей Bedrock."""
 
     def __init__(
         self,
@@ -143,18 +112,11 @@ class BedrockProfileStore:
         return self.root / "profiles"
 
     def profile_path(self, info: InstanceInfo) -> Path:
-        """Корень данных игры для экземпляра Bedrock.
-
-        Linux — профиль BoL (game_dir/bedrock/profiles/<nivora-…>);
-        Windows — официальный каталог com.mojang пакета Microsoft Store,
-        чтобы вкладка «Файлы» и метрики работали с официальной версией.
-        """
+        """корень данных игры для экземпляра Bedrock."""
         if info.game_edition != "bedrock":
             raise LauncherError("Операция доступна только для Minecraft Bedrock")
         if sys.platform == "win32":
-            # Официальной версии профиль среды не нужен; выбор канала
-            # хранится в метаданных экземпляра (bedrock_edition) — Rust
-            # пишет .nivora-launcher-instance.json, воркер — .trial-*.
+            # официальной версии профиль среды не нужен; выбор канала
             edition = "release"
             for metadata_name in (".nivora-launcher-instance.json", ".trial-launcher-instance.json"):
                 metadata_path = info.path / metadata_name
@@ -192,14 +154,7 @@ class BedrockProfileStore:
         self._remove_profile_path(profile_path, profile_name)
 
     def snapshot_root(self, info: InstanceInfo) -> Path:
-        """Каталог контента com.mojang для снапшотов/скриншотов Bedrock.
-
-        Windows — официальный каталог пакета Store; Linux — com.mojang внутри
-        первого scope-каталога профиля BoL (структура Wine-префикса:
-        compatdata/pfx/drive_c/users/steamuser/AppData/Roaming/
-        «Minecraft Bedrock»/Users/<scope>/games/com.mojang). Профилей-аккаунтов
-        обычно один; игра создаёт остальные сама.
-        """
+        """каталог контента com.mojang для снапшотов/скриншотов Bedrock."""
         profile = self.profile_path(info)
         if sys.platform == "win32":
             return profile

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { readFileSync } from 'node:fs'
+import { bridgeAllowList } from './helpers/registry.mjs'
 import { publicIpv4, serverAddress, canMapServer } from '../src/services/serverNetwork.ts'
 
 test('public server addresses reject private, CGNAT, malformed and reserved IPs', () => {
@@ -28,8 +29,7 @@ test('UPnP action requires a running server, public router WAN and unrestricted 
 
 test('every network bridge operation is admitted by the desktop boundary', () => {
   const bridge = readFileSync(new URL('../src/services/bridge.ts', import.meta.url), 'utf8')
-  const rust = readFileSync(new URL('../src-tauri/src/lib.rs', import.meta.url), 'utf8')
-  const allowed = rust.slice(rust.indexOf('const ALLOWED:'), rust.indexOf('if !ALLOWED.contains'))
+  const allowed = [...bridgeAllowList()].map((operation) => `"${operation}"`).join(' ')
   for (const operation of ['server_network_diagnose', 'server_network_status', 'server_network_open', 'server_network_close', 'server_network_prepare']) {
     assert.ok(bridge.includes(`'${operation}'`), operation)
     assert.ok(allowed.includes(`"${operation}"`), operation)

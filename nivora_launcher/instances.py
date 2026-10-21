@@ -26,7 +26,6 @@ from .metadata import safe_instance_name
 from .platform_support import is_reparse_point, process_exists
 from .security import CELL_DIRECTORY, SERVICE_JSON_FILES, clear_protected_settings, load_protected_settings, save_protected_settings
 
-
 @dataclass
 class InstanceInfo:
     name: str
@@ -51,7 +50,6 @@ class InstanceInfo:
     notes: str = ""
     tags: list[str] = field(default_factory=list)
 
-
 @dataclass
 class ExternalImportCandidate:
     launcher: str
@@ -64,10 +62,8 @@ class ExternalImportCandidate:
     loader: str = "vanilla"
     notes: str = ""
 
-
 INSTANCE_METADATA_FILE = ".trial-launcher-instance.json"
 INSTANCE_ASSETS_DIR = ".trial-launcher-assets"
-
 
 class InstanceStore:
     def __init__(self, config: ConfigStore) -> None:
@@ -124,7 +120,7 @@ class InstanceStore:
         _assert_no_symlinks(source.path)
         shutil.copytree(source.path, target, copy_function=shutil.copy2)
         target.chmod(0o700)
-        # Java и профиль безопасности лежат вне экземпляра — переносим вручную,
+        # java и профиль безопасности лежат вне экземпляра — переносим вручную,
         # иначе копия молча откатится на глобальную Java.
         from .instance_workspace import INSTANCE_SECURITY_DEFAULTS
 
@@ -282,8 +278,7 @@ class InstanceStore:
         return self.groups()
 
     def rename_group(self, old_name: str, new_name: str) -> list[str]:
-        """Переименование группы с переносом экземпляров: группа — просто
-        метка в настройках + поле group у экземпляров, поэтому меняем оба."""
+        """переименование группы с переносом экземпляров: группа — просто"""
         old_value = old_name.strip()
         value = new_name.strip()[:40]
         if not value:
@@ -296,9 +291,7 @@ class InstanceStore:
         if value in groups:
             raise LauncherError("Группа с таким названием уже существует")
         groups[groups.index(old_value)] = value
-        # Закрепления ссылаются на имя группы: читаем их ДО обновления
-        # списка групп — нормализация настроек отвязывает несуществующие
-        # имена, поэтому сначала переносим pin на новое имя.
+        # закрепления ссылаются на имя группы: читаем их ДО обновления
         pinned = [value if item == old_value else item for item in self.config.settings.pinned_instance_groups]
         self.config.set_value("instance_groups", groups)
         self.config.set_value("pinned_instance_groups", pinned)
@@ -405,10 +398,7 @@ class InstanceStore:
 
     @staticmethod
     def _read_profile(path: Path) -> dict[str, Any]:
-        # Метаданные писались в .trial-launcher-instance.json; Rust-движок
-        # пишет .nivora-launcher-instance.json (bedrock-экземпляры и нативный
-        # install). Читаем оба, предпочитаем «питоновский» файл — его пишут
-        # операции обновления профиля, работающие через воркер.
+        # метаданные писались в .trial-launcher-instance.json; Rust-движок
         for metadata_name in (INSTANCE_METADATA_FILE, ".nivora-launcher-instance.json"):
             metadata_path = path / metadata_name
             if is_reparse_point(metadata_path) or not metadata_path.exists():
@@ -487,7 +477,6 @@ class InstanceStore:
             handle.write(content)
         return destination.name
 
-
 def _loader_from_version(version_id: str) -> str:
     lowered = version_id.lower()
     for name in ("neoforge", "forge", "quilt", "fabric"):
@@ -495,14 +484,12 @@ def _loader_from_version(version_id: str) -> str:
             return name
     return "vanilla"
 
-
 def _valid_image(content: bytes, suffix: str) -> bool:
     if suffix == ".png":
         return content.startswith(b"\x89PNG\r\n\x1a\n")
     if suffix in {".jpg", ".jpeg"}:
         return content.startswith(b"\xff\xd8\xff")
     return len(content) >= 12 and content[:4] == b"RIFF" and content[8:12] == b"WEBP"
-
 
 def _remove_profile_assets(directory: Path, kind: str) -> None:
     if not directory.exists():
@@ -512,7 +499,6 @@ def _remove_profile_assets(directory: Path, kind: str) -> None:
             raise LauncherError("Изображение профиля является символьной ссылкой")
         if path.is_file():
             path.unlink()
-
 
 def _image_data_url(path: Path, limit: int) -> str:
     if is_reparse_point(path) or not path.is_file():
@@ -528,7 +514,6 @@ def _image_data_url(path: Path, limit: int) -> str:
         return ""
     mime = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}[suffix]
     return f"data:{mime};base64," + base64.b64encode(content).decode("ascii")
-
 
 def _live_play_seconds(path: Path) -> int:
     state_path = path / ".trial-launcher-live.json"
@@ -549,13 +534,11 @@ def _live_play_seconds(path: Path) -> int:
     except (OSError, ValueError, TypeError, RecursionError):
         return 0
 
-
 def _nonnegative_int(value: Any) -> int:
     try:
         return max(0, int(value or 0))
     except (TypeError, ValueError):
         return 0
-
 
 def _normalize_tags(value: Any) -> list[str]:
     if not isinstance(value, list):
@@ -567,33 +550,42 @@ def _normalize_tags(value: Any) -> list[str]:
             tags.append(tag)
     return tags[:12]
 
-
 def _discover_external_instance_candidates(home: Path | None = None) -> list[ExternalImportCandidate]:
     user_home = (home or Path.home()).expanduser()
     values: list[ExternalImportCandidate] = []
-    for root in (
+    prism_roots = [
         user_home / ".local/share/PrismLauncher/instances",
         user_home / ".var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/instances",
-    ):
-        values.extend(_discover_prism_family_instances(root, "Prism Launcher"))
-    for root in (
+    ]
+    multimc_roots = [
         user_home / ".local/share/MultiMC/instances",
         user_home / ".config/MultiMC/instances",
         user_home / ".config/multimc/instances",
-    ):
-        values.extend(_discover_prism_family_instances(root, "MultiMC"))
-    for root in (user_home / "Documents/curseforge/minecraft/Instances",):
-        values.extend(_discover_curseforge_instances(root))
-    for root in (
+    ]
+    curseforge_roots = [user_home / "Documents/curseforge/minecraft/Instances"]
+    official_roots = [
         user_home / ".minecraft",
         user_home / "snap/minecraft-launcher/common/.minecraft",
         user_home / ".var/app/com.mojang.Minecraft/data/minecraft",
-    ):
+    ]
+    appdata = os.environ.get("APPDATA", "").strip() if os.name == "nt" else ""
+    if appdata:
+        # windows: лаунчеры живут в %APPDATA%, а не в домашнем каталоге.
+        prism_roots.append(Path(appdata) / "PrismLauncher" / "instances")
+        multimc_roots.append(Path(appdata) / "MultiMC" / "instances")
+        curseforge_roots.append(user_home / "curseforge" / "minecraft" / "Instances")
+        official_roots.insert(0, Path(appdata) / ".minecraft")
+    for root in prism_roots:
+        values.extend(_discover_prism_family_instances(root, "Prism Launcher"))
+    for root in multimc_roots:
+        values.extend(_discover_prism_family_instances(root, "MultiMC"))
+    for root in curseforge_roots:
+        values.extend(_discover_curseforge_instances(root))
+    for root in official_roots:
         candidate = _discover_official_launcher_instance(root)
         if candidate is not None:
             values.append(candidate)
     return values
-
 
 def _discover_prism_family_instances(root: Path, launcher: str) -> list[ExternalImportCandidate]:
     if is_reparse_point(root) or not root.is_dir():
@@ -611,7 +603,6 @@ def _discover_prism_family_instances(root: Path, launcher: str) -> list[External
         if candidate is not None:
             values.append(candidate)
     return values
-
 
 def _prism_family_candidate(launcher: str, source_path: Path, game_path: Path) -> ExternalImportCandidate | None:
     config = _read_key_value_file(source_path / "instance.cfg")
@@ -660,7 +651,6 @@ def _prism_family_candidate(launcher: str, source_path: Path, game_path: Path) -
         notes=f"Импортировано из {launcher}.",
     )
 
-
 def _discover_curseforge_instances(root: Path) -> list[ExternalImportCandidate]:
     if is_reparse_point(root) or not root.is_dir():
         return []
@@ -704,7 +694,6 @@ def _discover_curseforge_instances(root: Path) -> list[ExternalImportCandidate]:
         values.append(return_candidate)
     return values
 
-
 def _discover_official_launcher_instance(root: Path) -> ExternalImportCandidate | None:
     if is_reparse_point(root) or not root.is_dir():
         return None
@@ -736,7 +725,6 @@ def _discover_official_launcher_instance(root: Path) -> ExternalImportCandidate 
         notes="Импортировано из официального лаунчера Minecraft.",
     )
 
-
 def _loader_details_from_token(token: str, minecraft_version: str) -> tuple[str, str, str]:
     lowered = token.strip().lower()
     loader = "vanilla"
@@ -756,7 +744,6 @@ def _loader_details_from_token(token: str, minecraft_version: str) -> tuple[str,
         version_id = f"{loader}-{version_id}"[:120]
     return loader, version_id, minecraft_version
 
-
 def _read_json_file(path: Path, limit: int = MAX_INSTANCE_PROFILE_JSON_BYTES) -> dict[str, Any] | None:
     try:
         if is_reparse_point(path) or not path.is_file() or path.stat().st_size > limit:
@@ -765,7 +752,6 @@ def _read_json_file(path: Path, limit: int = MAX_INSTANCE_PROFILE_JSON_BYTES) ->
     except (OSError, ValueError, TypeError, RecursionError):
         return None
     return value if isinstance(value, dict) else None
-
 
 def _read_key_value_file(path: Path, limit: int = 128 * 1024) -> dict[str, str]:
     try:
@@ -782,7 +768,6 @@ def _read_key_value_file(path: Path, limit: int = 128 * 1024) -> dict[str, str]:
         return values
     except OSError:
         return {}
-
 
 def _ensure_import_version_metadata(target: Path, candidate: ExternalImportCandidate) -> None:
     versions_dir = target / "versions"
@@ -801,14 +786,12 @@ def _ensure_import_version_metadata(target: Path, candidate: ExternalImportCandi
     metadata_path = version_dir / f"{payload['id']}.json"
     metadata_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
-
 def _within(path: Path, root: Path) -> bool:
     try:
         path.relative_to(root)
         return True
     except ValueError:
         return False
-
 
 def _desktop_exec_argument(value: str) -> str:
     if any(character in value for character in ("\x00", "\n", "\r")):
@@ -822,18 +805,15 @@ def _desktop_exec_argument(value: str) -> str:
     )
     return f'"{escaped}"'
 
-
 def _launcher_cli_command() -> list[str]:
     if getattr(sys, "frozen", False):
         return [sys.executable, "--cli"]
     return ["nivora-launcher"]
 
-
 def _assert_no_symlinks(root: Path) -> None:
     for path in root.rglob("*"):
         if is_reparse_point(path):
             raise LauncherError(f"Экземпляр содержит небезопасную символьную ссылку: {path.name}")
-
 
 def _instance_running(path: Path) -> bool:
     state_path = path / ".trial-launcher-live.json"

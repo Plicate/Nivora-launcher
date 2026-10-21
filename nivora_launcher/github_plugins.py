@@ -30,7 +30,6 @@ from .plugins import (
     verify_manifest,
 )
 
-
 GITHUB_PLUGIN_TOPIC = "trial-launcher-plugin"
 GITHUB_API_URL = "https://api.github.com"
 GITHUB_DEVICE_CODE_URL = "https://github.com/login/device/code"
@@ -72,10 +71,8 @@ _REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
 _SEARCH_QUERY_RE = re.compile(r"^[A-Za-z0-9._+ -]{0,120}$")
 _RELEASE_VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$")
 
-
 class GitHubPluginSetupError(LauncherError):
     """GitHub OAuth or token-provider setup is missing."""
-
 
 class TokenProvider(Protocol):
     """The host application owns secure token storage; this service does not."""
@@ -83,7 +80,6 @@ class TokenProvider(Protocol):
     def get_token(self) -> str | None: ...
 
     def set_token(self, token: str) -> None: ...
-
 
 class SecretToolTokenProvider:
     """Stores the GitHub token in the platform's secure keyring."""
@@ -156,7 +152,6 @@ class SecretToolTokenProvider:
             raise GitHubPluginSetupError("GitHub token storage could not access the system keyring.")
         return result
 
-
 def _windows_keyring():
     try:
         import keyring
@@ -165,7 +160,6 @@ def _windows_keyring():
         return keyring
     except Exception as exc:
         raise GitHubPluginSetupError("Windows Credential Manager is unavailable.") from exc
-
 
 class GitHubPluginService:
     def __init__(
@@ -634,7 +628,6 @@ class GitHubPluginService:
             raise GitHubPluginSetupError("The configured GitHub authorization is invalid.")
         return token
 
-
 def _validate_plugin_archive(content: bytes) -> tuple[dict[str, Any], str]:
     if not isinstance(content, bytes) or not content or len(content) > PLUGIN_MAX_ARCHIVE_BYTES:
         raise LauncherError("Plugin ZIP is empty or exceeds the archive size limit.")
@@ -716,7 +709,6 @@ def _validate_plugin_archive(content: bytes) -> tuple[dict[str, Any], str]:
         raise LauncherError("Plugin ZIP is invalid or contains unreadable files.") from exc
     return manifest, hashlib.sha256(content).hexdigest()
 
-
 def _normalized_archive_name(name: str, *, is_dir: bool) -> str:
     if not isinstance(name, str) or not name or "\x00" in name:
         raise LauncherError("Plugin ZIP contains an invalid file path.")
@@ -730,14 +722,12 @@ def _normalized_archive_name(name: str, *, is_dir: bool) -> str:
         raise LauncherError("Plugin ZIP contains an unsafe file path.")
     return "/".join(parts)
 
-
 def _read_zip_member(archive: zipfile.ZipFile, member: zipfile.ZipInfo, limit: int) -> bytes:
     with archive.open(member, "r") as source:
         content = source.read(limit + 1)
     if len(content) > limit or len(content) != member.file_size:
         raise LauncherError("A required plugin ZIP file exceeds its size limit.")
     return content
-
 
 def _select_zip_asset(assets: Any) -> dict[str, Any]:
     if not isinstance(assets, list):
@@ -760,7 +750,6 @@ def _select_zip_asset(assets: Any) -> dict[str, Any]:
         return {**asset, "id": asset_id, "name": name, "size": size}
     raise LauncherError("The latest plugin release must contain a bounded ZIP asset.")
 
-
 def _repository_summary(repository: dict[str, Any], *, topics: Any = None) -> dict[str, Any]:
     owner, repo = _repository_identity(repository)
     topic_values = topics if isinstance(topics, list) else repository.get("topics", [])
@@ -781,7 +770,6 @@ def _repository_summary(repository: dict[str, Any], *, topics: Any = None) -> di
         "topics": normalized_topics,
     }
 
-
 def _repository_identity(repository: dict[str, Any]) -> tuple[str, str]:
     owner_data = repository.get("owner") if isinstance(repository.get("owner"), dict) else {}
     owner = str(owner_data.get("login") or "")
@@ -789,11 +777,9 @@ def _repository_identity(repository: dict[str, Any]) -> tuple[str, str]:
     _validate_repository_name(owner, repo)
     return owner, repo
 
-
 def _repository_path(owner: str, repo: str) -> str:
     _validate_repository_name(owner, repo)
     return f"{quote(owner, safe='')}/{quote(repo, safe='')}"
-
 
 def _validate_repository_name(owner: Any, repo: Any) -> None:
     if not isinstance(owner, str) or not _OWNER_RE.fullmatch(owner):
@@ -801,17 +787,14 @@ def _validate_repository_name(owner: Any, repo: Any) -> None:
     if not isinstance(repo, str) or repo in {".", ".."} or not _REPO_RE.fullmatch(repo):
         raise LauncherError("GitHub repository name is invalid.")
 
-
 def _asset_download_url(owner: str, repo: str, tag: str, name: str) -> str:
     path = "/".join(
         quote(part, safe="") for part in (owner, repo, "releases", "download", tag, name)
     )
     return f"https://github.com/{path}"
 
-
 def _release_url(owner: str, repo: str, tag: str) -> str:
     return f"https://github.com/{quote(owner, safe='')}/{quote(repo, safe='')}/releases/tag/{quote(tag, safe='')}"
-
 
 def _release_upload_url(value: Any, owner: str, repo: str, release_id: int) -> str:
     if not isinstance(value, str):
@@ -828,7 +811,6 @@ def _release_upload_url(value: Any, owner: str, repo: str, release_id: int) -> s
         raise LauncherError("GitHub returned an unsafe release upload URL.")
     return f"https://uploads.github.com{expected_path}"
 
-
 def _validate_reported_download_url(value: Any, expected: str) -> None:
     if not isinstance(value, str):
         raise LauncherError("GitHub returned an invalid release download URL.")
@@ -838,7 +820,6 @@ def _validate_reported_download_url(value: Any, expected: str) -> None:
     if parsed.query or parsed.fragment or unquote(parsed.path) != unquote(expected_parsed.path):
         raise LauncherError("GitHub returned an unexpected release download URL.")
 
-
 def _verification_uri(value: Any) -> str:
     if not isinstance(value, str):
         raise LauncherError("GitHub returned an invalid device verification URL.")
@@ -847,7 +828,6 @@ def _verification_uri(value: Any) -> str:
     if parsed.path.rstrip("/") != "/login/device" or parsed.query or parsed.fragment:
         raise LauncherError("GitHub returned an unexpected device verification URL.")
     return "https://github.com/login/device"
-
 
 def _validate_https_url(url: str, allowed_hosts: frozenset[str]) -> str:
     try:
@@ -868,7 +848,6 @@ def _validate_https_url(url: str, allowed_hosts: frozenset[str]) -> str:
         raise LauncherError("Only HTTPS GitHub service URLs are allowed.")
     return host
 
-
 def _redirect_validator(
     initial_host: str,
     allowed_hosts: frozenset[str],
@@ -888,20 +867,17 @@ def _redirect_validator(
 
     return validate
 
-
 def _parse_json(raw: bytes, source: str) -> Any:
     try:
         return json.loads(raw.decode("utf-8"))
     except (UnicodeError, json.JSONDecodeError):
         raise LauncherError(f"{source} returned invalid JSON.") from None
 
-
 def _parse_json_object(raw: bytes, source: str) -> dict[str, Any]:
     value = _parse_json(raw, source)
     if not isinstance(value, dict):
         raise LauncherError(f"{source} response must be an object.")
     return value
-
 
 def _find_http_error(error: BaseException) -> HTTPError | None:
     current: BaseException | None = error
@@ -913,12 +889,10 @@ def _find_http_error(error: BaseException) -> HTTPError | None:
         current = current.__cause__ or current.__context__
     return None
 
-
 def _required_text(value: Any, field: str, *, maximum: int) -> str:
     if not isinstance(value, str) or not value or len(value) > maximum:
         raise LauncherError(f"GitHub returned an invalid {field}.")
     return value
-
 
 def _bounded_int(value: Any, minimum: int, maximum: int, field: str) -> int:
     try:
@@ -926,7 +900,6 @@ def _bounded_int(value: Any, minimum: int, maximum: int, field: str) -> int:
     except (TypeError, ValueError, OverflowError):
         raise LauncherError(f"GitHub returned an invalid {field} value.") from None
     return min(maximum, max(minimum, result))
-
 
 def _positive_int(value: Any, field: str) -> int:
     try:
@@ -937,13 +910,11 @@ def _positive_int(value: Any, field: str) -> int:
         raise LauncherError(f"GitHub returned an invalid {field}.")
     return result
 
-
 def _optional_int(value: Any) -> int | None:
     try:
         return max(0, int(value)) if value is not None else None
     except (TypeError, ValueError, OverflowError):
         return None
-
 
 def _valid_bearer_token(value: str) -> bool:
     return bool(value) and all(33 <= ord(char) <= 126 for char in value)

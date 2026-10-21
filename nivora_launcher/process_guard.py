@@ -18,7 +18,6 @@ try:
 except ImportError:  # pragma: no cover - the desktop target is Windows
     msvcrt = None
 
-
 class InstanceProcessLock:
     """Keep one client or server process per instance across launcher workers."""
 

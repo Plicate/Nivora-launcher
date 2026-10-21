@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
+import { pickFile } from '../services/fileBrowser'
 import Icon from './Icon.vue'
 import BrandLogo from './BrandLogo.vue'
 import { bridge } from '../services/bridge'
@@ -24,7 +25,6 @@ const emit = defineEmits<{
   toast: [message: string]
 }>()
 
-const fileInput = ref<HTMLInputElement>()
 const saveDialogOpen = ref(false)
 const saveDialogElement = ref<HTMLElement | null>(null)
 const handleSaveDialogKeydown = useModalFocus(saveDialogOpen, saveDialogElement, () => { saveDialogOpen.value = false })
@@ -51,7 +51,9 @@ function themeSourceLabel(theme: LauncherThemePreset): string {
 }
 
 function chooseThemeFile() {
-  fileInput.value?.click()
+  void pickFile({ accept: '.zip,application/zip', title: 'ZIP-пакет темы' }).then((file) => {
+    if (file) void importThemeData(file)
+  })
 }
 
 function encodeBytes(bytes: Uint8Array): string {
@@ -62,17 +64,13 @@ function encodeBytes(bytes: Uint8Array): string {
   return btoa(binary)
 }
 
-async function importTheme(event: Event) {
-  const input = event.target as HTMLInputElement
-  const file = input.files?.[0]
-  input.value = ''
-  if (!file) return
+async function importThemeData(file: { fileName: string; data: string; size: number }) {
   if (file.size > 8 * 1024 * 1024) {
     emit('toast', 'ZIP темы больше 8 MiB')
     return
   }
   try {
-    const data = encodeBytes(new Uint8Array(await file.arrayBuffer()))
+    const data = file.data
     const preview = await bridge.themePreview(data)
     const theme = preview.theme
     const builtIn = props.themes.find((item) => item.source === 'builtin' && item.id === theme.id)
@@ -85,7 +83,7 @@ async function importTheme(event: Event) {
       ? await confirmDialog(`Тема «${existing.name}» уже есть. Заменить её импортированным пакетом?`, { confirmLabel: 'Заменить тему' })
       : false
     if (existing && !replace) return
-    emit('import', { name: file.name, data, replace })
+    emit('import', { name: file.fileName, data, replace })
   } catch (error) {
     emit('toast', errorMessage(error))
   }
@@ -167,7 +165,7 @@ function formatDate(value: string): string {
         <p>Начните с готового набора настроек: примените тему из списка, сохраните свой вариант, добавьте тему из файла или установите опубликованную тему с GitHub.</p>
       </div>
       <div class="theme-page-actions">
-        <input ref="fileInput" class="workspace-file-input" type="file" accept=".zip,application/zip" @change="importTheme" />
+        
         <button class="button button--outline" type="button" :disabled="busy" @click="chooseThemeFile"><Icon name="upload" :size="15" />Добавить из файла</button>
         <button class="button button--accent" type="button" :disabled="busy" @click="openSaveDialog"><Icon name="save" :size="15" />Сохранить текущую</button>
       </div>

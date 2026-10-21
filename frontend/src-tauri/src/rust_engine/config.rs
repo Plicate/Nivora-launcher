@@ -1,8 +1,9 @@
-// Хранилище настроек: settings.json в XDG-корнях, значения по умолчанию,
+// хранилище настроек: settings.json в XDG-корнях, значения по умолчанию,
 // нормализация при загрузке и запись отдельных ключей с валидацией.
+use base64::Engine;
 use regex::Regex;
 use serde_json::{json, Map, Value};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use super::constants::*;
 use super::net::atomic_json_write;
@@ -33,7 +34,7 @@ pub const DEFAULT_COLOR_TOKENS: &[(&str, &str)] = &[
     ("banner_shade", "#191a17"),
 ];
 
-// Скругления углов основных групп элементов интерфейса, в пикселях.
+// скругления углов основных групп элементов интерфейса, в пикселях.
 pub const DEFAULT_RADIUS_TOKENS: &[(&str, i64)] = &[("card", 7), ("button", 8), ("control", 10)];
 
 const PAGES: &[&str] = &[
@@ -43,7 +44,6 @@ const PAGES: &[&str] = &[
     "mods",
     "modpacks",
     "plugins",
-    "lan-rooms",
     "themes",
     "settings",
 ];
@@ -98,8 +98,9 @@ fn default_overlay_settings() -> Value {
         "show_mods": true, "show_metrics": true, "recording_fps": 60, "recording_quality": 23,
         "recording_encoder": "auto", "recording_container": "mp4", "recording_audio": true,
         "position": "top-left", "scale": 100, "opacity": 96, "compact": false,
-        "show_clock": true, "show_system_metrics": true, "metrics_cpu": true, "metrics_ram": true,
-        "metrics_gpu": true, "metrics_disk": true, "metrics_temperatures": true,
+        "show_clock": true, "show_system_metrics": true,
+        "metrics_gpu": true, "metrics_cpu": true, "metrics_ram": true,
+        "metrics_disk": true, "metrics_temperatures": true,
         "system_metrics_display": "overlay", "show_chat": true,
     })
 }
@@ -154,6 +155,8 @@ pub fn default_settings_object() -> Value {
         "download_timeout_seconds": 30,
         "download_retries": 3,
         "confirm_destructive_actions": true,
+        "auto_repair_enabled": true,
+        "auto_repair_muted": [],
         "show_activity_panel": true,
         "show_toasts": true,
         "minimize_on_launch": false,
@@ -168,6 +171,7 @@ pub fn default_settings_object() -> Value {
         "launcher_profiles": [default_launcher_profile()],
         "active_launcher_profile_id": "default",
         "http_proxy": "",
+        "download_source": "auto",
         "offline_debug_limit_seconds": 0,
         "launcher_version": APP_VERSION,
         "theme": "dark",
@@ -187,6 +191,7 @@ pub fn default_settings_object() -> Value {
         "overlay_settings": default_overlay_settings(),
         "backup_schedule": default_backup_schedule(),
         "density": "comfortable",
+        "instance_layout": "default",
         "ui_scale": 100,
         "radius_tokens": radius,
         "page_themes": page_themes,
@@ -347,10 +352,7 @@ impl Paths {
     }
 
     pub fn discover() -> Self {
-        // Корни одни на весь движок — state::launcher_roots: Windows берёт
-        // %APPDATA%/%LOCALAPPDATA% как Python Paths, Unix — XDG. Раньше здесь
-        // была своя копия логики, корректная лишь случайно (join с абсолютным
-        // путём заменял базу «/» из несуществующего на Windows HOME).
+        // корни одни на весь движок — state::launcher_roots: Windows берёт
         Self::from_roots(&launcher_roots())
     }
 
@@ -383,7 +385,11 @@ pub struct ConfigStore {
 
 impl ConfigStore {
     pub fn load() -> Result<Self, String> {
-        let paths = Paths::discover();
+        Self::from_paths(Paths::discover())
+    }
+
+    /// тот же магазин, но с явными корнями — для тестов без env.
+    pub(crate) fn from_paths(paths: Paths) -> Result<Self, String> {
         paths.ensure()?;
         let mut store = Self { settings: default_settings_object(), paths };
         store.settings = store.load_and_normalize()?;
@@ -411,7 +417,7 @@ impl ConfigStore {
         let Value::Object(map) = parsed else {
             return Err("Файл настроек имеет неожиданный формат".to_owned());
         };
-        // Берём известные поля из файла поверх умолчаний.
+        // берём известные поля из файла поверх умолчаний.
         let mut settings = defaults;
         for (key, value) in map {
             if settings.get(&key).is_some() {
@@ -460,6 +466,11 @@ impl ConfigStore {
         let cloud_sync = settings["cloud_last_sync"].as_f64().unwrap_or(0.0).max(0.0);
         if settings["cloud_last_sync"].as_f64() != Some(cloud_sync) {
             settings["cloud_last_sync"] = json!(cloud_sync);
+            changed = true;
+        }
+        let download_source = normalize_download_source(settings["download_source"].as_str().unwrap_or(""));
+        if settings["download_source"].as_str() != Some(download_source) {
+            settings["download_source"] = json!(download_source);
             changed = true;
         }
         if !settings["http_proxy"].as_str().unwrap_or("").trim().is_empty() {
@@ -619,7 +630,7 @@ impl ConfigStore {
         self.paths.data_home.join("game")
     }
 
-    /// Папка игры из настроек; создаётся с правами 0700.
+    /// папка игры из настроек; создаётся с правами 0700.
     pub fn game_dir(&self) -> Result<PathBuf, String> {
         let path = self.validated_game_dir(&self.str_setting("game_dir"))?;
         std::fs::create_dir_all(&path).map_err(|error| format!("Не удалось создать папку игры: {error}"))?;
@@ -650,6 +661,101 @@ impl ConfigStore {
         Ok(())
     }
 
+    pub fn settings_public(&self) -> Value {
+        let settings = &self.settings;
+        let memory_kib = parse_memory_kib_or(settings["memory"].as_str().unwrap_or("auto"), None)
+            .unwrap_or_else(|_| recommended_memory_kib());
+        let str_field = |key: &str| settings[key].as_str().unwrap_or_default().to_owned();
+        let int_field = |key: &str| settings[key].as_i64().unwrap_or(0);
+        let bool_field = |key: &str| settings[key].as_bool().unwrap_or(false);
+        let raw_field = |key: &str| settings[key].clone();
+        json!({
+            "game_dir": str_field("game_dir"),
+            "java_path": str_field("java_path"),
+            "memory": format_memory_kib(memory_kib),
+            "memory_kib": memory_kib,
+            "memory_total_kib": system_memory_kib(),
+            "memory_recommended_kib": recommended_memory_kib(),
+            "max_downloads": int_field("max_downloads"),
+            "startup_view": str_field("startup_view"),
+            "last_view": str_field("last_view"),
+            "remember_last_view": bool_field("remember_last_view"),
+            "default_version_filter": str_field("default_version_filter"),
+            "default_loader": str_field("default_loader"),
+            "default_account_id": str_field("default_account_id"),
+            "open_last_instance": bool_field("open_last_instance"),
+            "launch_after_install": bool_field("launch_after_install"),
+            "auto_refresh_metadata": bool_field("auto_refresh_metadata"),
+            "metadata_refresh_hours": int_field("metadata_refresh_hours"),
+            "download_timeout_seconds": int_field("download_timeout_seconds"),
+            "download_retries": int_field("download_retries"),
+            "confirm_destructive_actions": bool_field("confirm_destructive_actions"),
+            "auto_repair_enabled": bool_field("auto_repair_enabled"),
+            "auto_repair_muted": raw_field("auto_repair_muted"),
+            "auto_repair_kinds": issue_kinds_public(),
+            "show_activity_panel": bool_field("show_activity_panel"),
+            "show_toasts": bool_field("show_toasts"),
+            "minimize_on_launch": bool_field("minimize_on_launch"),
+            "close_to_tray": bool_field("close_to_tray"),
+            "language": raw_field("language"),
+            "font_family": str_field("font_family"),
+            "keep_logs_days": int_field("keep_logs_days"),
+            "telemetry": bool_field("telemetry"),
+            "keyboard_shortcuts": raw_field("keyboard_shortcuts"),
+            "graphics_mode": str_field("graphics_mode"),
+            "launcher_profiles": raw_field("launcher_profiles"),
+            "active_launcher_profile_id": str_field("active_launcher_profile_id"),
+            "http_proxy": str_field("http_proxy"),
+            "download_source": str_field("download_source"),
+            "has_client_id": !str_field("client_id").trim().is_empty(),
+            "developer_mode": bool_field("developer_mode"),
+            "theme": str_field("theme"),
+            "active_theme_id": str_field("active_theme_id"),
+            "wallpaper_path": str_field("wallpaper_path"),
+            "wallpaper_data": wallpaper_data_url(&self.paths.data_home, &str_field("wallpaper_path")),
+            "wallpaper_blur": int_field("wallpaper_blur"),
+            "wallpaper_opacity": int_field("wallpaper_opacity"),
+            "accent_color": str_field("accent_color"),
+            "sidebar_position": str_field("sidebar_position"),
+            "sidebar_mode": str_field("sidebar_mode"),
+            "sidebar_width_mode": str_field("sidebar_width_mode"),
+            "sidebar_width": int_field("sidebar_width"),
+            "sidebar_floating": bool_field("sidebar_floating"),
+            "sidebar_visibility": str_field("sidebar_visibility"),
+            "animations": str_field("animations"),
+            "animation_settings": raw_field("animation_settings"),
+            "overlay_settings": raw_field("overlay_settings"),
+            "backup_schedule": raw_field("backup_schedule"),
+            "density": str_field("density"),
+            "instance_layout": str_field("instance_layout"),
+            "ui_scale": int_field("ui_scale"),
+            "radius_tokens": raw_field("radius_tokens"),
+            "page_themes": raw_field("page_themes"),
+            "page_layouts": raw_field("page_layouts"),
+            "widget_visibility": raw_field("widget_visibility"),
+            "color_tokens": raw_field("color_tokens"),
+            "instance_groups": raw_field("instance_groups"),
+            "pinned_instance_groups": raw_field("pinned_instance_groups"),
+            "login_source": str_field("login_source"),
+            "login_api_url": str_field("login_api_url"),
+            "catalog_source": str_field("catalog_source"),
+            "catalog_api_url": str_field("catalog_api_url"),
+            "data_source": str_field("data_source"),
+            "data_api_url": str_field("data_api_url"),
+            "resource_catalogs": raw_field("resource_catalogs"),
+            "active_catalog_id": str_field("active_catalog_id"),
+            "plugin_catalogs": super::plugin_catalogs::normalize_plugin_catalogs(&settings["plugin_catalogs"]),
+            "active_plugin_catalog_id": str_field("active_plugin_catalog_id"),
+            "cloud_url": str_field("cloud_url"),
+            "cloud_username": str_field("cloud_username"),
+            "cloud_remote_path": str_field("cloud_remote_path"),
+            "cloud_include_accounts": bool_field("cloud_include_accounts"),
+            "cloud_last_sync": raw_field("cloud_last_sync"),
+            // пароль WebDAV живёт в системном хранилище секретов и читается
+            "cloud_configured": !str_field("cloud_url").trim().is_empty() && !str_field("cloud_username").trim().is_empty(),
+        })
+    }
+
     fn validated_game_dir(&self, value: &str) -> Result<PathBuf, String> {
         let expanded = if let Some(rest) = value.strip_prefix('~') {
             home_dir().join(rest.trim_start_matches(['/']))
@@ -657,11 +763,7 @@ impl ConfigStore {
             PathBuf::from(value)
         };
         // canonicalize строг: требует существования пути. Питонья пара этого
-        // валидатора (resolve(strict=False)) пропускает несуществующие пути —
-        // каталог создаётся позже, при первом обращении к game_dir(). Без
-        // нестрогого резолва свежая установка не давала войти в Microsoft:
-        // загрузка настроек валидировала ещё не созданную папку.
-        let path = expanded.canonicalize().unwrap_or_else(|_| {
+        let path = super::platform_support::canonical_path(&expanded).unwrap_or_else(|_| {
             if expanded.is_absolute() {
                 expanded.clone()
             } else {
@@ -678,6 +780,65 @@ impl ConfigStore {
             return Err("Нельзя использовать корень системы или домашний каталог как папку игры".to_owned());
         }
         Ok(path)
+    }
+}
+
+pub fn save_settings(request: &Value) -> Result<Value, String> {
+    let Some(values) = request.get("values").filter(|value| value.is_object()) else {
+        return Err("Настройки имеют неожиданный формат".to_owned());
+    };
+    let allowed: &[&str] = &[
+        "game_dir", "java_path", "memory", "max_downloads", "startup_view", "last_view",
+        "remember_last_view", "default_version_filter", "default_loader", "default_account_id",
+        "open_last_instance", "launch_after_install", "auto_refresh_metadata", "metadata_refresh_hours",
+        "download_timeout_seconds", "download_retries", "confirm_destructive_actions",
+        "auto_repair_enabled", "auto_repair_muted", "show_activity_panel", "show_toasts",
+        "minimize_on_launch", "close_to_tray", "language", "font_family", "keep_logs_days",
+        "telemetry", "telemetry_endpoint", "keyboard_shortcuts", "graphics_mode",
+        "launcher_profiles", "active_launcher_profile_id", "http_proxy", "download_source",
+        "client_id", "developer_mode", "theme", "active_theme_id", "wallpaper_path",
+        "wallpaper_blur", "wallpaper_opacity", "accent_color", "sidebar_position", "sidebar_mode",
+        "sidebar_width_mode", "sidebar_width", "sidebar_floating", "sidebar_visibility",
+        "animations", "animation_settings", "overlay_settings", "backup_schedule", "density",
+        "instance_layout", "ui_scale", "radius_tokens", "page_themes", "page_layouts",
+        "widget_visibility", "color_tokens", "instance_groups", "pinned_instance_groups",
+        "resource_catalogs", "active_catalog_id", "plugin_catalogs", "active_plugin_catalog_id",
+        "login_source", "login_api_url", "catalog_source", "catalog_api_url", "data_source",
+        "data_api_url", "cloud_url", "cloud_username", "cloud_remote_path", "cloud_include_accounts",
+    ];
+    let structured: &[&str] = &[
+        "page_themes", "page_layouts", "widget_visibility", "color_tokens", "radius_tokens",
+        "instance_groups", "pinned_instance_groups", "resource_catalogs", "plugin_catalogs",
+        "keyboard_shortcuts", "launcher_profiles", "animation_settings", "overlay_settings",
+        "backup_schedule", "auto_repair_muted",
+    ];
+    // language: null — валидное значение («язык не выбран»), str(None)
+    // его бы испортил — поэтому тоже без строкового приведения.
+    let raw_keys: &[&str] = &["sidebar_floating", "sidebar_width", "language"];
+    let mut normalized = Map::new();
+    for (key, value) in values.as_object().expect("проверено выше") {
+        if !allowed.contains(&key.as_str()) {
+            continue;
+        }
+        let coerced = if structured.contains(&key.as_str()) || raw_keys.contains(&key.as_str()) {
+            value.clone()
+        } else {
+            python_str_of(value)
+        };
+        normalized.insert(key.clone(), coerced);
+    }
+    let mut config = ConfigStore::load()?;
+    config.set_values(&Value::Object(normalized))?;
+    Ok(json!({ "settings": config.settings_public() }))
+}
+
+fn python_str_of(value: &Value) -> Value {
+    match value {
+        Value::String(text) => json!(text),
+        Value::Bool(flag) => json!(if *flag { "True" } else { "False" }),
+        Value::Number(number) => json!(number.to_string()),
+        Value::Null => json!("None"),
+        other => other.clone(),
     }
 }
 
@@ -700,6 +861,76 @@ pub fn is_valid_client_id(value: &str) -> bool {
     Regex::new(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\z")
         .unwrap()
         .is_match(value)
+}
+
+pub fn issue_kinds_public() -> Value {
+    let kinds: &[(&str, &str)] = &[
+        ("account", "Проблема с аккаунтом"),
+        ("security_sandbox", "Запуску мешают настройки безопасности"),
+        ("loader_broken", "Модлоадер повреждён или не запускается"),
+        ("loader_outdated", "Устаревшая версия модлоадера"),
+        ("missing_dependencies", "Не хватает зависимостей модов"),
+        ("incompatible_mods", "Несовместимые моды"),
+        ("wrong_loader_mods", "Моды для другого загрузчика"),
+        ("duplicate_mods", "Дубликаты модов"),
+        ("mixin_failure", "Ошибка Mixin в моде"),
+        ("corrupted_mods", "Повреждённые файлы модов"),
+        ("broken_config", "Повреждённые конфиги модов"),
+        ("out_of_memory", "Не хватило памяти"),
+        ("memory_too_high", "Выделено слишком много памяти"),
+        ("java_version", "Неподходящая версия Java"),
+        ("jvm_arguments", "Ошибочные аргументы JVM"),
+        ("jvm_crash", "Аварийное падение Java"),
+        ("game_files", "Повреждены файлы игры или загрузчика"),
+        ("graphics", "Проблема с графикой"),
+        ("recent_mods", "Недавно добавленные моды"),
+        ("unknown_crash", "Неизвестная причина краша"),
+    ];
+    Value::Array(
+        kinds
+            .iter()
+            .map(|(id, title)| json!({ "id": id, "title": title }))
+            .collect(),
+    )
+}
+
+fn wallpaper_data_url(data_home: &Path, raw_path: &str) -> String {
+    let raw = raw_path.trim();
+    if raw.is_empty() {
+        return String::new();
+    }
+    let path = if let Some(rest) = raw.strip_prefix('~') {
+        home_dir().join(rest.trim_start_matches(['/']))
+    } else {
+        PathBuf::from(raw)
+    };
+    let Ok(meta) = std::fs::symlink_metadata(&path) else {
+        return String::new();
+    };
+    if meta.is_symlink() || !meta.is_file() || meta.len() > 32 * 1024 * 1024 {
+        return String::new();
+    }
+    let root = data_home.join("wallpapers");
+    let inside = path
+        .parent()
+        .map(|parent| super::platform_support::canonical_path(parent).ok())
+        .and_then(|parent| parent)
+        .map(|parent| parent == super::platform_support::canonical_path(&root).unwrap_or(root))
+        .unwrap_or(false);
+    if !inside {
+        return String::new();
+    }
+    let Ok(content) = std::fs::read(&path) else {
+        return String::new();
+    };
+    let mime = match path.extension().and_then(|value| value.to_str()).unwrap_or_default().to_lowercase().as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        _ => return String::new(),
+    };
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&content);
+    format!("data:{mime};base64,{encoded}")
 }
 
 pub fn normalize_cloud_path(value: &str) -> String {
@@ -738,7 +969,7 @@ fn appearance_values(settings: &Value) -> Map<String, Value> {
     let keys = [
         "theme", "active_theme_id", "wallpaper_path", "wallpaper_blur", "wallpaper_opacity", "accent_color",
         "sidebar_position", "sidebar_mode", "sidebar_width_mode", "sidebar_width", "sidebar_floating",
-        "sidebar_visibility", "animations", "animation_settings", "density", "ui_scale", "radius_tokens",
+        "sidebar_visibility", "animations", "animation_settings", "density", "instance_layout", "ui_scale", "radius_tokens",
         "page_themes", "page_layouts", "widget_visibility", "color_tokens",
     ];
     keys.iter()
@@ -781,7 +1012,7 @@ fn normalize_shortcuts(value: &Value) -> Value {
 }
 
 fn normalize_behavior(settings: &Value) -> Map<String, Value> {
-    let views = ["instances", "accounts", "mods", "modpacks", "plugins", "lan-rooms", "themes", "settings"];
+    let views = ["instances", "accounts", "mods", "modpacks", "plugins", "themes", "settings"];
     let filters = ["all", "release", "snapshot", "old_beta", "old_alpha"];
     let loaders = ["vanilla", "fabric", "forge", "neoforge", "quilt"];
     let clamp_member = |value: &str, allowed: &[&str], fallback: &str| -> String {
@@ -883,6 +1114,7 @@ fn normalize_appearance(settings: &Value) -> Map<String, Value> {
     result.insert("animations".into(), json!(member(settings["animations"].as_str().unwrap_or(""), &["full", "reduced", "off"], "full")));
     result.insert("animation_settings".into(), normalize_animation_settings(&settings["animation_settings"]));
     result.insert("density".into(), json!(member(settings["density"].as_str().unwrap_or(""), &["compact", "comfortable", "spacious"], "comfortable")));
+    result.insert("instance_layout".into(), json!(if settings["instance_layout"].as_str().unwrap_or("").trim().eq_ignore_ascii_case("compact") { "compact" } else { "default" }));
     result.insert("ui_scale".into(), json!(bounded_int(&settings["ui_scale"], 80, 125, 100)));
     result.insert("radius_tokens".into(), normalize_radius_tokens(&settings["radius_tokens"]));
     result.insert("page_themes".into(), page_themes(&valid_page_themes, "inherit"));
@@ -895,6 +1127,61 @@ fn normalize_appearance(settings: &Value) -> Map<String, Value> {
     result.insert("widget_visibility".into(), Value::Object(visibility));
     result.insert("color_tokens".into(), Value::Object(color_tokens));
     result
+}
+
+fn normalize_overlay_settings(value: &Value) -> Value {
+    let raw = value.as_object().cloned().unwrap_or_default();
+    let bool_field = |key: &str, fallback: bool| coerce_bool(raw.get(key).unwrap_or(&json!(fallback)), fallback);
+    let hotkey = |key: &str, fallback: &str| -> String {
+        let text: String = raw
+            .get(key)
+            .and_then(Value::as_str)
+            .unwrap_or(fallback)
+            .trim()
+            .chars()
+            .take(32)
+            .collect();
+        let allowed = |character: char| character.is_ascii_alphanumeric() || character == '+' || character == '*';
+        if !text.is_empty() && text.chars().all(allowed) {
+            text
+        } else {
+            fallback.to_owned()
+        }
+    };
+    let enum_field = |key: &str, allowed: &[&str], fallback: &str| -> String {
+        let value = raw
+            .get(key)
+            .and_then(Value::as_str)
+            .unwrap_or(fallback)
+            .trim()
+            .to_lowercase();
+        if allowed.contains(&value.as_str()) { value } else { fallback.to_owned() }
+    };
+    json!({
+        "enabled": bool_field("enabled", true),
+        "hotkey_overlay": hotkey("hotkey_overlay", "Shift+Tab"),
+        "hotkey_recording": hotkey("hotkey_recording", "F7"),
+        "show_mods": bool_field("show_mods", true),
+        "show_metrics": bool_field("show_metrics", true),
+        "recording_fps": bounded_int(raw.get("recording_fps").unwrap_or(&json!(60)), 15, 120, 60),
+        "recording_quality": bounded_int(raw.get("recording_quality").unwrap_or(&json!(23)), 15, 35, 23),
+        "recording_encoder": enum_field("recording_encoder", &["auto", "nvenc", "vaapi", "x264"], "auto"),
+        "recording_container": enum_field("recording_container", &["mp4", "mkv"], "mp4"),
+        "recording_audio": bool_field("recording_audio", true),
+        "position": enum_field("position", &["top-left", "top-right", "bottom-left", "bottom-right"], "top-left"),
+        "scale": bounded_int(raw.get("scale").unwrap_or(&json!(100)), 80, 130, 100),
+        "opacity": bounded_int(raw.get("opacity").unwrap_or(&json!(96)), 60, 100, 96),
+        "compact": bool_field("compact", false),
+        "show_clock": bool_field("show_clock", true),
+        "show_system_metrics": bool_field("show_system_metrics", true),
+        "metrics_gpu": bool_field("metrics_gpu", true),
+        "metrics_cpu": bool_field("metrics_cpu", true),
+        "metrics_ram": bool_field("metrics_ram", true),
+        "metrics_disk": bool_field("metrics_disk", true),
+        "metrics_temperatures": bool_field("metrics_temperatures", true),
+        "system_metrics_display": enum_field("system_metrics_display", &["overlay", "always"], "overlay"),
+        "show_chat": bool_field("show_chat", true),
+    })
 }
 
 fn normalize_animation_settings(value: &Value) -> Value {
@@ -926,49 +1213,6 @@ fn normalize_animation_settings(value: &Value) -> Value {
         "surface_stagger_ms": bounded_int(raw.get("surface_stagger_ms").unwrap_or(&json!(35)), 0, 200, 35),
         "page_styles": page_styles,
         "page_durations_ms": page_durations,
-    })
-}
-
-pub fn normalize_overlay_settings(value: &Value) -> Value {
-    let raw = value.as_object().cloned().unwrap_or_default();
-    let raw_str = |key: &str, fallback: &str| raw.get(key).and_then(Value::as_str).unwrap_or(fallback).to_owned();
-    let hotkey = |key: &str, fallback: &str| -> String {
-        let text = raw.get(key).and_then(Value::as_str).unwrap_or(fallback).trim().chars().take(32).collect::<String>();
-        let allowed = |character: char| character.is_ascii_alphanumeric() || character == '+' || character == '*';
-        if !text.is_empty() && text.chars().all(allowed) {
-            text
-        } else {
-            fallback.to_owned()
-        }
-    };
-    let member = |value: &str, allowed: &[&str], fallback: &str| -> String {
-        let cleaned = value.trim().to_lowercase();
-        if allowed.contains(&cleaned.as_str()) { cleaned } else { fallback.to_owned() }
-    };
-    json!({
-        "enabled": coerce_bool(raw.get("enabled").unwrap_or(&json!(true)), true),
-        "hotkey_overlay": hotkey("hotkey_overlay", "Shift+Tab"),
-        "hotkey_recording": hotkey("hotkey_recording", "F7"),
-        "show_mods": coerce_bool(raw.get("show_mods").unwrap_or(&json!(true)), true),
-        "show_metrics": coerce_bool(raw.get("show_metrics").unwrap_or(&json!(true)), true),
-        "recording_fps": bounded_int(raw.get("recording_fps").unwrap_or(&json!(60)), 15, 120, 60),
-        "recording_quality": bounded_int(raw.get("recording_quality").unwrap_or(&json!(23)), 15, 35, 23),
-        "recording_encoder": member(&raw_str("recording_encoder", "auto"), &["auto", "nvenc", "vaapi", "x264"], "auto"),
-        "recording_container": member(&raw_str("recording_container", "mp4"), &["mp4", "mkv"], "mp4"),
-        "recording_audio": coerce_bool(raw.get("recording_audio").unwrap_or(&json!(true)), true),
-        "position": member(&raw_str("position", "top-left"), &["top-left", "top-right", "bottom-left", "bottom-right"], "top-left"),
-        "scale": bounded_int(raw.get("scale").unwrap_or(&json!(100)), 80, 130, 100),
-        "opacity": bounded_int(raw.get("opacity").unwrap_or(&json!(96)), 60, 100, 96),
-        "compact": coerce_bool(raw.get("compact").unwrap_or(&json!(false)), false),
-        "show_clock": coerce_bool(raw.get("show_clock").unwrap_or(&json!(true)), true),
-        "show_system_metrics": coerce_bool(raw.get("show_system_metrics").unwrap_or(&json!(true)), true),
-        "metrics_cpu": coerce_bool(raw.get("metrics_cpu").unwrap_or(&json!(true)), true),
-        "metrics_ram": coerce_bool(raw.get("metrics_ram").unwrap_or(&json!(true)), true),
-        "metrics_gpu": coerce_bool(raw.get("metrics_gpu").unwrap_or(&json!(true)), true),
-        "metrics_disk": coerce_bool(raw.get("metrics_disk").unwrap_or(&json!(true)), true),
-        "metrics_temperatures": coerce_bool(raw.get("metrics_temperatures").unwrap_or(&json!(true)), true),
-        "system_metrics_display": member(&raw_str("system_metrics_display", "overlay"), &["overlay", "always"], "overlay"),
-        "show_chat": coerce_bool(raw.get("show_chat").unwrap_or(&json!(true)), true),
     })
 }
 
@@ -1063,7 +1307,7 @@ fn safe_profile_text(value: Option<&Value>) -> String {
     text.chars().take(512).collect()
 }
 
-fn profile_arguments(value: Option<&Value>) -> Value {
+pub(crate) fn profile_arguments(value: Option<&Value>) -> Value {
     let Some(items) = value.and_then(Value::as_array) else {
         return json!([]);
     };
@@ -1292,8 +1536,14 @@ pub fn normalize_active_catalog_id(value: &Value, catalogs: &Value) -> Value {
     }
 }
 
-/// Запись одного ключа настроек с валидацией — общий путь для save_settings
-/// и внутренних обновлений.
+fn normalize_download_source(value: &str) -> &'static str {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "official" => "official",
+        "mirror" => "mirror",
+        _ => "auto",
+    }
+}
+
 pub fn set_value_on(settings: &mut Value, key: &str, value: &Value) -> Result<(), String> {
     if settings.get(key).is_none() {
         return Err(format!("Неизвестная настройка: {key}"));
@@ -1323,6 +1573,13 @@ pub fn set_value_on(settings: &mut Value, key: &str, value: &Value) -> Result<()
         }
         "max_downloads" => {
             value = json!(bounded_int(&value, 1, 32, 8));
+        }
+        "download_source" => {
+            let raw = value.as_str().unwrap_or("").trim().to_ascii_lowercase();
+            if !matches!(raw.as_str(), "auto" | "official" | "mirror") {
+                return Err("Источник загрузок: auto, official или mirror".to_owned());
+            }
+            value = json!(raw);
         }
         "http_proxy" => {
             let proxy = value.as_str().unwrap_or("").trim().to_owned();
@@ -1461,7 +1718,7 @@ pub fn set_value_on(settings: &mut Value, key: &str, value: &Value) -> Result<()
         }
         _ => {}
     }
-    // Приведение типов к типу текущего значения.
+    // приведение типов к типу текущего значения.
     value = match &current {
         Value::Bool(_) => json!(coerce_bool(&value, current.as_bool().unwrap_or(false))),
         Value::Number(_) => match value.as_str().and_then(|text| text.trim().parse::<i64>().ok()) {
@@ -1471,7 +1728,7 @@ pub fn set_value_on(settings: &mut Value, key: &str, value: &Value) -> Result<()
         _ => value,
     };
     settings[key] = value.clone();
-    // Связанные ключи пересчитываются после записи.
+    // связанные ключи пересчитываются после записи.
     let behavior_keys = [
         "startup_view", "last_view", "remember_last_view", "default_version_filter", "default_loader",
         "default_account_id", "open_last_instance", "launch_after_install", "auto_refresh_metadata",
@@ -1494,7 +1751,7 @@ pub fn set_value_on(settings: &mut Value, key: &str, value: &Value) -> Result<()
     let appearance_keys = [
         "theme", "wallpaper_path", "wallpaper_blur", "wallpaper_opacity", "accent_color",
         "sidebar_position", "sidebar_mode", "sidebar_width_mode", "sidebar_width", "sidebar_floating",
-        "sidebar_visibility", "animations", "animation_settings", "density", "ui_scale",
+        "sidebar_visibility", "animations", "animation_settings", "density", "instance_layout", "ui_scale",
         "radius_tokens", "page_themes", "page_layouts", "widget_visibility", "color_tokens",
     ];
     if appearance_keys.contains(&key) {
@@ -1618,7 +1875,7 @@ mod tests {
     fn groups_are_deduplicated_and_capped() {
         let value = json!(["Бета", " бета ", "Альфа", ""]);
         let groups = normalize_groups(&value);
-        // Дедупликация чувствительна к регистру, сортировка — нет.
+        // дедупликация чувствительна к регистру, сортировка — нет.
         assert_eq!(groups, json!(["Альфа", "Бета", "бета"]));
         let pinned = normalize_pinned_groups(&json!(["Альфа", "Бета", "Альфа", "Чужая"]), Some(&groups));
         assert_eq!(pinned, json!(["Альфа", "Бета"]));

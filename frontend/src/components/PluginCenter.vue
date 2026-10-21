@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
+import { pickFile } from '../services/fileBrowser'
 import GitHubPluginCatalog from './GitHubPluginCatalog.vue'
 import Icon from './Icon.vue'
 import Collapsible from './Collapsible.vue'
@@ -40,8 +41,6 @@ const emit = defineEmits<{
   toast: [message: string]
 }>()
 
-const archiveInput = ref<HTMLInputElement>()
-const revocationInput = ref<HTMLInputElement>()
 const installedPlugins = computed(() => props.plugins.filter((plugin) => plugin.installed))
 const canImportRevocations = computed(() => installedPlugins.value.some((plugin) =>
   plugin.publisher_pinned && plugin.publisher_trusted && plugin.publisher_revocation_authority,
@@ -88,45 +87,39 @@ function executionStatus(plugin: PluginManifest): string {
 }
 
 function pickArchive() {
-  archiveInput.value?.click()
+  void pickFile({ accept: '.zip,application/zip', title: 'ZIP-архив плагина' }).then((file) => {
+    if (file) void importArchiveData(file)
+  })
 }
 
 function pickRevocationDocument() {
-  if (canImportRevocations.value) revocationInput.value?.click()
+  if (!canImportRevocations.value) return
+  void pickFile({ accept: '.json,application/json', title: 'Список отзыва плагинов' }).then((file) => {
+    if (file) void importRevocationData(file)
+  })
 }
 
-async function importArchive(event: Event) {
-  const input = event.target as HTMLInputElement
-  const file = input.files?.[0]
-  input.value = ''
-  if (!file) return
+async function importArchiveData(file: { fileName: string; data: string; size: number }) {
   if (file.size > 64 * 1024 * 1024) {
     emit('toast', 'Архив плагина больше 64 MiB')
     return
   }
   try {
-    const bytes = new Uint8Array(await file.arrayBuffer())
-    let binary = ''
-    for (let offset = 0; offset < bytes.length; offset += 0x8000) binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000))
-    emit('installArchive', { name: file.name, data: btoa(binary) })
+    emit('installArchive', { name: file.fileName, data: file.data })
   } catch (error) {
     emit('toast', error instanceof Error ? error.message : 'Не удалось прочитать ZIP-архив')
   }
 }
 
-async function importRevocationDocument(event: Event) {
-  const input = event.target as HTMLInputElement
-  const file = input.files?.[0]
-  input.value = ''
-  if (!file) return
+async function importRevocationData(file: { fileName: string; data: string; size: number }) {
   if (file.size > 1024 * 1024) {
     emit('toast', 'Список отзыва больше 1 MiB')
     return
   }
   try {
-    emit('importRevocations', await file.text())
-  } catch (error) {
-    emit('toast', error instanceof Error ? error.message : 'Не удалось прочитать список отзыва')
+    emit('importRevocations', atob(file.data))
+  } catch {
+    emit('toast', 'Не удалось прочитать список отзыва')
   }
 }
 </script>
@@ -144,9 +137,9 @@ async function importRevocationDocument(event: Event) {
 
     <GitHubPluginCatalog :active="props.active" :plugins="props.plugins" :install-busy="props.githubInstallBusy" @install="emit('installGithub', $event)">
       <template #import-control>
-        <input ref="archiveInput" class="workspace-file-input" type="file" accept=".zip,application/zip" @change="importArchive" />
+        
         <button class="button button--outline" type="button" :disabled="props.githubInstallBusy" @click="pickArchive"><Icon name="upload" :size="15" />Импортировать ZIP</button>
-        <input ref="revocationInput" class="workspace-file-input" type="file" accept=".json,application/json" @change="importRevocationDocument" />
+        
         <button class="button button--outline" type="button" :disabled="!canImportRevocations" v-tooltip="'Требуется закреплённый ключ с полномочием на списки отзыва'" @click="pickRevocationDocument"><Icon name="upload" :size="15" />Импортировать список отзыва</button>
       </template>
     </GitHubPluginCatalog>

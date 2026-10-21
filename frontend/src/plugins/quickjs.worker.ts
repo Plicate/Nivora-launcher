@@ -82,7 +82,7 @@ function post(message: WorkerMessage) {
   try {
     workerScope.postMessage(message)
   } catch {
-    // A terminated parent cannot receive any further runtime messages.
+    // a terminated parent cannot receive any further runtime messages.
   }
 }
 
@@ -128,7 +128,7 @@ function disposeRuntime() {
     try {
       deferred.dispose()
     } catch {
-      // The context may already have been interrupted or disposed.
+      // the context may already have been interrupted or disposed.
     }
   }
   pendingHostCalls.clear()
@@ -136,20 +136,20 @@ function disposeRuntime() {
     try {
       handle.dispose()
     } catch {
-      // The context may already have been interrupted or disposed.
+      // the context may already have been interrupted or disposed.
     }
   }
   internalFunctions.clear()
   try {
     context?.dispose()
   } catch {
-    // Continue disposing the runtime even if QuickJS reports a leaked handle.
+    // continue disposing the runtime even if QuickJS reports a leaked handle.
   }
   context = undefined
   try {
     runtime?.dispose()
   } catch {
-    // The worker will be terminated by the parent after a fatal error.
+    // the worker will be terminated by the parent after a fatal error.
   }
   runtime = undefined
 }

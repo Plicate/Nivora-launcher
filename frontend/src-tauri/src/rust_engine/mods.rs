@@ -1,8 +1,4 @@
-// Каталог Modrinth: поиск, совместимые версии, установка ресурсов с деревом
-// обязательных зависимостей, проверка обновлений по sidecar-метаданным
-// (.<файл>.trial-project.json). Скачивание — staging + атомарная замена с
-// откатом, хеши издателя обязательны, иначе нужна явная подтверждённая
-// загрузка.
+// каталог Modrinth: поиск, совместимые версии, установка ресурсов с деревом
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::fs;
@@ -94,15 +90,17 @@ impl ModrinthProvider {
         game_version: Option<&str>,
         loader: Option<&str>,
         limit: i64,
+        offset: i64,
         project_type: &str,
         sort_by: &str,
     ) -> Result<Vec<Value>, String> {
-        validate_project_type(project_type)?;
+        validate_catalog_project_type(project_type)?;
         let sort_by = sort_by.trim().to_lowercase();
         if !search_ordering_valid(&sort_by) {
             return Err(format!("Неизвестный порядок сортировки Modrinth: {sort_by}"));
         }
         let limit = limit.clamp(1, 100);
+        let offset = offset.max(0);
 
         let mut facets: Vec<Vec<String>> = vec![vec![format!("project_type:{project_type}")]];
         if let Some(game_version) = game_version.filter(|value| !value.is_empty()) {
@@ -116,6 +114,7 @@ impl ModrinthProvider {
         }
         let mut params: Vec<(&str, String)> = vec![
             ("limit", limit.to_string()),
+            ("offset", offset.to_string()),
             ("index", sort_by),
             ("facets", serde_json::to_string(&facets).map_err(|error| error.to_string())?),
         ];
@@ -133,7 +132,7 @@ impl ModrinthProvider {
     }
 
     pub(crate) fn project_details(&self, project_id: &str, project_type: &str) -> Result<Value, String> {
-        validate_project_type(project_type)?;
+        validate_catalog_project_type(project_type)?;
         let project_id = validated_project_id(project_id)?;
         let url = format!("{}/project/{}", self.base_url, percent_encode(&project_id));
         let value = self.http.get_json(&url, None)?;
@@ -597,7 +596,7 @@ impl ModrinthProvider {
     fn project_metadata_for_install(&self, project_id: &str, project_type: &str) -> Value {
         let encoded = percent_encode(project_id);
         let Ok(value) = self.http.get_json(&format!("{}/project/{encoded}", self.base_url), None) else {
-            // Метаданные проекта не критичны для установки: каталог недоступен —
+            // метаданные проекта не критичны для установки: каталог недоступен —
             // ставим без названия и иконки.
             return json!({});
         };
@@ -871,8 +870,6 @@ impl ModrinthProvider {
     }
 }
 
-// ------------------------- вспомогательные -------------------------
-
 fn resource_paths(instance_dir: &Path, project_type: &str, target_dir: Option<&Path>) -> Result<(PathBuf, PathBuf), String> {
     let directory = project_directory(project_type).ok_or_else(|| format!("Неизвестный тип Modrinth-проекта: {project_type}"))?;
     if project_type == "datapack" {
@@ -983,8 +980,6 @@ fn write_private_json(path: &Path, value: &Value) -> Result<(), String> {
     Ok(())
 }
 
-/// Временный каталог рядом с назначением: переименование файла внутри той
-/// же ФС атомарно; Drop удаляет каталог целиком.
 struct StagingDirectory {
     path: PathBuf,
 }
@@ -1181,6 +1176,15 @@ fn truthy(value: Option<&Value>) -> bool {
         Some(Value::Number(number)) => number.as_f64().unwrap_or(0.0) != 0.0,
         Some(Value::String(text)) => !text.is_empty(),
         Some(_) => true,
+    }
+}
+
+/// типы проектов, разрешённые при поиске/просмотре каталога: четыре
+fn validate_catalog_project_type(project_type: &str) -> Result<(), String> {
+    if project_type == "modpack" || project_directory(project_type).is_some() {
+        Ok(())
+    } else {
+        Err(format!("Неизвестный тип Modrinth-проекта: {project_type}"))
     }
 }
 

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
+import { openContextMenu, type ContextMenuItem } from '../services/contextMenu'
 import CoreBadge from './CoreBadge.vue'
 import CustomSelect from './CustomSelect.vue'
 import Icon from './Icon.vue'
@@ -14,10 +15,12 @@ const props = withDefaults(defineProps<{
   groupBusy?: boolean
   activeFilter: string
   searchShortcut?: string
-}>(), { pinnedGroups: () => [], busy: false, groupBusy: false, searchShortcut: 'Ctrl+K' })
+  layout?: string
+}>(), { pinnedGroups: () => [], busy: false, groupBusy: false, searchShortcut: 'Ctrl+K', layout: 'default' })
 
 const emit = defineEmits<{
   'update:activeFilter': [filter: string]
+  'update:layout': [layout: string]
   'new-instance': []
   'create-group': []
   'rename-group': [group: string]
@@ -112,6 +115,47 @@ function changeGroup(instance: InstanceInfo, group: string) {
   if ((instance.group || '') !== group) emit('move-group', instance, group)
 }
 
+const compact = computed(() => props.layout === 'compact')
+// плитка компактного режима, у которой раскрыта панель «Дополнительно».
+const expandedInstance = ref('')
+
+function toggleMore(instance: InstanceInfo) {
+  expandedInstance.value = expandedInstance.value === instance.name ? '' : instance.name
+}
+
+function instanceMeta(instance: InstanceInfo): string {
+  if (instance.game_edition === 'bedrock') return 'Bedrock'
+  const core = instance.kind === 'server' ? (instance.server_core || 'Сервер') : (instance.loader || 'Vanilla')
+  const version = instance.kind === 'server'
+    ? (instance.server_core_version || instance.minecraft_version || instance.version_id || '')
+    : (instance.minecraft_version || instance.version_id || '')
+  return version ? `${core} · ${version}` : core
+}
+
+/** Собственное меню правого клика по экземпляру — как у десктопных приложений. */
+function instanceMenu(event: MouseEvent, instance: InstanceInfo) {
+  const title = instance.display_name || instance.name
+  const items: ContextMenuItem[] = [
+    {
+      id: 'play',
+      label: instance.running ? 'Остановить' : instance.kind === 'server' ? 'Запустить сервер' : 'Играть',
+      icon: instance.running ? 'stop' : 'play',
+      action: () => toggleInstance(instance),
+    },
+    {
+      id: 'settings',
+      label: 'Рабочая область',
+      icon: 'settings',
+      action: () => emit('settings', instance),
+    },
+  ]
+  if (instance.game_edition !== 'bedrock') {
+    items.push({ id: 'duplicate', label: 'Дублировать', icon: 'copy', action: () => emit('duplicate', instance) })
+  }
+  items.push({ id: 'delete', label: 'Удалить', icon: 'trash', danger: true, action: () => emit('delete-instance', instance) })
+  openContextMenu(event, items, title)
+}
+
 function toggleInstance(instance: InstanceInfo) {
   if (instance.running) emit('stop', instance)
   else emit('play', instance)
@@ -149,6 +193,10 @@ function formatPlayedTime(value: number): string {
         />
       </div>
       <span class="instance-result-count">{{ filteredInstances.length }} из {{ instances.length }}</span>
+      <div class="segmented-control instance-layout-switch" role="group" aria-label="Вид списка экземпляров">
+        <button type="button" :class="{ active: !compact }" :aria-pressed="!compact" aria-label="Обычный список" v-tooltip="'Обычный список'" @click="emit('update:layout', 'default')"><Icon name="list" :size="15" /></button>
+        <button type="button" :class="{ active: compact }" :aria-pressed="compact" aria-label="Компактный режим" v-tooltip="'Компактный режим'" @click="emit('update:layout', 'compact')"><Icon name="grid" :size="15" /></button>
+      </div>
       <button class="button button--outline instance-groups-create-fallback" type="button" :disabled="groupBusy" @click="emit('create-group')">
         <Icon name="plus" :size="15" />Новая подборка
       </button>
@@ -228,8 +276,66 @@ function formatPlayedTime(value: number): string {
           </div>
         </header>
 
-        <div v-if="section.instances.length" class="instance-list">
-          <article v-for="instance in section.instances" :key="instance.name" class="instance-row">
+        <div v-if="section.instances.length && compact" class="instance-tiles">
+          <article
+            v-for="instance in section.instances"
+            :key="instance.name"
+            class="instance-tile"
+            :class="{ 'instance-tile--open': expandedInstance === instance.name, 'instance-tile--running': instance.running }"
+            @contextmenu="instanceMenu($event, instance)"
+          >
+            <div class="instance-tile-actions">
+              <button
+                class="button button--small instance-tile-play"
+                :class="instance.running ? 'button--outline' : 'button--accent'"
+                type="button"
+                :disabled="busy"
+                :aria-label="`${instance.running ? 'Остановить' : (instance.kind === 'server' ? 'Запустить' : 'Играть')}: ${instance.display_name || instance.name}`"
+                v-tooltip="instance.running ? 'Остановить' : (instance.kind === 'server' ? 'Запустить' : 'Играть')"
+                @click="toggleInstance(instance)"
+              ><Icon :name="instance.running ? 'stop' : 'play'" :size="15" /></button>
+              <button class="icon-button" type="button" :aria-label="`Настройки экземпляра ${instance.display_name || instance.name}`" v-tooltip="'Настройки'" @click="emit('settings', instance)"><Icon name="settings" :size="15" /></button>
+              <button
+                class="icon-button"
+                :class="{ 'icon-button--active': expandedInstance === instance.name }"
+                type="button"
+                :aria-expanded="expandedInstance === instance.name"
+                :aria-label="`Дополнительно: ${instance.display_name || instance.name}`"
+                v-tooltip="'Дополнительно'"
+                @click="toggleMore(instance)"
+              ><Icon name="more" :size="15" /></button>
+            </div>
+            <button class="instance-tile-body" type="button" @click="emit('settings', instance)">
+              <span class="instance-tile-mark">
+                <img v-if="instance.icon" :src="instance.icon" alt="" />
+                <CoreBadge v-else-if="instance.kind === 'server'" :core="instance.server_core" compact />
+                <span v-else-if="instance.game_edition === 'bedrock'" class="instance-edition-badge">B</span>
+                <LoaderBadge v-else :loader="instance.loader" size="md" />
+              </span>
+              <strong class="instance-tile-name">{{ instance.display_name || instance.name }}</strong>
+              <small class="instance-tile-meta"><i v-if="instance.running" class="instance-tile-dot" />{{ instanceMeta(instance) }}</small>
+            </button>
+            <div v-if="expandedInstance === instance.name" class="instance-tile-more">
+              <div class="instance-tile-more-row">
+                <span>Подборка</span>
+                <CustomSelect
+                  :model-value="instance.group || ''"
+                  :options="groupOptions"
+                  :disabled="busy || groupBusy"
+                  :aria-label="`Подборка экземпляра ${instance.display_name || instance.name}`"
+                  @update:model-value="changeGroup(instance, $event)"
+                />
+              </div>
+              <p class="instance-tile-more-info">Наиграно: {{ formatPlayedTime(instance.played_seconds) }}<template v-if="instance.kind === 'server'"> · порт {{ instance.server_port || 25565 }}</template></p>
+              <div class="instance-tile-more-actions">
+                <button v-if="instance.game_edition !== 'bedrock'" class="button button--small button--quiet" type="button" @click="emit('duplicate', instance)"><Icon name="copy" :size="14" />Дублировать</button>
+                <button class="button button--small button--quiet instance-tile-delete" type="button" @click="emit('delete-instance', instance)"><Icon name="trash" :size="14" />Удалить</button>
+              </div>
+            </div>
+          </article>
+        </div>
+        <div v-else-if="section.instances.length" class="instance-list">
+          <article v-for="instance in section.instances" :key="instance.name" class="instance-row" @contextmenu="instanceMenu($event, instance)">
             <div class="instance-row-primary">
               <span class="instance-row-mark">
                 <img v-if="instance.icon" :src="instance.icon" alt="" />

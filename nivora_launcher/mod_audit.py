@@ -1,27 +1,4 @@
-"""Decompilation-based security audit for Java plugins and mods (JAR files).
-
-The audit runs in strictly separated phases:
-
-1. ``prepare`` decomiles the JAR: every Java class file is parsed down to its
-   constant pool and rendered as a readable pseudo-source file (``.jasm``)
-   inside a private session directory. Nothing from the plugin ever executes.
-2. The launcher reports an estimated scan time computed from the structure of
-   the decompiled sources and a measured sample of this PC's scanning speed,
-   then waits for the user to accept the check.
-3. If the user declines, every decompiled source is securely destroyed without
-   being checked.
-4. If the user accepts, the scan reads the decompiled sources, runs the rule
-   engine over them and afterwards destroys them as well; only the report
-   remains.
-
-The rule engine checks for logging, keyloggers, opening and closing windows,
-file scanning and sensitive file access, network traffic and known exfiltration
-channels, process execution, reflection and dynamic code loading, native
-libraries, obfuscation, server takeover, token theft, screenshots, telemetry,
-persistence, self-updating code and combinations of these. Findings are graded
-(info/notice/warning/critical); well-known legitimate APIs are downgraded or
-allow-listed to avoid false positives.
-"""
+"""decompilation-based security audit for Java plugins and mods (JAR files)."""
 
 from __future__ import annotations
 
@@ -40,7 +17,6 @@ from pathlib import Path
 from typing import Any, Callable, Sequence
 
 from .errors import LauncherError
-
 
 AUDIT_MAX_JAR_BYTES = 192 * 1024 * 1024
 AUDIT_MAX_ENTRIES = 16384
@@ -80,18 +56,12 @@ VERDICT_LABELS = {
     "clean": "Угроз не обнаружено",
 }
 
-
 class AuditError(LauncherError):
     """Raised for user-facing audit failures."""
 
-
-# ---------------------------------------------------------------------------
-# Java class file parsing (constant pool only; no code execution)
-# ---------------------------------------------------------------------------
-
 _CLASS_MAGIC = b"\xca\xfe\xba\xbe"
 
-# Constant pool tags
+# constant pool tags
 _CP_UTF8 = 1
 _CP_INTEGER = 3
 _CP_FLOAT = 4
@@ -110,7 +80,6 @@ _CP_INVOKEDYNAMIC = 18
 _CP_MODULE = 19
 _CP_PACKAGE = 20
 
-
 @dataclass
 class ClassInfo:
     """Constant-pool facts about one compiled class."""
@@ -125,7 +94,6 @@ class ClassInfo:
     method_refs: list[str] = field(default_factory=list)
     field_refs: list[str] = field(default_factory=list)
     strings: list[str] = field(default_factory=list)
-
 
 class _ClassReader:
     __slots__ = ("_data", "_pos")
@@ -148,13 +116,11 @@ class _ClassReader:
     def u2(self) -> int:
         return int.from_bytes(self._take(2), "big")
 
-
 def _decode_mutf8(raw: bytes) -> str:
     try:
         return raw.decode("utf-8")
     except UnicodeDecodeError:
         return raw.decode("utf-8", errors="replace")
-
 
 def parse_class_file(data: bytes, *, entry: str = "") -> ClassInfo:
     """Parse one class file and extract constant-pool level facts."""
@@ -263,11 +229,6 @@ def parse_class_file(data: bytes, *, entry: str = "") -> ClassInfo:
     info.strings = sorted(strings)
     return info
 
-
-# ---------------------------------------------------------------------------
-# JAR inspection and decompilation
-# ---------------------------------------------------------------------------
-
 _NATIVE_EXTENSIONS = (".dll", ".so", ".dylib", ".jnilib")
 _MANIFEST_PLATFORMS = {
     "paper-plugin.yml": "paper",
@@ -280,7 +241,6 @@ _MANIFEST_PLATFORMS = {
 }
 _PLATFORM_PRIORITY = {"paper": 7, "neoforge": 6, "forge": 5, "fabric": 4, "quilt": 3, "bukkit": 2, "bungee": 1}
 _ENTRY_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._$/-]{0,255}\Z", re.ASCII)
-
 
 @dataclass
 class JarStructure:
@@ -296,7 +256,6 @@ class JarStructure:
     sources_bytes: int = 0
     source_lines: int = 0
 
-
 def _validate_entry_name(name: str) -> str:
     if not name or "\x00" in name or "\\" in name:
         raise AuditError(f"Недопустимое имя файла в архиве: {name[:120]}")
@@ -304,11 +263,9 @@ def _validate_entry_name(name: str) -> str:
         raise AuditError(f"Недопустимое имя файла в архиве: {name[:120]}")
     return name
 
-
 def _source_path_for_entry(entry: str) -> str:
     name = entry[: -len(".class")] if entry.endswith(".class") else entry
     return _validate_entry_name(f"{name}.jasm")
-
 
 def _render_class_source(info: ClassInfo) -> str:
     """Render one decompiled pseudo-source file from constant-pool facts."""
@@ -327,7 +284,6 @@ def _render_class_source(info: ClassInfo) -> str:
         lines.append(f"k {json.dumps(value, ensure_ascii=False)}")
     lines.append("")
     return "\n".join(lines)
-
 
 def _parse_simple_yaml(text: str) -> dict[str, str]:
     """Parse a flat YAML subset for top-level manifest keys."""
@@ -354,7 +310,6 @@ def _parse_simple_yaml(text: str) -> dict[str, str]:
         if not value:
             stack.append((indent, {}))
     return root
-
 
 def _manifest_metadata(name: str, data: bytes) -> dict[str, Any]:
     try:
@@ -397,7 +352,6 @@ def _manifest_metadata(name: str, data: bytes) -> dict[str, Any]:
             metadata[key] = str(values[key])[:300]
     return metadata
 
-
 def _declared_permissions_from_manifest(name: str, data: bytes) -> list[str]:
     if not name.endswith(".yml"):
         return []
@@ -409,7 +363,6 @@ def _declared_permissions_from_manifest(name: str, data: bytes) -> list[str]:
     for match in re.finditer(r"(?m)^\s+(?:-\s+)?([A-Za-z0-9.*:_.-]+)\s*:?\s*$", text):
         permissions.add(match.group(1)[:120])
     return sorted(permissions)[:64]
-
 
 def _inspect_and_write_sources(
     archive: zipfile.ZipFile,
@@ -503,7 +456,6 @@ def _inspect_and_write_sources(
             merged["declared_permissions"] = sorted(declared_permissions)[:64]
         structure.declared = merged
 
-
 def _flatten_nested(prefix: str, name: str) -> str:
     inner = prefix.rstrip("/")
     if not inner.endswith(".jar"):
@@ -511,7 +463,6 @@ def _flatten_nested(prefix: str, name: str) -> str:
     inner = inner[: -len(".jar")]
     inner = inner.replace("/", "__") + "__nested"
     return _validate_entry_name(f"{inner}/{name}")
-
 
 def _inspect_nested_jar(
     data: bytes,
@@ -539,12 +490,6 @@ def _inspect_nested_jar(
     except zipfile.BadZipFile:
         structure.skipped_entries.append(f"{label} (не читается как zip)")
 
-
-# ---------------------------------------------------------------------------
-# Rule engine
-# ---------------------------------------------------------------------------
-
-
 @dataclass(frozen=True)
 class AuditRule:
     id: str
@@ -555,7 +500,6 @@ class AuditRule:
     title: str
     detail: str
     recommendation: str
-
 
 def _rule(
     rule_id: str,
@@ -578,7 +522,6 @@ def _rule(
         detail=detail,
         recommendation=recommendation,
     )
-
 
 _SENSITIVE_ACCOUNT_FILES = (
     r"(?i)(launcher[_-]?accounts|launcher[_-]?profiles|accounts\.json|essentials?/userdata|"
@@ -611,7 +554,7 @@ _PERSISTENCE_STRINGS = (
     r"/etc/rc\.local|systemd/system|launchd|~/\.bashrc|~/\.zshrc|"
     r"Startup\\\\?Folder|autoexec\.bat)"
 )
-# Direct IP addresses are only suspicious when used as a connection target
+# direct IP addresses are only suspicious when used as a connection target
 # (with scheme or port); bare dotted numbers are usually version strings.
 _RAW_IP_STRING = (
     r"(?i)(?:https?://(?:\d{1,3}\.){3}\d{1,3}(?:[:/]\S*)?|"
@@ -627,7 +570,6 @@ _ALLOWLISTED_HOSTS = re.compile(
     r"launcher\.mojang\.com|piston-meta\.mojang\.com|piston-data\.mojang\.com|"
     r"libraries\.minecraft\.net|resources\.download\.minecraft\.net)"
 )
-
 
 def _class_rules() -> list[AuditRule]:
     return [
@@ -802,7 +744,6 @@ def _class_rules() -> list[AuditRule]:
               "Часто легитимно; в сочетании с загрузкой классов — подозрительно."),
     ]
 
-
 def _string_rules() -> list[AuditRule]:
     return [
         _rule("keylogger-jna-hook", "keylogger", "critical", "k",
@@ -942,7 +883,6 @@ def _string_rules() -> list[AuditRule]:
               "Работает с удалённым управлением сервером (RCON).",
               "Проверьте, куда подключается RCON и зачем."),
     ]
-
 
 def _method_rules() -> list[AuditRule]:
     return [
@@ -1126,7 +1066,6 @@ def _method_rules() -> list[AuditRule]:
               "Уязвимость класса «deserialization gadget»."),
     ]
 
-
 def _field_rules() -> list[AuditRule]:
     return [
         _rule("logging-system-fields", "logging", "info", "f",
@@ -1136,13 +1075,12 @@ def _field_rules() -> list[AuditRule]:
               "Обычный вывод в консоль."),
     ]
 
-
 _RULES: list[AuditRule] = _class_rules() + _string_rules() + _method_rules() + _field_rules()
 _RULES_BY_KIND: dict[str, tuple[AuditRule, ...]] = {
     kind: tuple(rule for rule in _RULES if rule.kind == kind)
     for kind in ("c", "m", "f", "k")
 }
-# Line kinds c/s/i/r all describe class references
+# line kinds c/s/i/r all describe class references
 _CLASS_LINE_KINDS = frozenset({"c", "s", "i", "r"})
 
 AUDIT_CATEGORIES: list[dict[str, str]] = [
@@ -1177,13 +1115,7 @@ AUDIT_CATEGORIES: list[dict[str, str]] = [
     )
 ]
 
-
-# ---------------------------------------------------------------------------
-# Structural (whole-jar) rules and combination rules
-# ---------------------------------------------------------------------------
-
 _OBFUSCATED_NAME_RE = re.compile(r"[a-z]{1,3}\d?", re.ASCII)
-
 
 def _structural_findings(structure: JarStructure, source_files: list[Path]) -> list[dict[str, Any]]:
     findings: list[dict[str, Any]] = []
@@ -1272,7 +1204,6 @@ def _structural_findings(structure: JarStructure, source_files: list[Path]) -> l
             [],
         )
     return findings
-
 
 _COMBO_RULES: list[tuple[str, str, str, Callable[[set[str], set[str]], bool], str, str, str]] = [
     (
@@ -1391,14 +1322,8 @@ _COMBO_RULES: list[tuple[str, str, str, Callable[[set[str], set[str]], bool], st
     ),
 ]
 
-
-# ---------------------------------------------------------------------------
-# Estimate helpers
-# ---------------------------------------------------------------------------
-
 _CPU_BENCHMARK_MIB = 4
 _cpu_benchmark_cache: tuple[float, float] = (0.0, 0.0)
-
 
 def _cpu_benchmark() -> float:
     """Measure hashing throughput in MiB/s; result cached briefly."""
@@ -1415,7 +1340,6 @@ def _cpu_benchmark() -> float:
     value = _CPU_BENCHMARK_MIB / max(elapsed, 1e-6)
     _cpu_benchmark_cache = (now, value)
     return value
-
 
 def _sample_lines(sources_dir: Path) -> list[str]:
     lines: list[str] = []
@@ -1437,7 +1361,6 @@ def _sample_lines(sources_dir: Path) -> list[str]:
         if len(lines) >= _ESTIMATE_SAMPLE_LINES:
             break
     return lines
-
 
 def _run_rules_on_line(line: str) -> None:
     """Apply the rule set to one IR line (used for scanning and estimation)."""
@@ -1466,7 +1389,6 @@ def _run_rules_on_line(line: str) -> None:
         if rule.pattern.fullmatch(rest):
             return
 
-
 def _measure_lines_per_second(sample: Sequence[str]) -> float:
     if not sample:
         return 20000.0
@@ -1476,7 +1398,6 @@ def _measure_lines_per_second(sample: Sequence[str]) -> float:
     elapsed = time.perf_counter() - started
     return len(sample) / max(elapsed, 1e-6)
 
-
 def format_estimate(seconds: int) -> str:
     if seconds < 60:
         return f"около {seconds} с"
@@ -1485,12 +1406,6 @@ def format_estimate(seconds: int) -> str:
         return f"около {minutes} мин" + (f" {sec} с" if sec else "")
     hours, minutes = divmod(minutes, 60)
     return f"около {hours} ч {minutes} мин"
-
-
-# ---------------------------------------------------------------------------
-# Scan phase
-# ---------------------------------------------------------------------------
-
 
 class _FindingAccumulator:
     def __init__(self) -> None:
@@ -1518,7 +1433,6 @@ class _FindingAccumulator:
             key=lambda item: (SEVERITY_ORDER.index(item["severity"]), item["category"], item["id"]),
         )
 
-
 _KNOWN_HOST_RULE = AuditRule(
     id="network-known-host",
     category="network",
@@ -1530,12 +1444,10 @@ _KNOWN_HOST_RULE = AuditRule(
     recommendation="Не представляет риска.",
 )
 
-
 def _iter_source_files(sources_dir: Path) -> list[Path]:
     if not sources_dir.is_dir():
         return []
     return sorted(path for path in sources_dir.rglob("*.jasm") if path.is_file())
-
 
 def scan_sources(
     sources_dir: Path,
@@ -1596,8 +1508,6 @@ def scan_sources(
     findings = accumulator.result()
     findings.extend(_structural_findings(structure, files))
 
-    # Combination rules only consider findings worth acting on (notice and
-    # above); pure informational matches must not escalate the verdict.
     notable = [finding for finding in findings if finding["severity"] != "info"]
     finding_ids = {finding["id"] for finding in notable}
     categories = {finding["category"] for finding in findings}
@@ -1641,12 +1551,6 @@ def scan_sources(
         "scanned_files": len(files),
         "duration_seconds": round(time.monotonic() - started, 3),
     }
-
-
-# ---------------------------------------------------------------------------
-# Secure destruction
-# ---------------------------------------------------------------------------
-
 
 def _secure_wipe(directory: Path) -> None:
     """Overwrite every file with random bytes before removing it."""
@@ -1695,12 +1599,6 @@ def _secure_wipe(directory: Path) -> None:
     except OSError:
         shutil.rmtree(directory, ignore_errors=True)
 
-
-# ---------------------------------------------------------------------------
-# Session store
-# ---------------------------------------------------------------------------
-
-
 class ModAuditStore:
     """Degrade-safe session store: prepare → (accept | cancel) with mandatory wipe."""
 
@@ -1709,8 +1607,6 @@ class ModAuditStore:
         if self.root.is_symlink():
             raise AuditError("Каталог аудита является символьной ссылкой")
         self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
-
-    # -- internals ---------------------------------------------------------
 
     def _session_dir(self, session_id: str) -> Path:
         if not SESSION_ID_RE.fullmatch(session_id):
@@ -1793,8 +1689,6 @@ class ModAuditStore:
             directory = self.root / oldest
             if directory.exists():
                 _secure_wipe(directory)
-
-    # -- public API --------------------------------------------------------
 
     def prepare(self, jar_path: Path | str, *, label: str = "", kind: str = "") -> dict[str, Any]:
         """Decompile a JAR into a private session and estimate the scan time."""
@@ -1952,8 +1846,6 @@ class ModAuditStore:
         if record.get("state") == "completed":
             payload["report"] = record.get("report")
         return payload
-
-    # -- serialization helpers ---------------------------------------------
 
     @staticmethod
     def _structure_payload(structure: JarStructure) -> dict[str, Any]:

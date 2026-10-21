@@ -1,7 +1,5 @@
 <script setup lang="ts">
-// Игровой оверлей Nivora (как оверлей Steam). Открывается глобальной
-// клавишей Shift+Tab, пока игра запущена. Часы и счётчики времени —
-// закреплены сверху по центру: их нельзя скрыть или перетащить.
+// игровой оверлей Nivora (как оверлей Steam). Открывается глобальной
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { emit } from '@tauri-apps/api/event'
 import { bridge } from '../services/bridge'
@@ -23,6 +21,7 @@ const chatOpen = ref(true)
 
 let pollTimer: number | undefined
 let clockTimer: number | undefined
+let titleBeforeOverlay = ''
 
 const instanceName = computed(() => snapshot.value?.instance?.display_name || snapshot.value?.instance?.name || '')
 
@@ -111,7 +110,7 @@ async function refreshState() {
   if (chatVisible.value) void pollChat()
 }
 
-// Хвост консоли сервера: те же операции, что и в панели серверов.
+// хвост консоли сервера: те же операции, что и в панели серверов.
 async function pollChat() {
   const name = serverName.value
   if (!name || !isServerInstance.value) return
@@ -172,25 +171,54 @@ function handleKeydown(event: KeyboardEvent) {
   }
 }
 
+function startTimers() {
+  stopTimers()
+  pollTimer = window.setInterval(() => { void refreshState() }, 1000)
+  clockTimer = window.setInterval(() => { clockNow.value = new Date() }, 1000)
+}
+
+function stopTimers() {
+  if (pollTimer !== undefined) {
+    window.clearInterval(pollTimer)
+    pollTimer = undefined
+  }
+  if (clockTimer !== undefined) {
+    window.clearInterval(clockTimer)
+    clockTimer = undefined
+  }
+}
+
+function handleVisibility() {
+  if (document.hidden) stopTimers()
+  else {
+    startTimers()
+    void refreshState()
+  }
+}
+
 function closeOverlay() {
-  // Состояние видимости оверлея живёт в главном окне (там же глобальные
+  // состояние видимости оверлея живёт в главном окне (там же глобальные
   // клавиши), поэтому просим его скрыть нас через событие.
   emit('nivora-overlay-close').catch(() => undefined)
 }
 
 onMounted(() => {
+  titleBeforeOverlay = document.title
   document.title = 'Nivora Overlay'
   document.body.classList.add('overlay-mode')
   window.addEventListener('keydown', handleKeydown)
+  document.addEventListener('visibilitychange', handleVisibility)
+  startTimers()
   void refreshState()
-  pollTimer = window.setInterval(() => { void refreshState() }, 1000)
-  clockTimer = window.setInterval(() => { clockNow.value = new Date() }, 1000)
 })
 
 onBeforeUnmount(() => {
+  // возврат того, что заняли: класс и заголовок. Иначе после внутриоконного
   window.removeEventListener('keydown', handleKeydown)
-  if (pollTimer !== undefined) window.clearInterval(pollTimer)
-  if (clockTimer !== undefined) window.clearInterval(clockTimer)
+  document.removeEventListener('visibilitychange', handleVisibility)
+  stopTimers()
+  document.body.classList.remove('overlay-mode', 'overlay-mode--opaque')
+  if (titleBeforeOverlay) document.title = titleBeforeOverlay
 })
 </script>
 
@@ -227,16 +255,10 @@ onBeforeUnmount(() => {
       <div v-if="overlaySettings.metrics_cpu" class="overlay-system__row">
         <span class="overlay-system__label">CPU</span>
         <span class="overlay-system__value">{{ systemMetrics.cpu.percent !== null ? `${systemMetrics.cpu.percent.toFixed(0)}%` : '—' }}</span>
-        <div v-if="systemMetrics.cpu.per_core.length" class="overlay-system__cores" aria-hidden="true">
-          <i v-for="(core, index) in systemMetrics.cpu.per_core" :key="index" :style="{ height: `${Math.max(3, Math.min(100, core))}%` }" v-tooltip="`Ядро ${index + 1}: ${core.toFixed(0)}%`" />
-        </div>
       </div>
       <div v-if="overlaySettings.metrics_ram" class="overlay-system__row">
         <span class="overlay-system__label">RAM</span>
-        <span class="overlay-system__value">
-          {{ systemMetrics.memory.percent !== null ? `${systemMetrics.memory.percent.toFixed(0)}%` : '—' }}
-          <small v-if="systemMetrics.memory.used_bytes !== null && systemMetrics.memory.total_bytes !== null">{{ formatBytes(systemMetrics.memory.used_bytes) }} / {{ formatBytes(systemMetrics.memory.total_bytes) }}</small>
-        </span>
+        <span class="overlay-system__value">{{ systemMetrics.memory.percent !== null ? `${systemMetrics.memory.percent.toFixed(0)}%` : '—' }}</span>
         <div v-if="systemMetrics.memory.percent !== null" class="overlay-system__bar" aria-hidden="true"><i :style="{ width: `${Math.min(100, systemMetrics.memory.percent)}%` }" /></div>
       </div>
       <div v-for="gpu in overlaySettings.metrics_gpu ? systemMetrics.gpus : []" :key="gpu.index" class="overlay-system__row">
@@ -393,6 +415,8 @@ onBeforeUnmount(() => {
   width: min(300px, 30vw);
   max-height: min(64vh, 560px);
   overflow: auto;
+  overscroll-behavior: contain;
+  touch-action: pan-y;
   padding: 10px 12px;
   border: 1px solid var(--line);
   border-radius: var(--radius-card, 10px);
@@ -471,6 +495,8 @@ onBeforeUnmount(() => {
 .overlay-chat__log {
   flex: 1 1 auto;
   overflow: auto;
+  overscroll-behavior: contain;
+  touch-action: pan-y;
   margin: 0;
   padding: 8px 12px;
   list-style: none;
@@ -519,7 +545,6 @@ onBeforeUnmount(() => {
   font-size: 12px;
   cursor: pointer;
 }
-
 
 /* --- Закреплённые часы --- */
 .overlay-idle {

@@ -1,10 +1,10 @@
 pkgname=nivora-launcher
-pkgver=1.0.0
-pkgrel=93
+pkgver=1.1.0
+pkgrel=1
 pkgdesc='Universal Minecraft launcher'
 arch=('x86_64')
 license=('GPL-3.0-only')
-depends=('python' 'python-defusedxml' 'python-psutil' 'libsecret' 'gnome-keyring' 'gtk3' 'libappindicator' 'qt6-base' 'qt6-svg' 'webkit2gtk-4.1' 'bubblewrap' 'java-runtime')
+depends=('python' 'python-defusedxml' 'python-psutil' 'libsecret' 'gnome-keyring' 'gtk3' 'libayatana-appindicator' 'qt6-base' 'qt6-svg' 'webkit2gtk-4.1' 'bubblewrap' 'java-runtime')
 makedepends=('base-devel' 'nodejs' 'npm' 'rust')
 # Native C/assembly objects from Rust dependencies must remain ordinary ELF.
 options=('!lto')
@@ -58,4 +58,15 @@ package() {
   install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
   install -Dm755 nivora-launcher "${pkgdir}/usr/bin/nivora-launcher"
   install -Dm644 packaging/arch/nivora-launcher.desktop "${pkgdir}/usr/share/applications/nivora-launcher.desktop"
+  # Иконки hicolor: без них .desktop без Icon= показывал заглушку в меню.
+  for size in 32x32 128x128 256x256; do
+    if [[ -f "frontend/src-tauri/icons/${size}.png" ]]; then
+      install -Dm644 "frontend/src-tauri/icons/${size}.png" \
+        "${pkgdir}/usr/share/icons/hicolor/${size}/apps/nivora-launcher.png"
+    fi
+  done
+  if [[ -f frontend/src-tauri/icons/icon.png ]]; then
+    install -Dm644 frontend/src-tauri/icons/icon.png \
+      "${pkgdir}/usr/share/icons/hicolor/512x512/apps/nivora-launcher.png"
+  fi
 }

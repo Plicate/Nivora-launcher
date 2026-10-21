@@ -1,16 +1,18 @@
-// Конвейер отрисовки обоев: исходная картинка → canvas-размытие → blob-URL.
-// Живёт отдельно от App.vue, потому что здесь есть свои тонкости:
-//  * запросы нумеруются, и устаревший результат (пользователь дёрнул слайдер
-//    размытия) отбрасывается, а не перезаписывает свежий;
-//  * blob-URL предыдущего кадра освобождается только после того, как новый
-//    уже записан, иначе на миг пропадает фон.
-// toBlob вместо toDataURL: кодирование WebP уходит из главного потока.
-
+// конвейер отрисовки обоев: исходная картинка → canvas-размытие → blob-URL.
 export interface WallpaperRenderer {
   /** null — запрос устарел, значение не трогаем; '' — обоев нет. */
   render(source: string, blur: number): Promise<string | null>
   release(): void
 }
+
+/** Результат подготовки к сохранению: готовые байты WebP в base64. */
+export interface PreparedWallpaper {
+  fileName: string
+  data: string
+  previewUrl: string
+}
+
+const STORED_MAX_SIDE = 1600
 
 export function createWallpaperRenderer(): WallpaperRenderer {
   let request = 0
@@ -42,8 +44,6 @@ export function createWallpaperRenderer(): WallpaperRenderer {
       await image.decode()
       if (current !== request) return null
 
-      // Рисуем в уменьшенном масштабе: blur на маленьком холсте дешевле,
-      // а растянутый результат всё равно стоит за полупрозрачным интерфейсом.
       const viewportWidth = Math.max(1, window.innerWidth)
       const viewportHeight = Math.max(1, window.innerHeight)
       const scale = Math.min(0.5, 960 / Math.max(viewportWidth, viewportHeight))
@@ -67,7 +67,7 @@ export function createWallpaperRenderer(): WallpaperRenderer {
       const drawHeight = image.naturalHeight * cover
       renderContext.filter = `blur(${scaledRadius}px)`
       renderContext.drawImage(image, (renderCanvas.width - drawWidth) / 2, (renderCanvas.height - drawHeight) / 2, drawWidth, drawHeight)
-      // Кадр без полей: blur по краям холста затемняет картинку, поэтому
+      // кадр без полей: blur по краям холста затемняет картинку, поэтому
       // берём центральную часть с запасом на радиус.
       outputContext.drawImage(renderCanvas, padding, padding, width, height, 0, 0, width, height)
 
@@ -87,4 +87,56 @@ export function createWallpaperRenderer(): WallpaperRenderer {
   }
 
   return { render, release }
+}
+
+/**
+ * Готовит выбранное изображение к жизни в качестве обоев: уменьшает
+ * до STORED_MAX_SIDE и перекодирует в WebP. Сохраняется уже результат —
+ * тяжёлый исходник на диске не оседает, и каждый запуск декодирует
+ * маленький файл, а не 4K-оригинал.
+ *
+ * null — подготовка не удалась (нет canvas, битая картинка);
+ * вызывающий код в этом случае сохраняет файл как есть.
+ */
+export async function prepareWallpaperForStorage(source: string): Promise<PreparedWallpaper | null> {
+  const image = new Image()
+  image.decoding = 'async'
+  image.src = source
+  try {
+    await image.decode()
+  } catch {
+    return null
+  }
+
+  const longest = Math.max(image.naturalWidth, image.naturalHeight)
+  if (!longest) return null
+  const scale = Math.min(1, STORED_MAX_SIDE / longest)
+  const width = Math.max(1, Math.round(image.naturalWidth * scale))
+  const height = Math.max(1, Math.round(image.naturalHeight * scale))
+
+  const canvas = document.createElement('canvas')
+  canvas.width = width
+  canvas.height = height
+  const context = canvas.getContext('2d')
+  if (!context) return null
+  context.imageSmoothingQuality = 'high'
+  context.drawImage(image, 0, 0, width, height)
+
+  const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/webp', 0.86))
+  if (!blob) return null
+
+  const dataUrl = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result || ''))
+    reader.onerror = () => reject(new Error('read failed'))
+    reader.readAsDataURL(blob)
+  })
+  const base64 = dataUrl.replace(/^data:[^;]*;base64,/, '')
+  if (!base64) return null
+
+  return {
+    fileName: 'wallpaper.webp',
+    data: base64,
+    previewUrl: URL.createObjectURL(blob),
+  }
 }

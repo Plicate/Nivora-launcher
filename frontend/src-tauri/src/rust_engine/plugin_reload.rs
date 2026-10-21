@@ -1,4 +1,4 @@
-// Запросы на перезагрузку в режиме разработчика. Никогда не обходят ни
+// запросы на перезагрузку в режиме разработчика. Никогда не обходят ни
 // целостность пакета, ни доверие к исполнению.
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
@@ -33,7 +33,7 @@ fn load_requests(config: &ConfigStore) -> Result<Map<String, Value>, String> {
         return Err("Unsafe developer reload file".to_owned());
     }
     let raw = std::fs::read(&path).map_err(|_| "Unsafe developer reload file".to_owned())?;
-    // Отличие от Python: битый JSON здесь даёт понятную ошибку реестра,
+    // отличие от Python: битый JSON здесь даёт понятную ошибку реестра,
     // а не сырой ValueError из json.loads.
     let value: Value = serde_json::from_slice(&raw).map_err(|_| "Invalid reload registry".to_owned())?;
     let Some(fields) = value.as_object() else {
@@ -50,7 +50,7 @@ fn load_requests(config: &ConfigStore) -> Result<Map<String, Value>, String> {
         let Some(timestamp) = number.as_i64() else {
             return Err("Invalid reload identity or timestamp".to_owned());
         };
-        if !identity_valid(key) || !(0..<(1i64 << 63)).contains(&timestamp) || timestamp <= 0 {
+        if !identity_valid(key) || timestamp <= 0 {
             return Err("Invalid reload identity or timestamp".to_owned());
         }
     }
@@ -70,7 +70,7 @@ pub(crate) fn request_reload(plugin_id: &str, config: Option<&ConfigStore>) -> R
         return Err("Plugin reload requires developer mode".to_owned());
     }
     let store = PluginStore::new(config)?;
-    // Явный запрос перезагрузки — не молчаливое разрешение исполнять
+    // явный запрос перезагрузки — не молчаливое разрешение исполнять
     // отредактированный или неподписанный код.
     store.runtime_source(plugin_id)?;
     let mut requests = load_requests(config)?;
@@ -86,7 +86,7 @@ pub(crate) fn request_reload(plugin_id: &str, config: Option<&ConfigStore>) -> R
     Ok(json!(timestamp))
 }
 
-/// Точка входа должна быть безопасным относительным путём внутри пакета.
+/// точка входа должна быть безопасным относительным путём внутри пакета.
 fn entrypoint_parts(entrypoint: &str) -> Result<Vec<String>, String> {
     if entrypoint.is_empty()
         || entrypoint.len() > 256
@@ -110,7 +110,7 @@ fn mtime_ns(metadata: &std::fs::Metadata) -> i64 {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        metadata.st_mtime() as i64 * 1_000_000_000 + metadata.st_mtime_nsec() as i64
+        metadata.mtime() as i64 * 1_000_000_000 + metadata.mtime_nsec() as i64
     }
     #[cfg(not(unix))]
     {
@@ -129,7 +129,7 @@ pub(crate) fn changes(config: &ConfigStore) -> Result<Value, String> {
     }
     let store = PluginStore::new(config)?;
     let mut entries: Vec<(String, String, i64, i64)> = Vec::new();
-    // Скрипты входа — однофайловые пакеты; рекурсивного обхода каталогов нет.
+    // скрипты входа — однофайловые пакеты; рекурсивного обхода каталогов нет.
     let mut seen = 0usize;
     let directory = std::fs::read_dir(&store.root).map_err(|error| error.to_string())?;
     for entry in directory {
@@ -212,6 +212,11 @@ fn python_dumps_sorted(value: &Value) -> String {
         }
         other => serde_json::to_string(other).unwrap_or_default(),
     }
+}
+
+pub fn plugin_dev_changes(_request: &Value) -> Result<Value, String> {
+    let config = super::config::ConfigStore::load()?;
+    changes(&config)
 }
 
 #[cfg(test)]

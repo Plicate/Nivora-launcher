@@ -1,6 +1,6 @@
 # Plugin core extensions — implementation status
 
-This source update implements the declarative UI/runtime core. It is **not** a complete implementation of the ten proposed extension areas.
+The declarative UI/runtime core is in place. The ten proposed extension areas are not all covered — see the bottom of this page for the gaps.
 
 ## Implemented
 
@@ -52,7 +52,7 @@ export default async (api) => {
 };
 ```
 
-## Not implemented by this update
+## Not implemented
 
 - Proxy session/tunnel transport, per-instance routing grants and plugin-facing tunnel traffic metrics. Existing proxy policy CRUD is not a VPN.
 - The additional process/network/account/mod/snapshot/path events and `api.files.watch`. The developer entrypoint watcher above is **not** the requested plugin filesystem API.
@@ -71,7 +71,7 @@ Guest facade behavior is tested using the actual facade builder in a JavaScript 
 
 # Расширения ядра плагинов — статус реализации
 
-Это обновление исходников реализует декларативное ядро UI/рантайма. Это **не** полная реализация десяти предложенных направлений расширения.
+Декларативное ядро UI/рантайма работает. Десять предложенных направлений расширения закрыты не полностью — список пробелов в конце страницы.
 
 ## Реализовано
 
@@ -123,7 +123,7 @@ export default async (api) => {
 };
 ```
 
-## Не реализовано этим обновлением
+## Не реализовано
 
 - Транспорт прокси-сессий/туннелей, per-instance routing grants и метрики туннельного трафика для плагинов. Существующий CRUD proxy-политик — не VPN.
 - Дополнительные события process/network/account/mod/snapshot/path и `api.files.watch`. Описанный выше девелоперский вотчер entrypoint — **не** запрошенный плагинный API файловой системы.
@@ -134,4 +134,4 @@ export default async (api) => {
 
 ## Проверка
 
-Поведение гостевого фасада тестируется реальным билдером фасада в JavaScript-VM. Транспорт доверенного рантайма — синтетическим worker. Тесты квот/аудита/перезагрузки/валидации пакетов бэкенда выполняются офлайн. Это не полная валидация QuickJS/WASM, браузерного рендеринга Vue или целевой desktop-сборки. В доступной среде нет `vue-tsc` и инструментов сборки Rust. Живые тесты роутера/провайдеров/аккаунтов не проводились.
+Поведение гостевого фасада тестируется реальным билдером фасада в JavaScript-VM, транспорт доверенного рантайма — синтетическим worker, квоты/аудит/перезагрузка/валидация пакетов — офлайн-тестами бэкенда. Полной валидации QuickJS/WASM, рендеринга Vue в браузере и целевой desktop-сборки эти тесты не заменяют: живые прогоны роутера/провайдеров/аккаунтов нужно делать вручную на реальной сборке.

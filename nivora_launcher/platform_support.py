@@ -5,9 +5,9 @@ import shutil
 import signal
 import stat
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
-
 
 def set_private_fd(fd: int, mode: int = 0o600) -> None:
     """Apply POSIX mode bits where supported; Windows uses the profile ACL."""
@@ -15,6 +15,18 @@ def set_private_fd(fd: int, mode: int = 0o600) -> None:
     if fchmod is not None:
         fchmod(fd, mode)
 
+def set_private_path(path: Path) -> None:
+    """windows: ACL файла только для текущего пользователя (аналог 0600)."""
+    if sys.platform != "win32":
+        return
+    from .windows_sandbox import WindowsSandboxError, restrict_to_current_user
+
+    try:
+        restrict_to_current_user(path)
+    except (WindowsSandboxError, OSError, subprocess.SubprocessError, AttributeError, ValueError):
+        # attributeError: в урезанных окружениях (Wine, старые сборки Windows)
+        # нет части Win32 API — запуск игры из-за ACL срываться не должен.
+        pass
 
 def is_reparse_point(path: Path) -> bool:
     try:
@@ -23,7 +35,6 @@ def is_reparse_point(path: Path) -> bool:
         return False
     reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
     return path.is_symlink() or bool(getattr(value, "st_file_attributes", 0) & reparse_flag)
-
 
 def process_exists(pid: int) -> bool:
     if pid <= 0:
@@ -60,13 +71,11 @@ def process_exists(pid: int) -> bool:
     except (OSError, ProcessLookupError):
         return False
 
-
 def process_start_options() -> dict[str, Any]:
     if os.name == "nt":
         flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0)
         return {"creationflags": flags}
     return {"start_new_session": True}
-
 
 def terminate_process_tree(process: Any, *, force: bool = False) -> None:
     if process.poll() is not None:
@@ -100,7 +109,6 @@ def terminate_process_tree(process: Any, *, force: bool = False) -> None:
         except OSError:
             pass
 
-
 def open_path(path: Path) -> None:
     if os.name == "nt":
         os.startfile(str(path))  # type: ignore[attr-defined]
@@ -113,8 +121,13 @@ def open_path(path: Path) -> None:
         raise RuntimeError("Не найден xdg-open. Установите пакет xdg-utils.")
     subprocess.Popen([opener, str(path)])
 
-
 def sys_platform() -> str:
     import sys
 
     return sys.platform
+
+def mojang_os_name() -> str:
+    """имя ОС в терминах правил Mojang: natives и arguments в JSON версий"""
+    if os.name == "nt":
+        return "windows"
+    return "osx" if sys_platform() == "darwin" else "linux"

@@ -1,12 +1,4 @@
-"""Launcher-side optimization engine.
-
-Provides:
-- JVM argument presets (FPS / Balanced / HeavyModpack / Compatibility / Streaming)
-- Smart memory recommendation (system RAM × mod count × loader type)
-- GPU vendor detection and environment hints
-- Optimizer mod recommendations (Sodium, Lithium, FerriteCore, etc.)
-- Launch metrics helpers
-"""
+"""launcher-side optimization engine."""
 from __future__ import annotations
 
 import json
@@ -20,12 +12,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-
-# ---------------------------------------------------------------------------
-# JVM Presets
-# ---------------------------------------------------------------------------
-
-# Aikar's G1GC flags – best for heavy modpacks.
 _AIKARS_FLAGS: list[str] = [
     "-XX:+UseG1GC",
     "-XX:+UnlockExperimentalVMOptions",
@@ -45,7 +31,7 @@ _AIKARS_FLAGS: list[str] = [
     "-Daikars.new.flags=true",
 ]
 
-# Low-pause G1GC flags – best for FPS-focused sessions.
+# low-pause G1GC flags – best for FPS-focused sessions.
 _FPS_FLAGS: list[str] = [
     "-XX:+UseG1GC",
     "-XX:+UnlockExperimentalVMOptions",
@@ -59,7 +45,7 @@ _FPS_FLAGS: list[str] = [
     "-Dfml.earlyprogresswindow=false",
 ]
 
-# Balanced G1GC flags – good default for most users.
+# balanced G1GC flags – good default for most users.
 _BALANCED_FLAGS: list[str] = [
     "-XX:+UseG1GC",
     "-XX:+UnlockExperimentalVMOptions",
@@ -72,13 +58,13 @@ _BALANCED_FLAGS: list[str] = [
     "-XX:+DisableExplicitGC",
 ]
 
-# Compatibility flags – no GC tuning, for old Java / edge cases.
+# compatibility flags – no GC tuning, for old Java / edge cases.
 _COMPAT_FLAGS: list[str] = [
     "-XX:+UseSerialGC",
     "-Dfml.earlyprogresswindow=false",
 ]
 
-# Streaming preset – prioritise steady frame delivery over peak FPS.
+# streaming preset – prioritise steady frame delivery over peak FPS.
 _STREAMING_FLAGS: list[str] = [
     "-XX:+UseG1GC",
     "-XX:+UnlockExperimentalVMOptions",
@@ -137,11 +123,6 @@ JVM_PRESETS: dict[str, dict[str, Any]] = {
     },
 }
 
-
-# ---------------------------------------------------------------------------
-# Smart memory recommender
-# ---------------------------------------------------------------------------
-
 def system_ram_kib() -> int:
     """Total physical RAM in KiB (best-effort, 0 if unavailable)."""
     if os.name == "nt":
@@ -165,7 +146,6 @@ def system_ram_kib() -> int:
         pass
     return 0
 
-
 def count_mods_in_instance(instance_dir: Path) -> int:
     """Count mod .jar files in instance/mods (non-recursive, max 4096)."""
     mods_dir = instance_dir / "mods"
@@ -182,7 +162,6 @@ def count_mods_in_instance(instance_dir: Path) -> int:
         pass
     return count
 
-
 def classify_instance_weight(mod_count: int, loader: str) -> str:
     """Return one of: vanilla | light | medium | heavy | legacy."""
     if loader in {"", "vanilla"}:
@@ -195,9 +174,6 @@ def classify_instance_weight(mod_count: int, loader: str) -> str:
         return "medium"
     return "heavy"
 
-
-# Memory tables: (weight, system_ram_gib) → recommended_mib
-# These are curated safe values, not formulae.
 _MEMORY_TABLE: list[tuple[str, int, int]] = [
     # weight, min_sys_ram_gib, rec_mib
     ("vanilla", 0, 1536),
@@ -216,7 +192,6 @@ _MEMORY_TABLE: list[tuple[str, int, int]] = [
     ("legacy", 4, 1536),
 ]
 
-
 def recommend_memory_mib(
     *,
     weight: str = "vanilla",
@@ -229,20 +204,15 @@ def recommend_memory_mib(
     for w, min_gib, mib in _MEMORY_TABLE:
         if w == weight and sys_gib >= min_gib:
             best = mib
-    # Per-mod tweak: add 12 MiB per mod beyond 80 mods (heavy packs)
+    # per-mod tweak: add 12 MiB per mod beyond 80 mods (heavy packs)
     if mod_count > 80:
         extra = ((mod_count - 80) // 20) * 256
         best = min(best + extra, 16384)
-    # Never exceed 60 % of system RAM
+    # never exceed 60 % of system RAM
     if system_ram_kib > 0:
         ceiling = (system_ram_kib * 6) // (10 * 1024)  # KiB → MiB at 60 %
         best = min(best, max(1024, ceiling))
     return best
-
-
-# ---------------------------------------------------------------------------
-# GPU detection
-# ---------------------------------------------------------------------------
 
 @dataclass
 class GpuInfo:
@@ -251,11 +221,8 @@ class GpuInfo:
     renderer: str = ""
     vram_mib: int = 0
     supports_vulkan: bool = False
-    # True when system has multiple GPU vendors (hybrid/Optimus).
-    # On Linux this is detected via /sys/class/drm; on Windows via
-    # CIM/WMIC counting of non-Intel adapters alongside Intel iGPU.
+    # true when system has multiple GPU vendors (hybrid/Optimus).
     is_hybrid: bool = False
-
 
 def detect_gpu() -> GpuInfo:
     """Best-effort GPU detection without X11/GL context."""
@@ -263,7 +230,6 @@ def detect_gpu() -> GpuInfo:
     if os.name == "nt":
         return _detect_gpu_windows(info)
     return _detect_gpu_linux(info)
-
 
 def _detect_gpu_linux(info: GpuInfo) -> GpuInfo:
     """Detect GPU on Linux via /sys/class/drm + nvidia-smi."""
@@ -282,13 +248,13 @@ def _detect_gpu_linux(info: GpuInfo) -> GpuInfo:
     except OSError:
         pass
 
-    # Prefer discrete GPU: nvidia > amd > intel
+    # prefer discrete GPU: nvidia > amd > intel
     for v in ("nvidia", "amd", "intel"):
         if v in vendors:
             info.vendor = v
             break
 
-    # Hybrid: both a discrete GPU vendor and Intel iGPU present
+    # hybrid: both a discrete GPU vendor and Intel iGPU present
     info.is_hybrid = ("intel" in vendors and len(vendors) >= 2) or len(vendors) >= 2
 
     # nvidia-smi → VRAM + driver version (works on all platforms with NVIDIA drivers)
@@ -320,10 +286,9 @@ def _detect_gpu_linux(info: GpuInfo) -> GpuInfo:
         except Exception:
             pass
 
-    # Vulkan: vulkaninfo binary (package vulkan-tools on most distros)
+    # vulkan: vulkaninfo binary (package vulkan-tools on most distros)
     info.supports_vulkan = bool(shutil.which("vulkaninfo"))
     return info
-
 
 def _detect_gpu_windows(info: GpuInfo) -> GpuInfo:
     """Detect GPU on Windows via PowerShell CIM (primary) or wmic (fallback)."""
@@ -333,7 +298,7 @@ def _detect_gpu_windows(info: GpuInfo) -> GpuInfo:
     if not adapters:
         return info
 
-    # Classify each adapter
+    # classify each adapter
     _WIN_VENDORS = [("nvidia",), ("amd", "radeon"), ("intel",)]
     classified: list[tuple[str, dict]] = []
     for adapter in adapters:
@@ -345,7 +310,7 @@ def _detect_gpu_windows(info: GpuInfo) -> GpuInfo:
                 break
         classified.append((vendor, adapter))
 
-    # Pick primary (discrete first)
+    # pick primary (discrete first)
     for preferred in ("nvidia", "amd", "intel"):
         for vendor, adapter in classified:
             if vendor == preferred:
@@ -357,15 +322,14 @@ def _detect_gpu_windows(info: GpuInfo) -> GpuInfo:
         if info.vendor != "unknown":
             break
 
-    # Hybrid: discrete GPU (non-Intel) present alongside Intel iGPU
+    # hybrid: discrete GPU (non-Intel) present alongside Intel iGPU
     has_intel = any(v == "intel" for v, _ in classified)
     has_discrete = any(v in {"nvidia", "amd"} for v, _ in classified)
     info.is_hybrid = has_intel and has_discrete
 
-    # Vulkan: vulkan-1.dll in System32
+    # vulkan: vulkan-1.dll in System32
     info.supports_vulkan = _win_has_vulkan()
     return info
-
 
 def _win_gpu_adapters_powershell() -> list[dict]:
     """Query video controllers via PowerShell Get-CimInstance (Windows 7+)."""
@@ -397,7 +361,6 @@ def _win_gpu_adapters_powershell() -> list[dict]:
     except Exception:
         return []
 
-
 def _win_gpu_adapters_wmic() -> list[dict]:
     """Fallback: query video controllers via wmic (deprecated in Win11, but still works)."""
     try:
@@ -427,7 +390,6 @@ def _win_gpu_adapters_wmic() -> list[dict]:
     except Exception:
         return []
 
-
 def _win_has_vulkan() -> bool:
     """Check for Vulkan runtime on Windows (vulkan-1.dll in System32)."""
     try:
@@ -439,35 +401,22 @@ def _win_has_vulkan() -> bool:
         pass
     return bool(shutil.which("vulkaninfo") or shutil.which("vulkaninfo.exe"))
 
-
 def gpu_env_hints(gpu: GpuInfo, current_mode: str = "auto") -> dict[str, str]:
-    """Return platform-specific environment-variable hints based on GPU vendor.
-
-    On Windows the GPU/Optimus selection is handled automatically by the NVIDIA
-    or AMD drivers — no env vars are needed or useful.
-    On Linux the caller (launcher.py) already handles PRIME/GLX env vars via
-    _native_wayland_environment and graphics_mode logic, so this function is
-    intentionally additive only when those flags are not already set.
-    """
+    """return platform-specific environment-variable hints based on GPU vendor."""
     if os.name == "nt":
-        # Windows: driver handles discrete GPU selection transparently.
+        # windows: driver handles discrete GPU selection transparently.
         return {}
-    # Linux / other POSIX: X11/Vulkan hints for hybrid GPU setups.
+    # linux / other POSIX: X11/Vulkan hints for hybrid GPU setups.
     hints: dict[str, str] = {}
     if gpu.vendor == "nvidia" and current_mode in {"", "auto", "nvidia"} and gpu.is_hybrid:
         hints["__NV_PRIME_RENDER_OFFLOAD"] = "1"
         hints["__GLX_VENDOR_LIBRARY_NAME"] = "nvidia"
         hints["__VK_LAYER_NV_optimus"] = "NVIDIA_only"
     elif gpu.vendor == "amd" and gpu.is_hybrid:
-        # On hybrid AMD systems, prefer Mesa RADV over amdvlk if present.
+        # on hybrid AMD systems, prefer Mesa RADV over amdvlk if present.
         if shutil.which("vulkaninfo"):
             hints["AMD_VULKAN_ICD"] = "RADV"
     return hints
-
-
-# ---------------------------------------------------------------------------
-# Optimizer mod recommendations
-# ---------------------------------------------------------------------------
 
 @dataclass
 class OptimizerMod:
@@ -479,7 +428,6 @@ class OptimizerMod:
     min_mc_version: str  # e.g. "1.16"
     category: str  # fps | memory | loading | network
     required_side: str = "client"  # client | server | both
-
 
 _OPTIMIZER_MODS: list[OptimizerMod] = [
     OptimizerMod(
@@ -599,12 +547,10 @@ _OPTIMIZER_MODS: list[OptimizerMod] = [
     ),
 ]
 
-
 def _mc_minor_version(version_id: str) -> int:
     """Extract minor version number from a Minecraft version string."""
     m = re.search(r"1\.(\d+)", version_id)
     return int(m.group(1)) if m else 0
-
 
 def recommend_optimizer_mods(
     *,
@@ -633,23 +579,16 @@ def recommend_optimizer_mods(
             "required_side": mod.required_side,
             "already_installed": already,
         })
-    # Sort: not-installed first, then by category priority
+    # sort: not-installed first, then by category priority
     cat_priority = {"fps": 0, "memory": 1, "loading": 2, "network": 3}
     results.sort(key=lambda m: (m["already_installed"], cat_priority.get(m["category"], 9)))
     return results
 
-
-# ---------------------------------------------------------------------------
-# Launch metrics helpers
-# ---------------------------------------------------------------------------
-
 LAUNCH_METRICS_FILE = ".trial-launcher-launch-history.json"
 _MAX_HISTORY_ENTRIES = 20
 
-
 def _launch_history_path(instance_dir: Path) -> Path:
     return instance_dir / LAUNCH_METRICS_FILE
-
 
 def record_launch_start(instance_dir: Path, launch_id: str, *, loader: str, preset: str, memory: str, mc_version: str) -> None:
     """Write a launch-start entry to the instance's launch history."""
@@ -667,7 +606,6 @@ def record_launch_start(instance_dir: Path, launch_id: str, *, loader: str, pres
         "time_to_window_seconds": None,
     })
     _save_launch_history(path, history)
-
 
 def record_launch_end(
     instance_dir: Path,
@@ -689,10 +627,8 @@ def record_launch_end(
             break
     _save_launch_history(path, history)
 
-
 def read_launch_history(instance_dir: Path) -> list[dict[str, Any]]:
     return _load_launch_history(_launch_history_path(instance_dir))
-
 
 def _load_launch_history(path: Path) -> list[dict[str, Any]]:
     try:
@@ -704,7 +640,6 @@ def _load_launch_history(path: Path) -> list[dict[str, Any]]:
         pass
     return []
 
-
 def _save_launch_history(path: Path, history: list[dict[str, Any]]) -> None:
     try:
         trimmed = history[-_MAX_HISTORY_ENTRIES:]
@@ -714,25 +649,20 @@ def _save_launch_history(path: Path, history: list[dict[str, Any]]) -> None:
     except OSError:
         pass
 
-
-# ---------------------------------------------------------------------------
-# Optimization report
-# ---------------------------------------------------------------------------
-
 @dataclass
 class OptimizationReport:
     """Full optimization analysis for an instance."""
-    # System
+    # system
     system_ram_kib: int = 0
     cpu_count: int = 1
     os_name: str = ""
     gpu: GpuInfo = field(default_factory=GpuInfo)
-    # Instance
+    # instance
     loader: str = ""
     mc_version: str = ""
     mod_count: int = 0
     weight: str = "vanilla"
-    # Recommendations
+    # recommendations
     recommended_memory_mib: int = 2048
     recommended_preset_id: str = "balanced"
     recommended_mods: list[dict[str, Any]] = field(default_factory=list)
@@ -773,7 +703,6 @@ class OptimizationReport:
             },
         }
 
-
 def analyze_instance(
     *,
     instance_dir: Path | None = None,
@@ -794,7 +723,7 @@ def analyze_instance(
 
     rec_mib = recommend_memory_mib(weight=weight, system_ram_kib=ram, mod_count=mod_count)
 
-    # Recommended preset
+    # recommended preset
     if weight == "legacy":
         preset_id = "compatibility"
     elif weight in {"heavy"}:
@@ -804,7 +733,7 @@ def analyze_instance(
     else:
         preset_id = "fps"
 
-    # Recommended mods
+    # recommended mods
     mods = recommend_optimizer_mods(
         loader=loader,
         mc_version=mc_version or "1.21",
@@ -814,24 +743,24 @@ def analyze_instance(
 
     gpu = detect_gpu()
 
-    # Parse current memory
+    # parse current memory
     try:
         cur_mib = parse_memory_kib(current_memory) // 1024
     except Exception:
         cur_mib = recommended_memory_kib() // 1024
 
     warnings: list[str] = []
-    # Warn if current memory is very low
+    # warn if current memory is very low
     if cur_mib < 1024:
         warnings.append("Выделено менее 1 ГиБ — игра может крашиться.")
     elif cur_mib < rec_mib - 512:
         warnings.append(
             f"Выделено {cur_mib} МиБ, рекомендуется {rec_mib} МиБ для данной сборки."
         )
-    # Warn if memory is way too high
+    # warn if memory is way too high
     if ram > 0 and cur_mib > (ram // 1024) * 75 // 100:
         warnings.append("Выделено >75 % RAM — может замедлить систему.")
-    # Warn on hybrid GPU setups
+    # warn on hybrid GPU setups
     if gpu.is_hybrid and gpu.vendor == "nvidia":
         if os.name == "nt":
             warnings.append(
@@ -861,11 +790,6 @@ def analyze_instance(
         current_preset_id=current_preset,
     )
 
-
-# ---------------------------------------------------------------------------
-# Cache management helpers
-# ---------------------------------------------------------------------------
-
 def prune_stale_metadata_cache(cache_dir: Path, *, max_age_hours: int = 48) -> int:
     """Delete metadata cache files older than max_age_hours. Returns count deleted."""
     cutoff = time.time() - max_age_hours * 3600
@@ -882,7 +806,6 @@ def prune_stale_metadata_cache(cache_dir: Path, *, max_age_hours: int = 48) -> i
     except OSError:
         pass
     return deleted
-
 
 def cache_stats(cache_dir: Path) -> dict[str, Any]:
     """Return basic stats for the download cache directory."""

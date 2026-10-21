@@ -1,7 +1,4 @@
-// Движок операций GUI. Запрос — плоский JSON {operation, ...поля},
-// ответ — конверт {"ok": true, "operation", "data"} либо {"ok": false,
-// "error"}. Список обслуживаемых операций — NATIVE_OPS; всё остальное
-// маршрутизируется наружу (worker-бэкенд).
+// движок операций GUI. Запрос — плоский JSON {operation, ...поля},
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::fs::File;
@@ -10,39 +7,98 @@ use std::path::{Path, PathBuf};
 
 mod accounts;
 mod backups;
+mod bootstrap;
+mod cloud;
+mod fs_browser;
+mod github_plugins;
 pub mod bedrock;
 mod config;
 mod constants;
 mod crash_reports;
+pub mod events;
 mod installer;
+mod instance_files;
 mod instances;
+pub mod global_search;
+mod instance_workspace;
+pub mod world_import;
+pub mod instance_guard;
 mod loaders;
 mod metadata;
 mod metrics;
 mod mod_dependencies;
+mod modcat;
 mod modpack_export;
 mod mods;
+mod mod_list;
 mod net;
 mod operations;
 mod ops;
+mod optimization;
 mod plugin_catalogs;
+mod plugin_guard;
+mod plugin_reload;
 mod plugin_security;
 mod plugins;
+mod portable_fs;
 mod profiles;
+pub mod registry;
+mod release_check;
 mod runtime;
 mod server;
+mod server_network;
+mod server_traffic;
 mod snapshots;
+mod process_guard;
+mod recorder;
+mod skins;
+pub mod shortcuts;
 mod platform;
 mod platform_support;
-mod process_guard;
+mod turbo;
+pub mod shader_analysis;
 pub mod state;
 mod system;
 mod themes;
+mod upnp;
 
 pub const NATIVE_OPS: &[&str] = &[
+    // стартовое состояние собирается без Python: холодный запуск больше не
+    // поднимает воркер и не ждёт интерпретатор.
+    "bootstrap",
     "hash_file",
     "hash_directory",
-    // Minecraft Bedrock целиком в Rust: Linux — BedrockOnLinux, Windows —
+    // встроенный проводник: свои окна вместо системных диалогов.
+    "fs_browse",
+    "fs_read_file",
+    // файлы и логи Java-экземпляров — нативно; Bedrock остаётся воркеру
+    // (needs_worker): корень контента резолвит профиль BoL.
+    "instance_file_list",
+    "instance_file_read",
+    "instance_file_write",
+    "instance_file_mkdir",
+    "instance_file_upload",
+    "instance_file_delete",
+    "instance_log_archives",
+    "instance_log_archive_read",
+    "instance_groups",
+    "create_instance_group",
+    "delete_instance_group",
+    "rename_instance_group",
+    "delete_instance",
+    "duplicate_instance",
+    // рабочее пространство Java-экземпляра (порт instance_workspace.py):
+    // настройки, ресурсы, миры (NBT) и серверы — целиком локальные операции.
+    "instance_details",
+    "save_instance_settings",
+    "remove_instance_asset",
+    "toggle_mod",
+    "import_asset",
+    "mods_remove_files",
+    "save_settings",
+    "plugin_list",
+    "java_validate",
+    // minecraft Bedrock целиком в Rust: Linux — BedrockOnLinux, Windows —
     // официальный Minecraft for Windows из Microsoft Store.
     "bedrock_runtime_status",
     "bedrock_versions",
@@ -90,6 +146,7 @@ pub const NATIVE_OPS: &[&str] = &[
     "set_default_account",
     "move_account",
     "login_microsoft",
+    "login_ely",
     "microsoft_login_status",
     "install",
     "server_start",
@@ -100,22 +157,101 @@ pub const NATIVE_OPS: &[&str] = &[
     "server_status",
     "mod_dependency_graph",
     "mod_removal_impact",
+    // поиск источников импорта — только чтение пары каталогов. Через общий
+    "external_instances_scan",
+    // сеть Java-серверов целиком в Rust: диагностика (белый IP, NAT, UPnP),
+    "server_network_diagnose",
+    "server_network_status",
+    "server_network_prepare",
+    "server_network_open",
+    "server_network_close",
+    // бюджеты операций плагинов (guard) и dev-режим перезагрузки.
+    "plugin_api_quota_usage",
+    "plugin_dev_changes",
+    // сетевые метаданные: список версий Mojang, версии загрузчиков и ядер
+    "versions",
+    "loader_choices",
+    "server_core_versions",
+    "check_remote_release",
+    "shader_analyze",
+    "global_search",
+    "world_import_path",
+    // запись экрана (F7): ffmpeg-процесс живёт в движке, состояние — в
+    // recordings/recording-state.json (его же читает overlay_state).
+    "recording_start",
+    "recording_stop",
+    "recording_status",
+    // WebDAV-синхронизация данных лаунчера: манифест подписан локальным
+    // ключом, пароль — в libsecret/Credential Manager (формат совместим с
+    // Python-воркером: те же ключи и байты подписи).
+    "cloud_status",
+    "cloud_configure",
+    "cloud_test",
+    "cloud_list",
+    "cloud_sync",
+    "cloud_restore",
+    "cloud_delete",
+    "cloud_disconnect",
+    // каталог плагинов GitHub: поиск по topic, установка релизных ZIP и
+    // публикация через OAuth device flow (порт github_plugins.py).
+    "github_plugin_status",
+    "github_plugin_search",
+    "github_plugin_details",
+    "github_plugin_install",
+    "github_plugin_oauth_start",
+    "github_plugin_oauth_poll",
+    "github_plugin_sign_out",
+    "github_plugin_publish",
+    // библиотека скинов и профиль Minecraft: без Python-воркера.
+    "skins_list",
+    "skins_import",
+    "skins_export",
+    "skin_profile",
+    "apply_skin",
+    "clear_skin",
+    "apply_cape",
+    "clear_cape",
+    "open_skins_folder",
+    "skins_folder",
+    // каталог Modrinth через Go-бинарник nivora-modcat
+    "mods_search",
+    "mods_details",
+    "mods_check_updates",
+    // анализ производительности — Rust + Java-хелпер ModScan
+    "optimization_analyze",
+    // ярлыки экземпляров (рабочий стол / меню приложений) и запуск по ярлыку
+    "instance_shortcut_status",
+    "instance_shortcut_create",
+    "instance_shortcut_remove",
+    "shortcut_take_launch_request",
+    // экспорт списка модов экземпляра (Markdown / CSV / текст)
+    "instance_mod_list_export",
 ];
 
 pub fn is_native(operation: &str) -> bool {
     NATIVE_OPS.contains(&operation)
 }
 
-/// Облачные резервные копии хранятся в WebDAV — их обслуживает
-/// Python-воркер. Локальные копии и расписания идут нативно даже при
-/// настроенном облаке, кроме операций, чей ответ включает облачный список.
 pub fn needs_worker(operation: &str, request: &Value) -> bool {
     match operation {
+        // на Windows песочница — AppContainer; её проверку (пробный запуск
+        // процесса в контейнере) выполняет Python-бэкенд.
+        "security_status" => return cfg!(windows),
+        // файловые операции и удаление Bedrock-экземпляров остаются за
+        "instance_file_list" | "instance_file_read" | "instance_file_write" | "instance_file_mkdir"
+        | "instance_file_upload" | "instance_file_delete" | "delete_instance" => {
+            return request_bedrock_instance(request);
+        }
         "world_backup_create" | "world_backup_restore" | "world_backup_delete" | "world_backup_list" => {}
-        // Legacy-токены Microsoft в файле переносимы в Secret Service только
+        // legacy-токены Microsoft в файле переносимы в Secret Service только
         // через Python; чистые файлы обслуживаются нативно.
         "create_offline_account" | "delete_account" | "set_default_account" | "move_account" => {
             return accounts::has_legacy_tokens(&state::launcher_roots().config_home);
+        }
+        // каталог Modrinth обслуживает Go-бинарник; без него, для плагинов,
+        // модпаков и чужих каталогов — прежний путь через воркер
+        "mods_search" | "mods_details" | "mods_check_updates" => {
+            return !modcat::native_possible(operation, request);
         }
         _ => return false,
     }
@@ -133,10 +269,55 @@ pub fn needs_worker(operation: &str, request: &Value) -> bool {
     }
     let roots = state::launcher_roots();
     backups::cloud_configured(&roots.config_home)
-}pub fn handle(operation: &str, request: &Value) -> Result<Value, String> {
+}
+
+fn request_bedrock_instance(request: &Value) -> bool {
+    let name = request
+        .get("name")
+        .and_then(Value::as_str)
+        .or_else(|| request.get("instance_name").and_then(Value::as_str))
+        .map(str::trim)
+        .unwrap_or("");
+    if name.is_empty() {
+        return false;
+    }
+    let roots = state::launcher_roots();
+    let game_dir = state::settings_game_dir(&roots.config_home, &roots.data_home);
+    state::resolve_instance_path(&game_dir, name)
+        .map(|path| state::instance_metadata(&path).get("game_edition").and_then(Value::as_str) == Some("bedrock"))
+        .unwrap_or(false)
+}
+
+pub fn handle(operation: &str, request: &Value) -> Result<Value, String> {
     match operation {
+        "bootstrap" => Ok(ok_response(operation, bootstrap::bootstrap(request)?)),
         "hash_file" => hash_file(request),
         "hash_directory" => hash_directory(request),
+        "fs_browse" => Ok(ok_response(operation, fs_browser::fs_browse(request)?)),
+        "fs_read_file" => Ok(ok_response(operation, fs_browser::fs_read_file(request)?)),
+        "instance_file_list" => Ok(ok_response(operation, instance_files::instance_file_list(request)?)),
+        "instance_file_read" => Ok(ok_response(operation, instance_files::instance_file_read(request)?)),
+        "instance_file_write" => Ok(ok_response(operation, instance_files::instance_file_write(request)?)),
+        "instance_file_mkdir" => Ok(ok_response(operation, instance_files::instance_file_mkdir(request)?)),
+        "instance_file_upload" => Ok(ok_response(operation, instance_files::instance_file_upload(request)?)),
+        "instance_file_delete" => Ok(ok_response(operation, instance_files::instance_file_delete(request)?)),
+        "instance_log_archives" => Ok(ok_response(operation, instance_files::instance_log_archives(request)?)),
+        "instance_log_archive_read" => Ok(ok_response(operation, instance_files::instance_log_archive_read(request)?)),
+        "instance_groups" => Ok(ok_response(operation, instances::instance_groups(request)?)),
+        "create_instance_group" => Ok(ok_response(operation, instances::create_instance_group(request)?)),
+        "delete_instance_group" => Ok(ok_response(operation, instances::delete_instance_group(request)?)),
+        "rename_instance_group" => Ok(ok_response(operation, instances::rename_instance_group(request)?)),
+        "delete_instance" => Ok(ok_response(operation, instances::delete_instance(request)?)),
+        "duplicate_instance" => Ok(ok_response(operation, instances::duplicate_instance(request)?)),
+        "instance_details" => Ok(ok_response(operation, instance_workspace::instance_details(request)?)),
+        "save_instance_settings" => Ok(ok_response(operation, instance_workspace::save_instance_settings(request)?)),
+        "remove_instance_asset" => Ok(ok_response(operation, instance_workspace::remove_instance_asset(request)?)),
+        "toggle_mod" => Ok(ok_response(operation, instance_workspace::toggle_mod(request)?)),
+        "import_asset" => Ok(ok_response(operation, instance_workspace::import_asset(request)?)),
+        "mods_remove_files" => Ok(ok_response(operation, instance_workspace::mods_remove_files(request)?)),
+        "save_settings" => Ok(ok_response(operation, config::save_settings(request)?)),
+        "plugin_list" => Ok(ok_response(operation, plugins::plugin_list(request)?)),
+        "java_validate" => Ok(ok_response(operation, system::java_validate(request)?)),
         "system_metrics" => Ok(ok_response(operation, metrics::system_metrics(request)?)),
         "overlay_state" => Ok(ok_response(operation, state::overlay_state(request)?)),
         "jvm_presets_list" => Ok(ok_response(operation, ops::jvm_presets_list(request)?)),
@@ -168,6 +349,7 @@ pub fn needs_worker(operation: &str, request: &Value) -> bool {
         "move_account" => Ok(ok_response(operation, accounts::move_account(request)?)),
         "microsoft_login_status" => Ok(ok_response(operation, accounts::microsoft_login_status(request)?)),
         "login_microsoft" => Ok(ok_response(operation, accounts::login_microsoft(request)?)),
+        "login_ely" => Ok(ok_response(operation, accounts::login_ely(request)?)),
         "install" => Ok(ok_response(operation, installer::install(request)?)),
         "server_start" => Ok(ok_response(operation, server::server_start(request)?)),
         "server_stop" => Ok(ok_response(operation, server::server_stop(request)?)),
@@ -177,6 +359,54 @@ pub fn needs_worker(operation: &str, request: &Value) -> bool {
         "server_status" => Ok(ok_response(operation, server::server_status(request)?)),
         "mod_dependency_graph" => Ok(ok_response(operation, mod_dependencies::mod_dependency_graph(request)?)),
         "mod_removal_impact" => Ok(ok_response(operation, mod_dependencies::mod_removal_impact(request)?)),
+        "external_instances_scan" => Ok(ok_response(operation, instances::external_instances_scan(request)?)),
+        "server_network_diagnose" => Ok(ok_response(operation, server_network::server_network_diagnose(request)?)),
+        "server_network_status" => Ok(ok_response(operation, server_network::server_network_status(request)?)),
+        "server_network_prepare" => Ok(ok_response(operation, server_network::server_network_prepare(request)?)),
+        "server_network_open" => Ok(ok_response(operation, server_network::server_network_open(request)?)),
+        "server_network_close" => Ok(ok_response(operation, server_network::server_network_close(request)?)),
+        "plugin_api_quota_usage" => Ok(ok_response(operation, plugin_guard::plugin_api_quota_usage(request)?)),
+        "plugin_dev_changes" => Ok(ok_response(operation, plugin_reload::plugin_dev_changes(request)?)),
+        "versions" => Ok(ok_response(operation, metadata::versions(request)?)),
+        "loader_choices" => Ok(ok_response(operation, loaders::loader_choices(request)?)),
+        "server_core_versions" => Ok(ok_response(operation, server::server_core_versions(request)?)),
+        "check_remote_release" => Ok(ok_response(operation, release_check::check_remote_release(request)?)),
+        "shader_analyze" => Ok(ok_response(operation, shader_analysis::shader_analyze(request)?)),
+        "global_search" => Ok(ok_response(operation, global_search::global_search(request)?)),
+        "mods_search" => Ok(ok_response(operation, modcat::mods_search(request)?)),
+        "mods_details" => Ok(ok_response(operation, modcat::mods_details(request)?)),
+        "mods_check_updates" => Ok(ok_response(operation, modcat::mods_check_updates(request)?)),
+        "optimization_analyze" => Ok(ok_response(operation, optimization::optimization_analyze(request)?)),
+        "world_import_path" => Ok(ok_response(operation, world_import::world_import_path(request)?)),
+        "recording_start" => Ok(ok_response(operation, recorder::recording_start(request)?)),
+        "recording_stop" => Ok(ok_response(operation, recorder::recording_stop(request)?)),
+        "recording_status" => Ok(ok_response(operation, recorder::recording_status(request)?)),
+        "cloud_status" => Ok(ok_response(operation, cloud::cloud_status(request)?)),
+        "cloud_configure" => Ok(ok_response(operation, cloud::cloud_configure(request)?)),
+        "cloud_test" => Ok(ok_response(operation, cloud::cloud_test(request)?)),
+        "cloud_list" => Ok(ok_response(operation, cloud::cloud_list(request)?)),
+        "cloud_sync" => Ok(ok_response(operation, cloud::cloud_sync(request)?)),
+        "cloud_restore" => Ok(ok_response(operation, cloud::cloud_restore(request)?)),
+        "cloud_delete" => Ok(ok_response(operation, cloud::cloud_delete(request)?)),
+        "cloud_disconnect" => Ok(ok_response(operation, cloud::cloud_disconnect(request)?)),
+        "github_plugin_status" => Ok(ok_response(operation, github_plugins::github_plugin_status(request)?)),
+        "github_plugin_search" => Ok(ok_response(operation, github_plugins::github_plugin_search(request)?)),
+        "github_plugin_details" => Ok(ok_response(operation, github_plugins::github_plugin_details(request)?)),
+        "github_plugin_install" => Ok(ok_response(operation, github_plugins::github_plugin_install(request)?)),
+        "github_plugin_oauth_start" => Ok(ok_response(operation, github_plugins::github_plugin_oauth_start(request)?)),
+        "github_plugin_oauth_poll" => Ok(ok_response(operation, github_plugins::github_plugin_oauth_poll(request)?)),
+        "github_plugin_sign_out" => Ok(ok_response(operation, github_plugins::github_plugin_sign_out(request)?)),
+        "github_plugin_publish" => Ok(ok_response(operation, github_plugins::github_plugin_publish(request)?)),
+        "skins_list" => Ok(ok_response(operation, skins::skins_list(request)?)),
+        "skins_import" => Ok(ok_response(operation, skins::skins_import(request)?)),
+        "skins_export" => Ok(ok_response(operation, skins::skins_export(request)?)),
+        "skin_profile" => Ok(ok_response(operation, skins::skin_profile(request)?)),
+        "apply_skin" => Ok(ok_response(operation, skins::apply_skin_op(request)?)),
+        "clear_skin" => Ok(ok_response(operation, skins::clear_skin_op(request)?)),
+        "apply_cape" => Ok(ok_response(operation, skins::apply_cape_op(request)?)),
+        "clear_cape" => Ok(ok_response(operation, skins::clear_cape_op(request)?)),
+        "open_skins_folder" => Ok(ok_response(operation, skins::open_skins_folder(request)?)),
+        "skins_folder" => Ok(ok_response(operation, skins::skins_folder(request)?)),
         "bedrock_runtime_status" => Ok(ok_response(operation, bedrock::runtime_status(request)?)),
         "bedrock_versions" => Ok(ok_response(operation, bedrock::versions(request)?)),
         "bedrock_setup_version" => Ok(ok_response(operation, bedrock::setup_version(request)?)),
@@ -193,12 +423,17 @@ pub fn needs_worker(operation: &str, request: &Value) -> bool {
         "bedrock_content_remove" => Ok(ok_response(operation, bedrock::content_remove(request)?)),
         "bedrock_stop" => Ok(ok_response(operation, bedrock::stop(request)?)),
         "engine_info" => Ok(ok_response(operation, engine_info())),
+        "instance_shortcut_status" => Ok(ok_response(operation, shortcuts::instance_shortcut_status(request)?)),
+        "instance_shortcut_create" => Ok(ok_response(operation, shortcuts::instance_shortcut_create(request)?)),
+        "instance_shortcut_remove" => Ok(ok_response(operation, shortcuts::instance_shortcut_remove(request)?)),
+        "shortcut_take_launch_request" => Ok(ok_response(operation, shortcuts::shortcut_take_launch_request(request)?)),
+        "instance_mod_list_export" => Ok(ok_response(operation, mod_list::instance_mod_list_export(request)?)),
         other => Err(format!("rust-движок не обслуживает операцию {other}")),
     }
 }
 
 fn ok_response(operation: &str, data: Value) -> Value {
-    // Конверт протокола; фронтенд ждёт данные в envelope.data.
+    // конверт протокола; фронтенд ждёт данные в envelope.data.
     json!({ "ok": true, "operation": operation, "data": data })
 }
 
@@ -251,9 +486,7 @@ fn hash_directory(request: &Value) -> Result<Value, String> {
     }
     let mut files: Vec<Value> = Vec::new();
     let mut total_size: u64 = 0;
-    // Обход вглубь от корня: пути собираются ОТ корня, поэтому «выход»
-    // наружу невозможен по построению. Символические ссылки пропускаем —
-    // это и безопаснее, и честнее для инвентаризации модпака.
+    // обход вглубь от корня: пути собираются ОТ корня, поэтому «выход»
     fn walk(dir: &Path, prefix: &str, files: &mut Vec<Value>, total_size: &mut u64) -> Result<(), String> {
         let mut entries: Vec<_> = std::fs::read_dir(dir)
             .map_err(|error| format!("Не удалось прочитать каталог {}: {error}", dir.display()))?
@@ -322,7 +555,11 @@ mod tests {
         for operation in NATIVE_OPS {
             assert!(is_native(operation), "{operation}");
         }
-        assert!(!is_native("bootstrap"));
+        // bootstrap переехал в движок: холодный старт не поднимает воркер
+        assert!(is_native("bootstrap"));
+        // каталог Modrinth тоже нативный, но без бинарника уходит воркеру
+        assert!(is_native("mods_search"));
+        assert!(!modcat::native_possible("mods_search", &json!({ "project_type": "modpack" })));
         let info = handle("engine_info", &json!({})).expect("engine_info");
         assert_eq!(info["ok"], json!(true));
         assert_eq!(info["data"]["engine"], json!("rust"));
@@ -337,7 +574,7 @@ mod tests {
         let response = handle("hash_file", &json!({ "path": file.to_string_lossy() })).expect("hash_file");
         assert_eq!(response["ok"], json!(true));
         assert_eq!(response["data"]["size"], json!(6));
-        // Эталон — вывод sha256sum для этого файла.
+        // эталон — вывод sha256sum для этого файла.
         assert_eq!(response["data"]["sha256"], json!("5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03"));
         let missing = handle("hash_file", &json!({ "path": root.join("nope").to_string_lossy() }));
         assert!(missing.is_err());
@@ -356,7 +593,7 @@ mod tests {
         assert_eq!(response["data"]["count"], json!(2));
         assert_eq!(response["data"]["total_size"], json!(6));
         let paths: Vec<&str> = response["data"]["files"].as_array().unwrap().iter().map(|item| item["path"].as_str().unwrap()).collect();
-        // Сортировка и прямые слеши в относительных путях — контракт
+        // сортировка и прямые слеши в относительных путях — контракт
         // манифеста, на который ориентируется сравнение с манифестом модпака.
         assert_eq!(paths, vec!["a.txt", "sub/b.txt"]);
         let missing = handle("hash_directory", &json!({ "path": root.join("nope").to_string_lossy() }));
@@ -369,9 +606,6 @@ mod tests {
         assert!(error.contains("path"), "текст ошибки: {error}");
     }
 
-    /// Сверка тем/профилей/справочников с эталонной реализацией: скрипт
-    /// scripts/parity_ops.sh подставляет XDG-корни и входные данные через
-    /// переменные окружения. Без них тест пропускается.
     #[test]
     fn live_parity_domain_fixture() {
         let root = std::env::var("NIVORA_PARITY_DOMAIN_ROOT").ok();
@@ -393,7 +627,7 @@ mod tests {
             if let Some(Value::String(encoded)) = normalized.remove("data") {
                 let decoded = base64::engine::general_purpose::STANDARD.decode(encoded).unwrap_or_default();
                 let archive = {
-                    // Содержимое архива важнее байтов deflate-потока.
+                    // содержимое архива важнее байтов deflate-потока.
                     let mut archive = zip::ZipArchive::new(std::io::Cursor::new(&decoded)).unwrap();
                     let mut parts = serde_json::Map::new();
                     for index in 0..archive.len() {
@@ -422,9 +656,6 @@ mod tests {
         fs::write(&output, serde_json::to_string_pretty(&Value::Object(report)).unwrap()).unwrap();
     }
 
-    /// Живой паритет доменов бэкапов и аккаунтов: фикстура строится в
-    /// XDG-корнях скриптом parity_ops.sh, обе стороны прогоняют одинаковые
-    /// последовательности. Метки времени и размеры архивов гасятся.
     #[test]
     fn live_parity_backup_fixture() {
         let Ok(output) = std::env::var("NIVORA_PARITY_STATE_OUT") else {
@@ -451,14 +682,14 @@ mod tests {
         );
         report.insert("schedule-get".into(), outcome(&backups::world_backup_schedule_get(&json!({ "name": "Alpha" })).map(normalize_backup)));
 
-        // Портим мир и восстанавливаем: содержимое обязано вернуться.
+        // портим мир и восстанавливаем: содержимое обязано вернуться.
         fs::write(instance.join("saves/New World/level.dat"), "сломано").unwrap();
         report.insert("backup-restore".into(), outcome(&backups::world_backup_restore(&json!({ "name": "Alpha", "backup_id": backup_id })).map(normalize_backup)));
         let restored = fs::read_to_string(instance.join("saves/New World/level.dat")).unwrap_or_default();
         report.insert("restored-content".into(), json!(restored));
         report.insert("backup-delete".into(), outcome(&backups::world_backup_delete(&json!({ "name": "Alpha", "backup_id": backup_id })).map(normalize_backup)));
 
-        // Аккаунты: файл, порядок и default_account_id обязаны совпадать.
+        // аккаунты: файл, порядок и default_account_id обязаны совпадать.
         report.insert("account-create".into(), outcome(&accounts::create_offline_account(&json!({ "username": "  Игрок_77!  " }))));
         let accounts_file = roots.config_home.join("accounts.json");
         let mut records: Vec<Value> = serde_json::from_str(&fs::read_to_string(&accounts_file).unwrap_or_default().to_owned()).unwrap_or_default();
@@ -488,8 +719,6 @@ mod tests {
         fs::write(&output, serde_json::to_string_pretty(&Value::Object(report)).unwrap()).unwrap();
     }
 
-    /// Метка времени в backup_id — первые 16 символов (YYYYmmdd-HHMMSS-);
-    /// created_at и размеры гасятся: реализация deflate может отличаться.
     fn normalize_backup_value(value: Value) -> Value {
         let strip_id = |id: &str| id.chars().skip(16).collect::<String>();
         let fix_entry = |mut entry: Value| {

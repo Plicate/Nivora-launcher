@@ -1,8 +1,4 @@
-"""Bounded UPnP IGD client. Router traffic never uses the public HTTP client.
-
-Only IPv4 literals on RFC1918 LANs are accepted, and description/control
-endpoints must match the source of the SSDP reply. No redirects or proxies.
-"""
+"""bounded UPnP IGD client. Router traffic never uses the public HTTP client."""
 from __future__ import annotations
 
 import http.client
@@ -27,12 +23,10 @@ SERVICE_TYPES = (
 )
 LAN_NETWORKS = tuple(ipaddress.ip_network(value) for value in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"))
 
-
 class UpnpError(LauncherError):
     def __init__(self, message: str, code: str = "") -> None:
         self.code = code
         super().__init__(message)
-
 
 def lan_ipv4(value: str) -> bool:
     try:
@@ -40,7 +34,6 @@ def lan_ipv4(value: str) -> bool:
     except ValueError:
         return False
     return any(address in network for network in LAN_NETWORKS)
-
 
 def router_url(url: str, peer: str) -> tuple[str, int, str]:
     try:
@@ -54,7 +47,6 @@ def router_url(url: str, peer: str) -> tuple[str, int, str]:
             or len(url) > 2048 or any(ord(char) < 32 for char in url)):
         raise UpnpError("UPnP может обращаться только к локальному роутеру, ответившему на SSDP")
     return peer, port, (parsed.path or "/") + (f"?{parsed.query}" if parsed.query else "")
-
 
 def router_request(url: str, peer: str, *, body: bytes | None = None,
                    headers: dict[str, str] | None = None) -> tuple[int, bytes]:
@@ -74,7 +66,6 @@ def router_request(url: str, peer: str, *, body: bytes | None = None,
     finally:
         connection.close()
 
-
 def parse_xml(raw: bytes):
     if len(raw) > MAX_XML_BYTES:
         raise UpnpError("Ответ UPnP-роутера слишком большой")
@@ -83,13 +74,11 @@ def parse_xml(raw: bytes):
     except Exception as exc:
         raise UpnpError("Роутер вернул некорректный или небезопасный XML") from exc
 
-
 def child_text(element: Any, name: str) -> str:
     for child in element:
         if child.tag.rsplit("}", 1)[-1] == name:
             return (child.text or "").strip()
     return ""
-
 
 def ssdp_locations(timeout: float = 2.0) -> list[tuple[str, str]]:
     packet = (
@@ -103,7 +92,7 @@ def ssdp_locations(timeout: float = 2.0) -> list[tuple[str, str]]:
             sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 1)
             sock.sendto(packet, ("239.255.255.250", 1900))
             sock.sendto(packet.replace(b"InternetGatewayDevice:1", b"InternetGatewayDevice:2"), ("239.255.255.250", 1900))
-            # Bound both time and packet count, including malformed LAN responses.
+            # bound both time and packet count, including malformed LAN responses.
             for _ in range(64):
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -136,7 +125,6 @@ def ssdp_locations(timeout: float = 2.0) -> list[tuple[str, str]]:
         raise UpnpError("UPnP-поиск недоступен. Проверьте локальную сеть и firewall") from exc
     return result
 
-
 @dataclass(frozen=True)
 class Gateway:
     peer: str
@@ -146,7 +134,7 @@ class Gateway:
     local_ip: str
 
     def action(self, action: str, values: dict[str, Any] | None = None) -> dict[str, str]:
-        # Names are constants chosen by this module, never XML supplied by a user.
+        # names are constants chosen by this module, never XML supplied by a user.
         elements = "".join(f"<{key}>{escape(str(value))}</{key}>" for key, value in (values or {}).items())
         body = (f'<?xml version="1.0"?><s:Envelope xmlns:s="{SOAP_NS}" '
                 's:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">'
@@ -199,7 +187,6 @@ class Gateway:
             if exc.code != "714":
                 raise
 
-
 def source_ip(peer: str = "1.1.1.1") -> str:
     """UDP route lookup only; connect() does not send packets."""
     try:
@@ -208,7 +195,6 @@ def source_ip(peer: str = "1.1.1.1") -> str:
             return str(ipaddress.IPv4Address(sock.getsockname()[0]))
     except (OSError, ValueError):
         return ""
-
 
 def gateways_from_description(raw: bytes, location: str, peer: str) -> list[Gateway]:
     router_url(location, peer)
@@ -236,7 +222,6 @@ def gateways_from_description(raw: bytes, location: str, peer: str) -> list[Gate
             router_url(url, peer)
             result.append(Gateway(peer, url, service_type, friendly, local_ip))
     return result
-
 
 def discover_gateway() -> Gateway:
     for location, peer in ssdp_locations():

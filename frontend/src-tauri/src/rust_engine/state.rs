@@ -1,9 +1,4 @@
-// Сводное состояние для игрового оверлея: запущенный экземпляр, метрики
-// процесса игры, моды, статус записи и настройки оверлея — один запрос.
-// Всё читается с диска и из /proc, без обращения к воркеру.
-//
-// Формат ответа фиксирует оверлей: когда игра не запущена, ключа
-// system_metrics в ответе нет.
+// сводное состояние для игрового оверлея: запущенный экземпляр, метрики
 use regex::Regex;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -40,9 +35,6 @@ pub(crate) fn home_dir() -> PathBuf {
     home_dir_for(cfg!(windows), &|key| std::env::var(key).ok())
 }
 
-/// Домашний каталог: на Windows переменной HOME обычно нет — берём
-/// USERPROFILE (как os.path.expanduser в Python), иначе HOME, иначе корень.
-/// До этого Windows-сборка получала «/» и складывала данные в C:\.config.
 fn home_dir_for(windows: bool, env: &dyn Fn(&str) -> Option<String>) -> PathBuf {
     if windows {
         if let Some(profile) = env("USERPROFILE").filter(|value| !value.is_empty()) {
@@ -69,23 +61,14 @@ pub(crate) struct LauncherRoots {
     pub(crate) cache_home: PathBuf,
 }
 
-/// Приоритет корней — одна точка правды для state, ConfigStore и bedrock.
-/// Каталог настроек/данных лаунчера. ОБЯЗАН совпадать с APP_ID в Python
-/// (nivora_launcher/constants.py): историческое имя «trial-launcher»
-/// осталось только в миграции ниже — данные пользователей переносятся
-/// в актуальный «nivora-launcher» при первом запуске.
 pub(crate) const LAUNCHER_DIR: &str = "nivora-launcher";
-/// Исторический каталог до переименования бренда (миграция trial → nivora).
+/// исторический каталог до переименования бренда (миграция trial → nivora).
 pub(crate) const LEGACY_LAUNCHER_DIR: &str = "trial-launcher";
 
 pub(crate) fn launcher_roots() -> LauncherRoots {
     launcher_roots_for(cfg!(windows), &|key| std::env::var(key).ok())
 }
 
-/// Старые сборки Rust-движка писали в параллельный каталог «nivora-launcher»
-/// (до синхронизации APP_ID с Python). Созданные там экземпляры переносим в
-/// актуальную папку игры, чтобы профили не пропадали после обновления.
-/// Повторные запуски ничего не делают: источник переименовывается.
 pub(crate) fn migrate_legacy_roots() -> Option<String> {
     let roots = launcher_roots();
     let mut notes: Vec<String> = Vec::new();
@@ -102,7 +85,7 @@ pub(crate) fn migrate_legacy_roots() -> Option<String> {
             continue;
         }
         if !current.exists() {
-            // Чистый случай: новый каталог ещё не создавался — переносим всё
+            // чистый случай: новый каталог ещё не создавался — переносим всё
             // целиком, это сохраняет права и структуру без копирования.
             if fs::rename(&legacy, current).is_ok() {
                 notes.push(format!("{label}: каталог перенесён целиком"));
@@ -111,9 +94,6 @@ pub(crate) fn migrate_legacy_roots() -> Option<String> {
         }
         let _ = fs::create_dir_all(current);
         // settings.json сливаются отдельно: значения из старого каталога
-        // приоритетнее (их всю дорогу писал Python-воркер — это реальные
-        // настройки пользователя; в новом каталоге мог появиться только
-        // автостаб от прошлых Rust-сборок).
         merge_settings_json(&legacy.join("settings.json"), &current.join("settings.json"), &legacy, current);
         let moved = merge_tree(&legacy, current);
         if moved > 0 {
@@ -121,7 +101,7 @@ pub(crate) fn migrate_legacy_roots() -> Option<String> {
         }
         retire_legacy_dir(&legacy);
     }
-    // Пути в настройках обязаны указывать в новый каталог и после
+    // пути в настройках обязаны указывать в новый каталог и после
     // переименования целиком (game_dir хранится абсолютным путём).
     rewrite_settings_path_prefixes(&roots.config_home.join("settings.json"), &roots);
     if notes.is_empty() {
@@ -131,12 +111,10 @@ pub(crate) fn migrate_legacy_roots() -> Option<String> {
     }
 }
 
-/// Слияние settings.json: отсутствующий новый файл просто переносится;
-/// при обоих — объекты объединяются, значения legacy выигрывают.
 fn merge_settings_json(legacy: &Path, current: &Path, legacy_base: &Path, current_base: &Path) {
     let Some(legacy_value) = read_bounded_json(legacy, MAX_SETTINGS_JSON_BYTES) else { return };
     let Some(mut merged) = legacy_value.as_object().cloned() else {
-        // Настройки — не объект (неожиданно): переносим как есть, если нового нет.
+        // настройки — не объект (неожиданно): переносим как есть, если нового нет.
         if !current.exists() {
             let _ = fs::rename(legacy, current);
         }
@@ -154,8 +132,6 @@ fn merge_settings_json(legacy: &Path, current: &Path, legacy_base: &Path, curren
     let _ = fs::remove_file(legacy);
 }
 
-/// Перенос содержимого legacy-каталога в текущий без затирания: файлы
-/// переименовываются, одноимённые каталоги обходятся рекурсивно.
 fn merge_tree(legacy: &Path, current: &Path) -> usize {
     let Ok(entries) = fs::read_dir(legacy) else { return 0 };
     let mut moved = 0;
@@ -187,9 +163,6 @@ fn merge_tree(legacy: &Path, current: &Path) -> usize {
     moved
 }
 
-/// Опустевший legacy-каталог убираем; если что-то осталось (конфликт имён) —
-/// переименовываем в «trial-launcher.migrated», чтобы не мешал и не тёк
-/// повторной миграцией.
 fn retire_legacy_dir(legacy: &Path) {
     if dir_is_empty(legacy) {
         let _ = fs::remove_dir_all(legacy);
@@ -205,7 +178,7 @@ fn dir_is_empty(path: &Path) -> bool {
     fs::read_dir(path).map(|mut entries| entries.next().is_none()).unwrap_or(false)
 }
 
-/// Атомарная запись настроек (tmp + rename) с закрытыми правами.
+/// атомарная запись настроек (tmp + rename) с закрытыми правами.
 fn write_json_private(path: &Path, value: &serde_json::Value) -> Result<(), String> {
     let temporary = path.with_extension("json.tmp");
     let bytes = serde_json::to_vec(value).map_err(|error| format!("Не удалось сериализовать настройки: {error}"))?;
@@ -218,8 +191,6 @@ fn write_json_private(path: &Path, value: &serde_json::Value) -> Result<(), Stri
     fs::rename(&temporary, path).map_err(|error| format!("Не удалось заменить настройки: {error}"))
 }
 
-/// Абсолютные пути в верхнем уровне настроек, указывающие в старый каталог,
-/// переписываются на новый (game_dir и другие ключи-пути).
 fn rewrite_settings_path_prefixes(settings_path: &Path, roots: &LauncherRoots) {
     let Some(value) = read_bounded_json(settings_path, MAX_SETTINGS_JSON_BYTES) else { return };
     let Some(object) = value.as_object().cloned() else { return };
@@ -264,13 +235,6 @@ fn rewrite_object_path_prefixes(object: &mut serde_json::Map<String, serde_json:
     }
 }
 
-
-/// Windows берёт известные папки пользователя (%APPDATA%, %LOCALAPPDATA%) —
-/// ровно как Python Paths; XDG-переменные работают на обеих ОС. До этого
-/// Windows-сборка без HOME проваливалась в /.config и C:\.local: родные
-/// операции (оверлей, аккаунты, логи сессий Bedrock) искали настройки и
-/// экземпляры в параллельном пустом каталоге. Чистая функция — тестируется
-/// с поддельным окружением на любой ОС.
 pub(crate) fn launcher_roots_for(windows: bool, env: &dyn Fn(&str) -> Option<String>) -> LauncherRoots {
     if windows {
         let home = home_dir_for(true, env);
@@ -298,7 +262,7 @@ pub(crate) fn launcher_roots_for(windows: bool, env: &dyn Fn(&str) -> Option<Str
 
 fn xdg_dir_for(windows: bool, env: &dyn Fn(&str) -> Option<String>, variable: &str, fallback: PathBuf) -> PathBuf {
     if let Some(value) = env(variable) {
-        // Unix требует абсолютный путь (защита от мусора в env); Windows
+        // unix требует абсолютный путь (защита от мусора в env); Windows
         // принимает любое непустое значение — так же, как _xdg_home в Python.
         let usable = !value.is_empty() && (windows || value.starts_with('/'));
         if usable {
@@ -308,7 +272,7 @@ fn xdg_dir_for(windows: bool, env: &dyn Fn(&str) -> Option<String>, variable: &s
     fallback
 }
 
-/// Каталог игры из settings.json; по умолчанию — data_home/game.
+/// каталог игры из settings.json; по умолчанию — data_home/game.
 pub(crate) fn settings_game_dir(config_home: &Path, data_home: &Path) -> PathBuf {
     read_bounded_json(&config_home.join("settings.json"), MAX_SETTINGS_JSON_BYTES)
         .and_then(|settings| {
@@ -322,9 +286,6 @@ pub(crate) fn settings_game_dir(config_home: &Path, data_home: &Path) -> PathBuf
         .unwrap_or_else(|| data_home.join("game"))
 }
 
-/// Безопасное имя экземпляра: прогоны недопустимых символов → один «-»,
-/// обрезка точек/дефисов по краям, «default» для пустого результата,
-/// максимум 64 символа.
 pub(crate) fn safe_instance_name(value: &str) -> String {
     let mut cleaned = String::with_capacity(value.len());
     let mut previous_invalid = false;
@@ -342,8 +303,6 @@ pub(crate) fn safe_instance_name(value: &str) -> String {
     base.chars().take(64).collect()
 }
 
-/// Поиск экземпляра по имени: валидация, проверка каталога (не symlink,
-/// существует) и принадлежности корню экземпляров. None — «не найден».
 pub(crate) fn resolve_instance_path(game_dir: &Path, name: &str) -> Option<PathBuf> {
     let instances_root = game_dir.join("instances");
     let path = instances_root.join(safe_instance_name(name));
@@ -359,7 +318,7 @@ pub(crate) fn resolve_instance_path(game_dir: &Path, name: &str) -> Option<PathB
     Some(path)
 }
 
-/// Читаем маленький JSON с ограничением размера и без symlink-файлов.
+/// читаем маленький JSON с ограничением размера и без symlink-файлов.
 pub(crate) fn read_bounded_json(path: &Path, max_bytes: u64) -> Option<Value> {
     let metadata = fs::symlink_metadata(path).ok()?;
     if metadata.is_symlink() || !metadata.is_file() || metadata.len() > max_bytes {
@@ -384,7 +343,7 @@ pub fn overlay_state_from(config_home: &Path, data_home: &Path, now: f64) -> Val
     let recording = recording_status(&game_dir, now);
     let instances_root = game_dir.join("instances");
     let Some(running) = scan_running_instance(&instances_root, now) else {
-        // Ответ «ничего не запущено» не содержит ключа system_metrics.
+        // ответ «ничего не запущено» не содержит ключа system_metrics.
         return json!({
             "running": false,
             "instance": null,
@@ -429,20 +388,18 @@ pub fn overlay_state_from(config_home: &Path, data_home: &Path, now: f64) -> Val
 }
 
 fn default_overlay_settings() -> Value {
-    // Значения по умолчанию; копия живёт и на фронте (overlayHelpers.ts) —
+    // значения по умолчанию; копия живёт и на фронте (overlayHelpers.ts) —
     // менять только вместе.
     json!({
         "enabled": true, "hotkey_overlay": "Shift+Tab", "hotkey_recording": "F7",
         "show_mods": true, "show_metrics": true, "recording_fps": 60, "recording_quality": 23,
         "recording_encoder": "auto", "recording_container": "mp4", "recording_audio": true,
         "position": "top-left", "scale": 100, "opacity": 96, "compact": false,
-        "show_clock": true, "show_system_metrics": true, "metrics_cpu": true, "metrics_ram": true,
+        "show_clock": true, "show_system_metrics": true,
         "metrics_gpu": true, "metrics_disk": true, "metrics_temperatures": true,
         "system_metrics_display": "overlay", "show_chat": true,
     })
 }
-
-// ------------------------------------------------------- Экземпляры ----
 
 struct RunningInstance {
     name: String,
@@ -537,8 +494,6 @@ fn instance_kind(path: &Path, metadata: &Value) -> String {
     }
 }
 
-/// Метаданные экземпляра (.nivora-launcher-instance.json), ограниченные
-/// по размеру; повреждённый файл — пустой объект.
 pub(crate) fn instance_metadata(path: &Path) -> Value {
     read_bounded_json(&path.join(INSTANCE_METADATA_FILE), MAX_INSTANCE_PROFILE_JSON_BYTES).unwrap_or(Value::Null)
 }
@@ -547,8 +502,6 @@ pub(crate) fn instance_kind_of(path: &Path) -> String {
     instance_kind(path, &instance_metadata(path))
 }
 
-/// Запущен ли экземпляр: файл живого состояния пишет лаунчер, живость
-/// процесса проверяется по pid.
 pub(crate) fn instance_running(path: &Path) -> bool {
     let Some(state) = read_bounded_json(&path.join(LIVE_STATE_FILE), MAX_INSTANCE_LIVE_STATE_JSON_BYTES) else {
         return false;
@@ -644,8 +597,6 @@ fn valid_version_id(id: &str) -> bool {
         && id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '+' | '-'))
 }
 
-/// Версия игры из id: последнее вхождение «1.x»/«2.x», иначе последний
-/// численный фрагмент, иначе весь id.
 fn version_from_id(version_id: &str) -> String {
     static VERSION_RE: OnceLock<Regex> = OnceLock::new();
     let regex = VERSION_RE.get_or_init(|| Regex::new(r"\d+\.\d+(?:\.\d+)?").unwrap());
@@ -653,7 +604,7 @@ fn version_from_id(version_id: &str) -> String {
     if matches.is_empty() {
         return version_id.to_owned();
     }
-    // Перебор с конца: нужен последний фрагмент, предпочтительно 1.x/2.x.
+    // перебор с конца: нужен последний фрагмент, предпочтительно 1.x/2.x.
     let preferred: Vec<&&str> = matches.iter().rev().filter(|m| m.starts_with("1.") || m.starts_with("2.")).collect();
     let chosen: &str = preferred.first().copied().copied().unwrap_or(*matches.last().unwrap());
     chosen.to_owned()
@@ -668,8 +619,6 @@ fn loader_from_version(version_id: &str) -> String {
     }
     "vanilla".to_owned()
 }
-
-// -------------------------------------------------- Метрики процесса ----
 
 fn instance_metrics(root: &Path, pid: i64, started_at: f64, now: f64) -> Value {
     let sample = if pid > 0 { process_sample(pid) } else { None };
@@ -691,8 +640,6 @@ fn instance_metrics(root: &Path, pid: i64, started_at: f64, now: f64) -> Value {
     })
 }
 
-/// Сумма размеров файлов каталога (без symlink), исключая служебные
-/// подкаталоги; не больше 20 000 файлов.
 fn directory_size(root: &Path) -> u64 {
     let mut total: u64 = 0;
     let mut count: usize = 0;
@@ -739,8 +686,6 @@ fn process_exists(pid: i64) -> bool {
     #[cfg(windows)]
     {
         // /proc нет: живость процесса проверяем OpenProcess'ом с минимальными
-        // правами; OpenProcess падает и на доступ, и на мёртвый PID — оба
-        // случая для наблюдателя эквивалентны «процесса нет».
         use windows_sys::Win32::Foundation::CloseHandle;
         use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
         unsafe {
@@ -758,7 +703,7 @@ fn process_exists(pid: i64) -> bool {
     }
 }
 
-/// Сумма CPU/RAM процесса и всех его потомков.
+/// сумма CPU/RAM процесса и всех его потомков.
 #[cfg(unix)]
 fn process_sample(pid: i64) -> Option<(f64, u64)> {    let proc_root = Path::new("/proc");
     let ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) } as f64;
@@ -826,9 +771,6 @@ fn single_process_sample(proc: &Path, ticks: f64) -> Option<(f64, u64)> {
     Some((cpu_seconds, rss_kib.saturating_mul(1024)))
 }
 
-// /proc нет: RAM берём из GetProcessMemoryInfo (WorkingSet); CPU-доля в
-// метриках экземпляра и так всегда отдаётся нулём, а перечисление потомков
-// Java на Windows дороже самой метрики — берём один процесс.
 #[cfg(windows)]
 fn process_sample(pid: i64) -> Option<(f64, u64)> {
     use windows_sys::Win32::Foundation::CloseHandle;
@@ -855,8 +797,6 @@ fn process_sample(_pid: i64) -> Option<(f64, u64)> {
     None
 }
 
-// ------------------------------------------------------------- Моды ----
-
 fn overlay_mods_cached(name: &str, instance_root: &Path, now: f64) -> Value {
     {
         let cache = OVERLAY_MODS_CACHE.lock().unwrap_or_else(|poison| poison.into_inner());
@@ -876,8 +816,6 @@ fn overlay_mods_cached(name: &str, instance_root: &Path, now: f64) -> Value {
     mods
 }
 
-/// Список модов для виджета оверлея: имя, красивое имя, включённость.
-/// Порядок — обход всего дерева, сортировка по пути в нижнем регистре.
 fn list_mods(directory: &Path) -> Value {
     if is_symlink(directory) || !directory.is_dir() {
         return json!([]);
@@ -946,10 +884,6 @@ fn mod_display_name(path: &Path, file_name: &str) -> String {
     pretty_asset_name(file_name)
 }
 
-/// Красивое имя ассета: расширение и хвостовой номер версии прочь,
-/// дефисы/подчёркивания → пробелы, camel-split («J E I»). Разделение
-/// регистров вручную: «пробел перед каждой заглавной, кроме первой
-/// позиции».
 fn pretty_asset_name(file_name: &str) -> String {
     static TRAILING_VERSION: OnceLock<Regex> = OnceLock::new();
     static SEPARATORS: OnceLock<Regex> = OnceLock::new();
@@ -983,8 +917,6 @@ fn pretty_asset_name(file_name: &str) -> String {
     }
 }
 
-// ---------------------------------------------------------- Запись ----
-
 fn recording_status(game_root: &Path, now: f64) -> Value {
     let state_path = game_root.join("recordings").join(RECORDING_STATE_FILE);
     let Some(state) = read_bounded_json(&state_path, 64 * 1024).filter(|value| value.is_object()) else {
@@ -1010,8 +942,6 @@ fn recording_status(game_root: &Path, now: f64) -> Value {
     })
 }
 
-// ----------------------------------------------------------- Тесты ----
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1022,7 +952,7 @@ mod tests {
         let root = fixture_root("legacy");
         let config = root.join("config");
         let data = root.join("data");
-        // Мир пользователя целиком в старом «trial-launcher»: настройки с
+        // мир пользователя целиком в старом «trial-launcher»: настройки с
         // абсолютным game_dir по умолчанию + экземпляры внутри data-каталога.
         let legacy_config = config.join(LEGACY_LAUNCHER_DIR);
         let legacy_data = data.join(LEGACY_LAUNCHER_DIR);
@@ -1062,11 +992,11 @@ mod tests {
         }
 
         assert!(note.is_some(), "миграция обязана отчитаться о переносе");
-        // Экземпляры из старого мира переехали, Rust-осиротевший не тронут
+        // экземпляры из старого мира переехали, Rust-осиротевший не тронут
         assert!(current_data.join("game").join("instances").join("main-world").is_dir());
         assert!(current_data.join("game").join("instances").join("rust-orphan").is_dir());
         assert!(current_data.join("accounts.json").exists(), "данные (аккаунты) переехали");
-        // Настройки слиты: пользовательские значения выиграли, путь переписан
+        // настройки слиты: пользовательские значения выиграли, путь переписан
         let merged: serde_json::Value = serde_json::from_str(
             &fs::read_to_string(current_config.join("settings.json")).unwrap(),
         )
@@ -1079,7 +1009,7 @@ mod tests {
         );
         assert!(!legacy_config.exists(), "старый каталог настроек убран");
         assert!(!legacy_data.exists(), "старый каталог данных убран");
-        // Повторный запуск — no-op
+        // повторный запуск — no-op
         let old_config = std::env::var("XDG_CONFIG_HOME").ok();
         std::env::set_var("XDG_CONFIG_HOME", &config);
         assert_eq!(migrate_legacy_roots(), None);
@@ -1095,7 +1025,7 @@ mod tests {
         let root = fixture_root("legacy-rename");
         let config = root.join("config");
         let data = root.join("data");
-        // Только старый мир — новый каталог не создавался вовсе
+        // только старый мир — новый каталог не создавался вовсе
         let legacy_config = config.join(LEGACY_LAUNCHER_DIR);
         fs::create_dir_all(legacy_config.join("game").join("instances").join("solo")).unwrap();
         fs::write(legacy_config.join("settings.json"), "{}").unwrap();
@@ -1120,9 +1050,7 @@ mod tests {
 
     #[test]
     fn launcher_roots_on_windows_use_known_folders() {
-        // На Windows HOME нет: корни обязаны идти в %APPDATA%/%LOCALAPPDATA%,
-        // а не в /.config у корня диска — как это было до исправления.
-        // Каталог = trial-launcher: APP_ID Python, данные обязаны совпадать.
+        // на Windows HOME нет: корни обязаны идти в %APPDATA%/%LOCALAPPDATA%,
         let roots = launcher_roots_for(true, &|key| match key {
             "APPDATA" => Some("C:/Users/Player/AppData/Roaming".to_owned()),
             "LOCALAPPDATA" => Some("C:/Users/Player/AppData/Local".to_owned()),
@@ -1160,9 +1088,7 @@ mod tests {
 
     #[test]
     fn launcher_roots_on_windows_honor_xdg_overrides_like_python() {
-        // Python Paths уважает XDG_* и на Windows — движок должен видеть те же
-        // каталоги, иначе настройки и экземпляры расходятся между воркером и
-        // родными операциями.
+        // python Paths уважает XDG_* и на Windows — движок должен видеть те же
         let roots = launcher_roots_for(true, &|key| match key {
             "APPDATA" => Some("C:/Roam".to_owned()),
             "LOCALAPPDATA" => Some("C:/Local".to_owned()),
@@ -1206,7 +1132,7 @@ mod tests {
         let game = root.join("game");
         fs::create_dir_all(game.join("instances").join("Empty")).unwrap();
         let response = overlay_state_from(&root.join("config"), &root.join("data"), 1000.0);
-        // Ключа system_metrics в «пустом» ответе нет.
+        // ключа system_metrics в «пустом» ответе нет.
         assert_eq!(response["running"], serde_json::json!(false));
         assert_eq!(response["instance"], serde_json::json!(null));
         assert_eq!(response["metrics"], serde_json::json!({}));
@@ -1234,7 +1160,7 @@ mod tests {
             &instance.join("versions").join("1.20.4-fabric0.92.2").join("1.20.4-fabric0.92.2.json"),
             json!({ "id": "1.20.4-fabric0.92.2", "inheritsFrom": "1.20.4" }),
         );
-        // Живой процесс: собственный pid тестового раннера.
+        // живой процесс: собственный pid тестового раннера.
         let pid = std::process::id() as i64;
         write_json(
             &instance.join(LIVE_STATE_FILE),
@@ -1253,15 +1179,15 @@ mod tests {
         // uptime = now - started_at; played = metadata(100) + live(10) + session(10)
         assert_eq!(response["session_seconds"], serde_json::json!(10));
         assert_eq!(response["played_seconds"], serde_json::json!(120));
-        // Контракт оверлея: в metrics ровно 5 полей; pid/running наружу
+        // контракт оверлея: в metrics ровно 5 полей; pid/running наружу
         // не отдаются.
         assert_eq!(response["metrics"]["cpu_percent"], serde_json::json!(0.0));
         assert!(response["metrics"]["pid"].is_null());
         assert!(response["metrics"]["storage_bytes"].as_u64().unwrap_or(0) > 0);
-        // Настройки оверлея приходят из settings.json как есть.
+        // настройки оверлея приходят из settings.json как есть.
         assert_eq!(response["overlay"]["hotkey_overlay"], serde_json::json!("Ctrl+O"));
         assert_eq!(response["overlay"]["enabled"], serde_json::json!(false));
-        // Моды отсортированы по полному пути в нижнем регистре:
+        // моды отсортированы по полному пути в нижнем регистре:
         // jei.disabled < sodium-1.20.4.jar.
         assert_eq!(response["mods"].as_array().map(Vec::len), Some(2));
         let jei = &response["mods"][0];
@@ -1294,7 +1220,7 @@ mod tests {
         let game = root.join("game");
         let recordings = game.join("recordings");
         fs::create_dir_all(&recordings).unwrap();
-        // Файл состояния пишет рекордер; pid живого процесса — наш.
+        // файл состояния пишет рекордер; pid живого процесса — наш.
         write_json(
             &recordings.join(RECORDING_STATE_FILE),
             json!({ "pid": std::process::id(), "file": "", "started_at": 500.0, "encoder": "h264_nvenc", "instance": "Test" }),
@@ -1303,7 +1229,7 @@ mod tests {
         assert_eq!(status["active"], serde_json::json!(true));
         assert_eq!(status["elapsed_seconds"], serde_json::json!(10));
         assert_eq!(status["encoder"], serde_json::json!("h264_nvenc"));
-        // Мёртвый pid — активность гаснет сама (ffmpeg крешнулся).
+        // мёртвый pid — активность гаснет сама (ffmpeg крешнулся).
         write_json(
             &recordings.join(RECORDING_STATE_FILE),
             json!({ "pid": 4_000_000, "file": "", "started_at": 500.0, "encoder": "", "instance": "" }),
@@ -1346,9 +1272,6 @@ mod tests {
         assert_eq!(directory_size(&root), 150);
     }
 
-    /// Сверка с эталонной реализацией на общем fixture: скрипт
-    /// scripts/parity_overlay_state.sh подставляет пути через переменные
-    /// окружения и сравнивает ответы. Без них тест пропускается.
     #[test]
     fn live_parity_fixture() {
         let (Ok(config), Ok(data), Ok(output)) = (

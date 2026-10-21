@@ -1,12 +1,15 @@
-// Общие константы лаунчера. Держать в синхроне с frontend/src/services/bridge.ts
+// общие константы лаунчера. Держать в синхроне с frontend/src/services/bridge.ts
 // (FRONTEND_BUILD_STAMP сверяется с bootstrap-ответом).
 pub const APP_ID: &str = "nivora-launcher";
 pub const APP_NAME: &str = "Nivora Launcher";
-pub const APP_VERSION: &str = "1.0.0";
-pub const BUILD_STAMP: &str = "r32";
+// держать в синхроне с pyproject.toml и Cargo.toml: рассинхрон версии
+// ломал User-Agent запросов и проверку обновлений (1.0.3 против 1.1.0).
+pub const APP_VERSION: &str = "1.1.0";
+pub const BUILD_STAMP: &str = "r40";
 
-// Собственный Azure public-client ID проекта (device-code flow).
-// Whitelisted для Nivora Launcher; ID Mojang и чужих лаунчеров не использовать.
+pub const GITHUB_RELEASES_API_URL: &str = "https://api.github.com/repos/vedrooou0/Nivora-launcher/releases/latest";
+pub const GITHUB_RELEASES_PAGE_URL: &str = "https://github.com/vedrooou0/Nivora-launcher/releases/latest";
+
 pub const DEFAULT_MSA_CLIENT_ID: &str = "ce777973-8920-4993-8b21-4a06dab23ba6";
 pub const LEGACY_MSA_CLIENT_IDS: &[&str] = &["00000000402b5328", "c36a9fb6-4f2a-41ff-90bd-ae7cc92031eb"];
 pub const MSA_LOGIN_API_URL: &str = "https://login.microsoftonline.com/consumers/oauth2/v2.0";
@@ -29,7 +32,7 @@ pub const MAX_SERVER_CONFIG_JSON_BYTES: u64 = 256 * 1024;
 
 pub const GITHUB_PLUGIN_TOPIC: &str = "nivora-launcher-plugin";
 
-/// Числовой ключ версии для сравнения поддерживаемого диапазона.
+/// числовой ключ версии для сравнения поддерживаемого диапазона.
 pub fn version_key(version: &str) -> Vec<i64> {
     let release = regex::Regex::new(r"^([0-9]+(?:\.[0-9]+){1,2})(?:-(?:snapshot|rc|pre)(?:-?[0-9]+)?)?\z").unwrap();
     if let Some(captures) = release.captures(version) {
@@ -55,6 +58,6 @@ pub fn is_supported_version(version: &str) -> bool {
         return true;
     }
     let key = version_key(version);
-    // Верхнюю границу не зашиваем: официальный manifest — источник истины.
+    // верхнюю границу не зашиваем: официальный manifest — источник истины.
     !key.is_empty() && key >= version_key("1.0")
 }

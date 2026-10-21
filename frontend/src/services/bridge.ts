@@ -1,7 +1,11 @@
 import { convertFileSrc, invoke } from '@tauri-apps/api/core'
+import type { FileBrowserListing } from './fileBrowser'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import type {
   AccountInfo,
+  AutoRepairFix,
+  AutoRepairReport,
+  AutoRepairResult,
   AnimationSettings,
   AppState,
   BedrockContentItem,
@@ -18,6 +22,9 @@ import type {
   InstanceLogArchiveReadResult,
   InstanceInfo,
   InstanceSettings,
+  InstanceVersionsPayload,
+  ShaderAnalyzeResult,
+  ShaderBenchmarkState,
   LoaderChoice,
   LoaderId,
   ModAuditPrepareResult,
@@ -36,6 +43,8 @@ import type {
   SecurityStatus,
   SkinProfile,
   SkinInfo,
+  RemoteReleaseInfo,
+  SkinExportResult,
   VersionInfo,
   PluginCatalog,
   ServerConfig,
@@ -50,8 +59,6 @@ import type {
   ModDependencyGraph,
   CrashReport,
   ResourceUpdate,
-  LanRoomCredentials,
-  LanRoomStatus,
   GitHubPluginDetails,
   GitHubPluginRepository,
   GitHubThemeRepository,
@@ -87,7 +94,7 @@ const fallbackSettings: SettingsInfo = {
   game_dir: '~/.local/share/nivora-launcher/game',
   java_path: '',
   security_profile: 'strict',
-  security_permissions: ['files:instance', 'desktop:display', 'desktop:audio'],
+  security_permissions: ['network:game', 'files:instance', 'desktop:display', 'desktop:audio'],
   memory: '8GiB',
   memory_kib: 8 * 1024 * 1024,
   memory_total_kib: 16 * 1024 * 1024,
@@ -104,8 +111,10 @@ const fallbackSettings: SettingsInfo = {
   auto_refresh_metadata: true,
   metadata_refresh_hours: 6,
   download_timeout_seconds: 30,
-  download_retries: 3,
+  download_retries: 5,
   confirm_destructive_actions: true,
+  auto_repair_enabled: true,
+  auto_repair_muted: [],
   show_activity_panel: true,
   show_toasts: true,
   minimize_on_launch: false,
@@ -119,6 +128,7 @@ const fallbackSettings: SettingsInfo = {
   launcher_profiles: [{ id: 'default', name: 'По умолчанию', memory: 'auto', java_path: '', graphics_mode: 'auto', account_id: 'auto', window_width: 1280, window_height: 720, fullscreen: false, quick_play_world: '', quick_play_server: '', jvm_arguments: [], game_arguments: [] }],
   active_launcher_profile_id: 'default',
   http_proxy: '',
+  download_source: 'auto',
   has_client_id: false,
   developer_mode: false,
   theme: 'dark',
@@ -140,8 +150,8 @@ const fallbackSettings: SettingsInfo = {
     page_duration_ms: 140,
     surface_duration_ms: 140,
     surface_stagger_ms: 0,
-    page_styles: { instances: 'fade', 'instance-settings': 'fade', accounts: 'fade', mods: 'fade', modpacks: 'fade', plugins: 'fade', 'lan-rooms': 'fade', themes: 'fade', settings: 'fade' },
-    page_durations_ms: { instances: 140, 'instance-settings': 140, accounts: 140, mods: 140, modpacks: 140, plugins: 140, 'lan-rooms': 140, themes: 140, settings: 140 },
+    page_styles: { instances: 'fade', 'instance-settings': 'fade', accounts: 'fade', mods: 'fade', modpacks: 'fade', plugins: 'fade', themes: 'fade', settings: 'fade' },
+    page_durations_ms: { instances: 140, 'instance-settings': 140, accounts: 140, mods: 140, modpacks: 140, plugins: 140, themes: 140, settings: 140 },
   } as AnimationSettings,
   overlay_settings: {
     enabled: true,
@@ -160,9 +170,9 @@ const fallbackSettings: SettingsInfo = {
     compact: false,
     show_clock: true,
     show_system_metrics: true,
+    metrics_gpu: true,
     metrics_cpu: true,
     metrics_ram: true,
-    metrics_gpu: true,
     metrics_disk: true,
     metrics_temperatures: true,
     system_metrics_display: 'overlay',
@@ -170,10 +180,11 @@ const fallbackSettings: SettingsInfo = {
   },
   backup_schedule: { enabled: false, interval_hours: 24, keep: 5, destination: 'local' },
   density: 'comfortable',
+  instance_layout: 'default',
   ui_scale: 100,
   radius_tokens: { card: 7, button: 8, control: 10 },
-    page_themes: { instances: 'inherit', 'instance-settings': 'inherit', accounts: 'inherit', mods: 'inherit', modpacks: 'inherit', plugins: 'inherit', 'lan-rooms': 'inherit', themes: 'inherit', settings: 'inherit' },
-    page_layouts: { instances: 'balanced', 'instance-settings': 'balanced', accounts: 'balanced', mods: 'wide', modpacks: 'wide', plugins: 'wide', 'lan-rooms': 'balanced', themes: 'wide', settings: 'balanced' },
+    page_themes: { instances: 'inherit', 'instance-settings': 'inherit', accounts: 'inherit', mods: 'inherit', modpacks: 'inherit', plugins: 'inherit', themes: 'inherit', settings: 'inherit' },
+    page_layouts: { instances: 'balanced', 'instance-settings': 'balanced', accounts: 'balanced', mods: 'wide', modpacks: 'wide', plugins: 'wide', themes: 'wide', settings: 'balanced' },
   widget_visibility: { 'instances.workspace': true, 'accounts.status': true, 'mods.context': true },
   color_tokens: {
     accent: '#8b653f', accent_strong: '#c5a274', background: '#191a17', panel: '#20221e', panel_raised: '#282a25', panel_soft: '#30322c',
@@ -246,7 +257,7 @@ function defaultMockInstanceSettings(): InstanceSettings {
     jvm_preset: 'none',
     console_colors: { error: '#ff657a', info: '#e6edf7', warning: '#f5c451' },
     security_profile: 'strict',
-    security_permissions: ['files:instance', 'desktop:display', 'desktop:audio'],
+    security_permissions: ['network:game', 'files:instance', 'desktop:display', 'desktop:audio'],
   }
 }
 
@@ -254,19 +265,14 @@ export function inTauri(): boolean {
   return typeof window !== 'undefined' && Boolean(window.__TAURI_INTERNALS__)
 }
 
-// Метка сборки интерфейса; бэкенд присылает свою в bootstrap (build_stamp).
-// Расхождение = в приложение подменили только Python-бэкенд (или наоборот),
-// и половина операций больше не согласована — показываем баннер, а не гадаем.
-export const FRONTEND_BUILD_STAMP = 'r38'
+export const FRONTEND_BUILD_STAMP = 'r40'
 
 function requestTimeout(operation: string): number | undefined {
   // bootstrap на холодном старте сканирует каталоги экземпляров: на
-  // медленных дисках и больших библиотеках 10 секунд не хватало, и
-  // пользователь видел «Backend timeout: bootstrap» на ровном месте
   if (operation === 'bootstrap') return 30000
   if (operation === 'bedrock_runtime_status') return 60000
   if (operation === 'bedrock_versions') return 120000
-  // Установка Bedrock и вход в Microsoft идут в фоновой нити бэкенда:
+  // установка Bedrock и вход в Microsoft идут в фоновой нити бэкенда:
   // сами операции стартуют мгновенно, состояние опрашивается отдельно
   if (operation === 'bedrock_setup_version' || operation === 'bedrock_store_login') return 30000
   if (operation === 'bedrock_setup_status' || operation === 'bedrock_store_login_status' || operation === 'bedrock_setup_cancel') return 15000
@@ -276,11 +282,11 @@ function requestTimeout(operation: string): number | undefined {
   if (operation === 'skin_profile' || operation === 'server_network_diagnose' || operation === 'server_network_open') return 120000
   if (operation === 'server_network_close' || operation === 'server_network_prepare') return 30000
   if (operation === 'versions' || operation === 'loader_choices' || operation === 'skins_list' || operation === 'java_options' || operation === 'java_validate' || operation === 'microsoft_login_status') return 30000
-  if (operation === 'instance_details' || operation === 'instance_log' || operation === 'instance_file_list' || operation === 'instance_file_read' || operation === 'instance_file_write' || operation === 'instance_file_mkdir' || operation === 'instance_file_delete' || operation === 'instance_log_archives' || operation === 'instance_log_archive_read' || operation === 'graphics_diagnostics' || operation === 'server_details' || operation === 'server_log') return 15000
+  if (operation === 'instance_details' || operation === 'instance_log' || operation === 'instance_file_list' || operation === 'instance_file_read' || operation === 'instance_file_write' || operation === 'instance_file_mkdir' || operation === 'instance_file_delete' || operation === 'instance_log_archives' || operation === 'instance_log_archive_read' || operation === 'instance_versions' || operation === 'shader_analyze' || operation === 'shader_benchmark_status' || operation === 'graphics_diagnostics' || operation === 'server_details' || operation === 'server_log') return 15000
   if (operation === 'external_instances_scan') return 30000
   if (operation === 'external_instance_import') return 2 * 60 * 1000
   if (operation === 'server_plugin_search' || operation === 'server_plugin_details' || operation === 'server_plugin_updates' || operation === 'server_core_versions' || operation === 'mods_details' || operation === 'mods_check_updates') return 30000
-  // Catalog search must always resolve: the backend worker is serial, and without a
+  // catalog search must always resolve: the backend worker is serial, and without a
   // deadline a stuck request would leave the search spinner spinning forever.
   if (operation === 'mods_search') return 60000
   if (operation === 'login_microsoft') return 15 * 60 * 1000
@@ -289,8 +295,15 @@ function requestTimeout(operation: string): number | undefined {
   if (operation === 'recording_start' || operation === 'recording_stop') return 45000
   if (operation === 'recording_status') return 15000
   if (operation === 'server_plugin_install' || operation === 'server_plugin_update' || operation === 'server_file_upload' || operation === 'server_upload_core' || operation === 'server_core_download' || operation === 'mods_update') return 10 * 60 * 1000
+  if (operation === 'world_import_chunk' || operation === 'world_import_begin' || operation === 'world_import_cancel' || operation === 'mods_remove_files') return 2 * 60 * 1000
+  if (operation === 'world_import_finish') return 20 * 60 * 1000
   if (operation === 'mod_audit_prepare') return 5 * 60 * 1000
   if (operation === 'mod_audit_accept') return 30 * 60 * 1000
+  // ярлыки и экспорт списка модов: локальные операции, но экспорт читает
+  // манифесты jar-файлов через nivora-turbo — на больших наборах не мгновенно.
+  if (operation === 'instance_shortcut_status' || operation === 'instance_shortcut_create' || operation === 'instance_shortcut_remove') return 15000
+  if (operation === 'shortcut_take_launch_request') return 10000
+  if (operation === 'instance_mod_list_export') return 60000
   return undefined
 }
 
@@ -428,7 +441,7 @@ async function mockRequest<T>(operation: string, payload: Record<string, unknown
   if (operation === 'plugin_install' || operation === 'plugin_set_enabled' || operation === 'plugin_uninstall') {
     throw new Error('Управление плагинами доступно только в desktop launcher')
   }
-  if (operation.startsWith('lan_session_') || operation.startsWith('github_plugin_')) {
+  if (operation.startsWith('github_plugin_')) {
     throw new Error('Эта функция доступна только в установленном desktop launcher')
   }
   if (operation === 'plugin_network_dns') return { host: String(payload.host || ''), port: payload.port ?? null, addresses: [] } as T
@@ -541,6 +554,7 @@ async function mockRequest<T>(operation: string, payload: Record<string, unknown
   if (operation === 'security_status') {
     return {
       platform: 'linux',
+      sandbox: 'none',
       bubblewrap: false,
       bubblewrap_path: '',
       strict_available: false,
@@ -580,8 +594,28 @@ async function mockRequest<T>(operation: string, payload: Record<string, unknown
     fallbackState.instances = [...fallbackState.instances.filter((item) => item.name !== name), instance]
     return { version_id: versionId, instance_dir: instance.path, instances: structuredClone(fallbackState.instances) } as T
   }
+  if (operation === 'instance_repair_version') {
+    const instance = fallbackState.instances.find((item) => item.name === String(payload.instance_name || ''))
+    if (!instance) throw new Error('Экземпляр не найден')
+    return { version_id: instance.version_id, instance_dir: instance.path, instances: structuredClone(fallbackState.instances) } as T
+  }
+  if (operation === 'auto_repair_diagnose') return { instance_name: String(payload.instance_name || ''), exit_code: null, issues: [], muted_issues: [], manual: Boolean(payload.manual) } as T
+  if (operation === 'auto_repair_apply') throw new Error('Авто-починка доступна только в desktop launcher')
+  if (operation === 'auto_repair_mute') {
+    const kinds = Array.isArray(payload.kinds) ? payload.kinds.map(String) : []
+    const current = fallbackSettings.auto_repair_muted
+    fallbackSettings.auto_repair_muted = payload.muted === false ? current.filter((kind) => !kinds.includes(kind)) : [...new Set([...current, ...kinds])]
+    return { settings: structuredClone(fallbackSettings) } as T
+  }
   if (operation === 'skins_list') return { skins: [] } as T
+  if (operation === 'check_remote_release') {
+    return { update_available: false, latest_version: '1.1.0', current_version: '1.1.0', release_url: '', published_at: '', notes: '', assets: [] } as T
+  }
+  if (operation === 'skins_export') return { path: '/tmp/skin.png', folder: '/tmp' } as T
   if (operation === 'instance_log') return { lines: [], running: false, metrics: { timestamp: Date.now() / 1000, pid: 0, running: false, uptime_seconds: 0, ram_bytes: 0, cpu_percent: 0, storage_bytes: 0, players: 0, max_players: 0, tps: 0 } } as T
+  if (operation === 'instance_versions') return { components: [], minecraft_version: '', loader: 'vanilla', loader_version: '', lwjgl_versions: [], library_overrides: {} } as InstanceVersionsPayload as T
+  if (operation === 'shader_analyze') return null as unknown as T
+  if (operation === 'shader_benchmark_status') return { phase: 'idle' } as ShaderBenchmarkState as T
   if (operation === 'instance_file_list') return { files: [] as InstanceFile[] } as T
   if (operation === 'instance_file_read') return { content: '', encoding: payload.encoding === 'base64' ? 'base64' : 'text' } as InstanceFileReadResult as T
   if (operation === 'instance_file_write') return { saved: true } as T
@@ -631,6 +665,10 @@ async function mockRequest<T>(operation: string, payload: Record<string, unknown
   if (operation === 'server_plugin_updates') return { updates: [], files: [] } as T
   if (operation === 'server_plugin_update') return { plugin: {}, files: [], catalog_id: String(payload.catalog_id || '') } as T
   if (operation === 'mods_details') return { details: {}, compatible_versions: [], catalog_id: String(payload.catalog_id || '') } as T
+  if (operation === 'instance_shortcut_status') return { supported: false, platform: 'web', desktop: { exists: false, path: '' }, menu: { exists: false, path: '' } } as T
+  if (operation === 'instance_shortcut_create' || operation === 'instance_shortcut_remove') throw new Error('Ярлыки доступны только в desktop launcher')
+  if (operation === 'shortcut_take_launch_request') return { name: null } as T
+  if (operation === 'instance_mod_list_export') return { content: '', format: String(payload.format || 'markdown'), count: 0, file_name: 'mods.md' } as T
   if (operation === 'mods_check_updates') return { updates: [], project_type: String(payload.project_type || 'mod'), instance_name: String(payload.instance_name || ''), catalog_id: String(payload.catalog_id || '') } as T
   if (operation === 'mods_update') return { project_id: String(payload.project_id || ''), name: '', version: '', version_id: '', file_name: '', dependencies: [], details: {}, instance_name: String(payload.instance_name || '') } as T
   return {} as T
@@ -673,11 +711,43 @@ export const bridge = {
   createOfflineAccount: (username: string) =>
     request<{ account: AccountInfo }>('create_offline_account', { username }),
   loginMicrosoft: () => request<{ account: AccountInfo; messages: string[] }>('login_microsoft'),
+  fsBrowse: (path?: string, options: { showHidden?: boolean } = {}) =>
+    request<FileBrowserListing>('fs_browse', { path, show_hidden: options.showHidden || undefined }),
+  fsReadFile: (path: string, offset = 0) =>
+    request<{ size: number; offset: number; length: number; eof: boolean; data: string }>('fs_read_file', { path, offset }),
+  loginEly: (username: string, password: string) =>
+    request<{ account: AccountInfo; messages: string[] }>('login_ely', { username, password }),
+  globalSearch: (query: string, signal?: AbortSignal) =>
+    request<{
+      query: string
+      total: number
+      results: {
+        mods: Array<{ instance: string; instance_kind: string; minecraft_version: string; name: string; path: string; enabled: boolean; size_bytes: number; kind: string }>
+        worlds: Array<{ instance: string; instance_kind: string; minecraft_version: string; name: string; path: string; kind: string }>
+        resourcepacks: Array<{ instance: string; instance_kind: string; minecraft_version: string; name: string; path: string; kind: string }>
+        shaderpacks: Array<{ instance: string; instance_kind: string; minecraft_version: string; name: string; path: string; kind: string }>
+      }
+    }>('global_search', { query }, signal),
   microsoftLoginStatus: () => request<{ status: string; code?: string; verification_uri?: string }>('microsoft_login_status'),
   deleteAccount: (accountId: string) => request<{ removed: boolean }>('delete_account', { account_id: accountId }),
   setDefaultAccount: (accountId: string) => request<{ account: AccountInfo; accounts: AccountInfo[] }>('set_default_account', { account_id: accountId }),
   moveAccount: (accountId: string, direction: 'up' | 'down') => request<{ accounts: AccountInfo[] }>('move_account', { account_id: accountId, direction }),
   deleteInstance: (name: string) => request<{ instances: InstanceInfo[] }>('delete_instance', { name }),
+  // ── Ярлыки экземпляра (рабочий стол / меню) и экспорт списка модов ──
+  instanceShortcutStatus: (name: string) =>
+    request<{
+      supported: boolean
+      platform: string
+      desktop: { exists: boolean; path: string }
+      menu: { exists: boolean; path: string }
+    }>('instance_shortcut_status', { name }),
+  instanceShortcutCreate: (name: string, location: 'desktop' | 'menu') =>
+    request<{ path: string; location: string; icon: string }>('instance_shortcut_create', { name, location }),
+  instanceShortcutRemove: (name: string, location?: 'desktop' | 'menu') =>
+    request<{ removed: string[] }>('instance_shortcut_remove', { name, location }),
+  shortcutTakeLaunchRequest: () => request<{ name: string | null }>('shortcut_take_launch_request'),
+  instanceModListExport: (name: string, format: 'markdown' | 'csv' | 'text' = 'markdown', includeDisabled = true) =>
+    request<{ content: string; format: string; count: number; file_name: string }>('instance_mod_list_export', { name, format, include_disabled: includeDisabled }),
   duplicateInstance: (source: string, target: string) =>
     request<{ instance: InstanceInfo }>('duplicate_instance', { source, target }),
   externalInstances: () => request<{ candidates: ExternalInstanceCandidate[] }>('external_instances_scan'),
@@ -829,10 +899,6 @@ export const bridge = {
   serverPluginUpdate: (name: string, fileName: string, catalogId: string, confirmUnverified = false) => request<{ plugin: { file_name: string; version: string; version_id: string; sha256: string; trusted_hash: boolean; updated?: boolean }; files: ServerFile[]; catalog_id: string }>('server_plugin_update', { name, file_name: fileName, catalog_id: catalogId, confirm_unverified: confirmUnverified }),
   serverPluginInstall: (name: string, projectId: string, catalogId?: string, confirmUnverified = false) => request<{ plugin: { file_name: string; path: string; version: string; sha256: string; trusted_hash: boolean }; files: ServerFile[]; catalog_id: string }>('server_plugin_install', { name, project_id: projectId, catalog_id: catalogId, confirm_unverified: confirmUnverified }),
   serverPluginRemove: (name: string, fileName: string) => request<{ removed: boolean; files: ServerFile[] }>('server_plugin_remove', { name, file_name: fileName }),
-  lanSessionCreate: (payload: LanRoomCredentials) => request<LanRoomStatus>('lan_session_create', { ...payload }),
-  lanSessionJoin: (payload: LanRoomCredentials) => request<LanRoomStatus>('lan_session_join', { ...payload }),
-  lanSessionStatus: (payload: LanRoomCredentials) => request<LanRoomStatus>('lan_session_status', { ...payload }),
-  lanSessionLeave: (payload: LanRoomCredentials) => request<{ left: boolean; room_name: string }>('lan_session_leave', { ...payload }),
   githubPluginSearch: (query = '', page = 1) => request<{ results: GitHubPluginRepository[]; page: number }>('github_plugin_search', { query, page }),
   githubPluginDetails: (owner: string, repo: string) => request<GitHubPluginDetails>('github_plugin_details', { owner, repo }),
   githubPluginInstall: (owner: string, repo: string, replace = false) => request<{ plugin: PluginManifest; plugins: PluginManifest[]; metadata: { full_name: string; version: string; size: number; sha256: string } }>('github_plugin_install', { owner, repo, replace }),
@@ -909,6 +975,7 @@ export const bridge = {
   pluginApiAuthorize: (pluginId: string, permission: PluginPermission, signal?: AbortSignal) => request<{ authorized: boolean }>('plugin_api_authorize', { plugin_id: pluginId, permission }, signal),
   pluginApiOpenExternal: (pluginId: string, url: string, signal?: AbortSignal) => request<{ opened: boolean }>('plugin_api_open_external', { plugin_id: pluginId, url }, signal),
   openExternal: (url: string, signal?: AbortSignal) => request<{ opened: boolean }>('open_external', { url }, signal),
+  checkRemoteRelease: (signal?: AbortSignal) => request<RemoteReleaseInfo>('check_remote_release', {}, signal),
   pluginApiFilesList: (pluginId: string, scope: 'plugin' | 'instance' | 'launcher-root-readonly', directory = '', instanceName = '', signal?: AbortSignal) =>
     request<{ files: PluginFileInfo[] }>('plugin_api_files_list', { plugin_id: pluginId, scope, directory, instance_name: instanceName }, signal),
   pluginApiFilesRead: (pluginId: string, scope: 'plugin' | 'instance' | 'launcher-root-readonly', path: string, instanceName = '', signal?: AbortSignal) =>
@@ -936,6 +1003,18 @@ export const bridge = {
   removeInstanceAsset: (name: string, kind: string, path: string) =>
     request<InstanceDetails>('remove_instance_asset', { name, kind, path }),
   toggleMod: (name: string, path: string, enabled: boolean) => request<InstanceDetails>('toggle_mod', { name, path, enabled }),
+  modsRemoveFiles: (name: string, paths: string[]) =>
+    request<{ removed: string[]; failed: Array<{ path: string; error: string }>; details: InstanceDetails }>('mods_remove_files', { name, paths }),
+  worldImportBegin: (name: string, kind: 'archive' | 'folder', label: string) =>
+    request<{ upload_id: string; chunk_bytes: number }>('world_import_begin', { name, kind, label }),
+  worldImportChunk: (name: string, uploadId: string, path: string, offset: number, data: string) =>
+    request<{ bytes: number; files: number }>('world_import_chunk', { name, upload_id: uploadId, path, offset, data }),
+  worldImportFinish: (name: string, uploadId: string) =>
+    request<{ imported: string[]; details: InstanceDetails }>('world_import_finish', { name, upload_id: uploadId }),
+  worldImportCancel: (name: string, uploadId: string) =>
+    request<{ cancelled: boolean }>('world_import_cancel', { name, upload_id: uploadId }),
+  worldImportPath: (name: string, path: string) =>
+    request<{ imported: string[] }>('world_import_path', { name, path }),
   modAuditPrepare: (instanceName: string, path: string, signal?: AbortSignal) =>
     request<ModAuditPrepareResult>('mod_audit_prepare', { instance_name: instanceName, path }, signal),
   modAuditAccept: (sessionId: string, signal?: AbortSignal) =>
@@ -957,6 +1036,20 @@ export const bridge = {
     replace_existing?: boolean
     fail_if_exists?: boolean
   }) => request<{ version_id: string; instance_dir: string; instances: InstanceInfo[] }>('install', payload),
+  repairInstanceVersion: (name: string, options: { version?: string; loader?: LoaderId; loader_version?: string } = {}) =>
+    request<{ version_id: string; instance_dir: string; instances: InstanceInfo[] }>('instance_repair_version', { instance_name: name, ...options }),
+  instanceVersions: (name: string, signal?: AbortSignal) =>
+    request<InstanceVersionsPayload>('instance_versions', { name }, signal),
+  instanceVersionOverrideSave: (name: string, overrides: Record<string, string>) =>
+    request<{ settings: InstanceSettings }>('instance_version_override_save', { name, overrides }),
+  instanceVersionImport: (name: string, fileName: string, data: string) =>
+    request<{ version_id: string; instances: InstanceInfo[] }>('instance_version_import', { name, file_name: fileName, data }),
+  shaderAnalyze: (name: string, shader: string, signal?: AbortSignal) =>
+    request<ShaderAnalyzeResult>('shader_analyze', { name, shader }, signal),
+  shaderBenchmarkStart: (name: string, shader: string) =>
+    request<{ started: boolean }>('shader_benchmark_start', { name, shader }),
+  shaderBenchmarkStatus: (name: string, signal?: AbortSignal) =>
+    request<ShaderBenchmarkState>('shader_benchmark_status', { name }, signal),
   launch: (payload: {
     version: string
     loader: LoaderId
@@ -967,12 +1060,20 @@ export const bridge = {
     account?: string
     profile_id?: string
     no_assets?: boolean
-  }) => request<{ exit_code: number; logs: string[]; version_id: string; crash?: CrashReport }>('launch', payload),
-  launchInstance: (name: string, options: { world?: string; server?: string; account?: string; profile_id?: string } = {}) =>
-    request<{ exit_code: number; logs: string[]; version_id: string; crash?: CrashReport }>('launch_instance', { name, ...options }),
+  }) => request<{ exit_code: number; logs: string[]; version_id: string; crash?: CrashReport; repair?: AutoRepairReport | null }>('launch', payload),
+  launchInstance: (name: string, options: { world?: string; server?: string; account?: string; profile_id?: string; native_bridge?: boolean } = {}) =>
+    request<{ exit_code: number; logs: string[]; version_id: string; crash?: CrashReport; repair?: AutoRepairReport | null }>('launch_instance', { name, ...options }),
+  /** Одноразовый токен запуска Java Edition (после чтения ядро его стирает). */
+  /** Статус завершившейся игры: код выхода, хвост лога, разбор краша. */
+  autoRepairDiagnose: (payload: { instance_name: string; exit_code?: number | null; error?: string; manual?: boolean }) =>
+    request<AutoRepairReport>('auto_repair_diagnose', payload),
+  autoRepairApply: (instanceName: string, fixes: AutoRepairFix[]) =>
+    request<{ instance_name: string; results: AutoRepairResult[]; instances: InstanceInfo[] }>('auto_repair_apply', { instance_name: instanceName, fixes }),
+  autoRepairMute: (kinds: string[], muted = true) =>
+    request<{ settings: SettingsInfo }>('auto_repair_mute', { kinds, muted }),
   openFolder: (path?: string) => request<{ opened: boolean }>('open_folder', { path }),
-  modsSearch: (payload: { query: string; instance_name?: string; game_version?: string; loader?: string; server_core?: string; project_type?: ProjectType; catalog_id?: string; sort_by?: CatalogSort }) =>
-    request<{ results: ModResult[]; instance_name: string; game_version: string; loader: string; server_core?: string; catalog_id?: string }>('mods_search', payload),
+  modsSearch: (payload: { query: string; instance_name?: string; game_version?: string; loader?: string; server_core?: string; project_type?: ProjectType; catalog_id?: string; sort_by?: CatalogSort; page?: number; limit?: number }) =>
+    request<{ results: ModResult[]; page?: number; page_size?: number; total?: number | null; has_more?: boolean; instance_name: string; game_version: string; loader: string; server_core?: string; catalog_id?: string }>('mods_search', payload),
   modsDetails: (payload: { project_id: string; instance_name?: string; game_version?: string; loader?: string; server_core?: string; project_type?: ProjectType; catalog_id?: string }) =>
     request<{ details: Record<string, unknown>; compatible_versions: { id: string; version_number: string; name: string; date_published: string; game_versions: string[]; loaders: string[] }[]; catalog_id: string }>('mods_details', payload),
   modsCheckUpdates: (instanceName: string, projectType: Exclude<ProjectType, 'plugin' | 'modpack'>, catalogId?: string) =>
@@ -1014,12 +1115,14 @@ export const bridge = {
   graphicsDiagnostics: () => request<Record<string, unknown>>('graphics_diagnostics'),
   skinsList: () => request<{ skins: SkinInfo[] }>('skins_list'),
   skinsImport: (fileName: string, data: string, model: 'classic' | 'slim') => request<{ skin: SkinInfo }>('skins_import', { file_name: fileName, data, model }),
+  skinsExport: (fileName: string, data: string) => request<SkinExportResult>('skins_export', { file_name: fileName, data }),
   skinProfile: (accountId: string) => request<SkinProfile>('skin_profile', { account_id: accountId }),
   applySkin: (accountId: string, skinId: string, model: 'classic' | 'slim') => request<{ ok: boolean }>('apply_skin', { account_id: accountId, skin_id: skinId, model }),
   clearSkin: (accountId: string) => request<{ ok: boolean }>('clear_skin', { account_id: accountId }),
   applyCape: (accountId: string, capeId: string) => request<{ ok: boolean }>('apply_cape', { account_id: accountId, cape_id: capeId }),
   clearCape: (accountId: string) => request<{ ok: boolean }>('clear_cape', { account_id: accountId }),
   openSkinsFolder: () => request<{ opened: boolean }>('open_skins_folder'),
+  skinsFolder: () => request<{ path: string }>('skins_folder'),
   importWallpaper: (fileName: string, data: string) => request<{ settings: SettingsInfo }>('wallpaper_import', { file_name: fileName, data }),
   clearWallpaper: () => request<{ settings: SettingsInfo }>('wallpaper_clear'),
   fileUrl: (path: string) => (inTauri() ? convertFileSrc(path) : path),

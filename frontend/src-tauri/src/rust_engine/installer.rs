@@ -1,13 +1,11 @@
-// Установка версии Minecraft в экземпляр: клиент, библиотеки с нативами,
-// assets (параллельная загрузка, fingerprint-маркеры против перекачки),
-// лог-конфиг. Каталоги проверяются на символические ссылки на каждом шаге —
-// версия ставится в staging и атомарно сменяет старую через renameat2.
+// установка версии Minecraft в экземпляр: клиент, библиотеки с нативами,
 use serde_json::{json, Map, Value};
 use std::cell::RefCell;
 use std::fs::{self, File};
 use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use super::config::ConfigStore;
@@ -15,7 +13,8 @@ use super::constants::MAX_INSTANCE_VERSION_JSON_BYTES;
 use super::instances::InstanceStore;
 use super::loaders::LoaderRepository;
 use super::metadata::{maven_path, merge_version_json, library_url, VersionRepository};
-use super::net::{client_from_settings, HttpClient};
+use super::net::{progress_client_from_settings, HttpClient};
+use super::platform_support::{canonical_path, simplify_path};
 use super::runtime::{safe_process_environment, JavaRuntimeManager};
 use super::state::safe_instance_name;
 
@@ -35,7 +34,7 @@ pub(crate) struct InstallResult {
 
 pub(crate) struct MinecraftInstaller {
     pub(crate) http: Arc<HttpClient>,
-    repository: VersionRepository,
+    repository: Mutex<VersionRepository>,
     loaders: LoaderRepository,
     runtime: JavaRuntimeManager,
     instances_root: PathBuf,
@@ -48,9 +47,9 @@ impl MinecraftInstaller {
         let instances_root = config.game_dir()?.join("instances");
         // load_existing сравнивает канонизированные пути — корень тоже
         // канонизируем, когда он уже существует.
-        let instances_root = instances_root.canonicalize().unwrap_or(instances_root);
+        let instances_root = canonical_path(&instances_root).unwrap_or(instances_root);
         Ok(Self {
-            repository: VersionRepository::new(config, Some(http.clone()))?,
+            repository: Mutex::new(VersionRepository::new(config, Some(http.clone()))?),
             loaders: LoaderRepository::new(http.clone()),
             runtime: JavaRuntimeManager::new(config, Some(http.clone()))?,
             instances_root,
@@ -67,6 +66,10 @@ impl MinecraftInstaller {
         }
     }
 
+    fn repository(&self) -> std::sync::MutexGuard<'_, VersionRepository> {
+        self.repository.lock().unwrap_or_else(|poison| poison.into_inner())
+    }
+
     pub(crate) fn install(
         &mut self,
         minecraft_version: &str,
@@ -76,7 +79,7 @@ impl MinecraftInstaller {
         assets: bool,
         replace_existing: bool,
     ) -> Result<InstallResult, String> {
-        let base = self.repository.resolve(minecraft_version)?;
+        let base = self.repository().resolve(minecraft_version)?;
         if loader == "forge" || loader == "neoforge" {
             let fallback = format!("{loader}-{minecraft_version}");
             let target = self.instance_dir(instance_name.unwrap_or(&fallback));
@@ -107,8 +110,6 @@ impl MinecraftInstaller {
         }
     }
 
-    /// Собрать запускаемый результат из уже лежащих в экземпляре файлов,
-    /// по ходу долечивая битое (repair_only).
     pub(crate) fn load_existing(&mut self, instance_dir: &Path, version_id: Option<&str>) -> Result<InstallResult, String> {
         let instance_dir = &instance_absolute(instance_dir);
         if instance_dir.as_path() == self.instances_root.as_path() || !within(instance_dir, &self.instances_root) || !instance_dir.is_dir() {
@@ -176,19 +177,25 @@ impl MinecraftInstaller {
         if version_json.get("mainClass").and_then(Value::as_str).unwrap_or("").is_empty() {
             let parent_id = version_json.get("inheritsFrom").and_then(Value::as_str).unwrap_or("").trim().to_owned();
             if !parent_id.is_empty() && parent_id != version_id {
-                // Профили forge/neoforge наследуют ванильный JSON: без
+                // профили forge/neoforge наследуют ванильный JSON: без
                 // родителя нет mainClass и половины classpath.
-                if let Ok(parent) = self.repository.resolve(&parent_id) {
+                if let Ok(parent) = self.repository().resolve(&parent_id) {
                     version_json = merge_version_json(&parent, &version_json);
                 }
             }
         }
         safe_version_id(&version_id)?;
-        let client_jar = self.download_client(instance_dir, &version_id, &version_json, true)?;
-        let natives_dir = metadata_path.parent().unwrap().join("natives");
-        let libraries = self.download_libraries(instance_dir, &version_json, &natives_dir, true)?;
-        let (asset_index_name, assets_root) = self.download_assets(instance_dir, &version_json, true, true)?;
-        let logging_file = self.download_logging(instance_dir, &version_json, Some(metadata_path.parent().unwrap()), true);
+        let version_dir = metadata_path.parent().unwrap().to_path_buf();
+        let natives_dir = version_dir.join("natives");
+        let (client_jar, libraries, (asset_index_name, assets_root), logging_file) = self.run_parallel_downloads(
+            instance_dir,
+            &version_id,
+            &version_json,
+            &natives_dir,
+            &version_dir,
+            true,
+            true,
+        )?;
         Ok(InstallResult {
             version_id,
             instance_dir: instance_dir.to_path_buf(),
@@ -198,7 +205,7 @@ impl MinecraftInstaller {
             natives_dir,
             assets_root,
             asset_index_name,
-            logging_file: logging_file.ok().flatten(),
+            logging_file,
         })
     }
 
@@ -218,11 +225,16 @@ impl MinecraftInstaller {
         text.push('\n');
         fs::write(&metadata_path, text).map_err(|error| format!("Не удалось записать {}: {error}", metadata_path.display()))?;
 
-        let client_jar = self.download_client(instance, version_id, version_json, false)?;
         let natives_dir = version_dir.join("natives");
-        let libraries = self.download_libraries(instance, version_json, &natives_dir, false)?;
-        let (asset_index_name, assets_root) = self.download_assets(instance, version_json, assets, false)?;
-        let logging_file = self.download_logging(instance, version_json, Some(&version_dir), false)?;
+        let (client_jar, libraries, (asset_index_name, assets_root), logging_file) = self.run_parallel_downloads(
+            instance,
+            version_id,
+            version_json,
+            &natives_dir,
+            &version_dir,
+            assets,
+            false,
+        )?;
         Ok(InstallResult {
             version_id: version_id.to_owned(),
             instance_dir: instance.to_path_buf(),
@@ -236,10 +248,56 @@ impl MinecraftInstaller {
         })
     }
 
+    // четыре независимые пачки файлов качаются одновременно: клиент, библиотеки,
+    // ассеты и лог-конфиг не зависят друг от друга, а последовательный прогон
+    // держал канал впустую — каждая стадия ждала окончания предыдущей.
+    fn run_parallel_downloads(
+        &self,
+        instance: &Path,
+        version_id: &str,
+        version_json: &Value,
+        natives_dir: &Path,
+        version_dir: &Path,
+        download_objects: bool,
+        repair_only: bool,
+    ) -> Result<(PathBuf, Vec<PathBuf>, (String, PathBuf), Option<PathBuf>), String> {
+        let journal: IntegrityJournalHandle = Arc::new(Mutex::new(IntegrityJournal::default()));
+        let outcome = std::thread::scope(|scope| {
+            let client = {
+                let journal = journal.clone();
+                scope.spawn(move || self.download_client(instance, version_id, version_json, repair_only, &journal))
+            };
+            let libraries = {
+                let journal = journal.clone();
+                scope.spawn(move || self.download_libraries(instance, version_json, natives_dir, repair_only, &journal))
+            };
+            let assets = scope.spawn(move || self.download_assets(instance, version_json, download_objects, repair_only));
+            let logging = {
+                let journal = journal.clone();
+                scope.spawn(move || self.download_logging(instance, version_json, Some(version_dir), repair_only, &journal))
+            };
+            let client = client.join().map_err(|_| "Поток загрузки клиента упал".to_owned()).and_then(|result| result);
+            let libraries = libraries.join().map_err(|_| "Поток загрузки библиотек упал".to_owned()).and_then(|result| result);
+            let assets = assets.join().map_err(|_| "Поток загрузки ассетов упал".to_owned()).and_then(|result| result);
+            let logging = logging.join().map_err(|_| "Поток загрузки лог-конфига упал".to_owned()).and_then(|result| result);
+            (client, libraries, assets, logging)
+        });
+        // сбрасываем журнал и при ошибке: докачанное должно остаться в кеше
+        let flush = journal.lock().unwrap_or_else(|poison| poison.into_inner()).flush(instance);
+        let (client, libraries, assets, logging) = outcome;
+        let client_jar = client?;
+        let libraries = libraries?;
+        let assets = assets?;
+        let logging_file = logging?;
+        flush?;
+        Ok((client_jar, libraries, assets, logging_file))
+    }
+
     fn download_managed_file(
         &self,
         instance: &Path,
-        state: &mut Map<String, Value>,
+        journal: &IntegrityJournalHandle,
+        state_dir: &Path,
         url: &str,
         destination: &Path,
         info: &Value,
@@ -248,7 +306,8 @@ impl MinecraftInstaller {
         assert_safe_cached_file(destination, instance)?;
         let metadata = integrity_metadata(info)?;
         if let Some(metadata) = &metadata {
-            if integrity_cache_matches(instance, destination, state, metadata) {
+            let state = journal.lock().unwrap_or_else(|poison| poison.into_inner()).snapshot(instance, state_dir)?;
+            if integrity_cache_matches(instance, destination, &state, metadata) {
                 return Ok((false, true));
             }
         }
@@ -257,16 +316,23 @@ impl MinecraftInstaller {
         }
         let downloaded = download_with_metadata(&self.http, url, destination, metadata.as_ref())?;
         if let Some(metadata) = &metadata {
-            let relative = relative_posix(destination, instance).ok_or_else(|| format!("Небезопасный путь файла экземпляра: {}", destination.display()))?;
-            state.insert(
-                relative,
-                json!({ "metadata": metadata, "fingerprint": file_fingerprint(destination)? }),
-            );
+            journal
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .record(instance, state_dir, destination, metadata)?;
         }
         Ok((downloaded, false))
     }
 
-    fn download_client(&mut self, instance: &Path, version_id: &str, version_json: &Value, repair_only: bool) -> Result<PathBuf, String> {
+    fn download_client(
+        &self,
+        instance: &Path,
+        version_id: &str,
+        version_json: &Value,
+        repair_only: bool,
+        journal: &IntegrityJournalHandle,
+    ) -> Result<PathBuf, String> {
+        super::events::emit_status(&format!("Загружаю клиент Minecraft {version_id}…"));
         safe_version_id(version_id)?;
         let version_dir = instance.join("versions").join(version_id);
         let destination = version_dir.join(format!("{version_id}.jar"));
@@ -274,12 +340,7 @@ impl MinecraftInstaller {
         if let Some(url) = info.get("url").and_then(Value::as_str).filter(|value| !value.is_empty()) {
             ensure_safe_directory(&version_dir, instance, "каталог версии")?;
             fs::create_dir_all(&version_dir).map_err(|error| format!("Не удалось создать каталог {}: {error}", version_dir.display()))?;
-            let mut state = read_integrity_state(instance, &version_dir)?;
-            let previous = state.clone();
-            self.download_managed_file(instance, &mut state, url, &destination, &info, repair_only)?;
-            if state != previous {
-                write_integrity_state(instance, &version_dir, &state)?;
-            }
+            self.download_managed_file(instance, journal, &version_dir, url, &destination, &info, repair_only)?;
             return Ok(destination);
         }
 
@@ -288,19 +349,20 @@ impl MinecraftInstaller {
             parent_id = version_json.get("inheritsFrom").and_then(Value::as_str).map(str::to_owned);
         }
         if let Some(parent_id) = parent_id.filter(|value| value != version_id) {
-            let parent = self.repository.resolve(&parent_id)?;
-            let parent_jar = self.download_client(instance, &parent_id, &parent, repair_only)?;
+            let parent = self.repository().resolve(&parent_id)?;
+            let parent_jar = self.download_client(instance, &parent_id, &parent, repair_only, journal)?;
             let parent_info = parent.pointer("/downloads/client").filter(|value| value.is_object()).cloned().unwrap_or_else(|| json!({}));
             let parent_metadata = integrity_metadata(&parent_info)?;
             let metadata = integrity_metadata(&info)?.or(parent_metadata.clone());
             assert_safe_cached_file(&destination, instance)?;
             if destination.is_file() && metadata.is_some() {
-                let mut state = read_integrity_state(instance, &version_dir)?;
                 let metadata = metadata.clone().unwrap();
+                let state = journal.lock().unwrap_or_else(|poison| poison.into_inner()).snapshot(instance, &version_dir)?;
                 if integrity_cache_matches(instance, &destination, &state, &metadata) || verify_with_metadata(&self.http, &destination, Some(&metadata)) {
-                    let relative = relative_posix(&destination, instance).unwrap_or_default();
-                    state.insert(relative, json!({ "metadata": metadata, "fingerprint": file_fingerprint(&destination)? }));
-                    write_integrity_state(instance, &version_dir, &state)?;
+                    journal
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner())
+                        .record(instance, &version_dir, &destination, &metadata)?;
                     return Ok(destination);
                 }
                 let _ = fs::remove_file(&destination);
@@ -315,10 +377,10 @@ impl MinecraftInstaller {
                     let _ = fs::remove_file(&destination);
                     return Err(format!("Inherited client jar не соответствует metadata версии {version_id}"));
                 }
-                let mut state = read_integrity_state(instance, &version_dir)?;
-                let relative = relative_posix(&destination, instance).unwrap_or_default();
-                state.insert(relative, json!({ "metadata": metadata, "fingerprint": file_fingerprint(&destination)? }));
-                write_integrity_state(instance, &version_dir, &state)?;
+                journal
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner())
+                    .record(instance, &version_dir, &destination, &metadata)?;
             }
             return Ok(destination);
         }
@@ -329,11 +391,12 @@ impl MinecraftInstaller {
             if let Some(metadata) = metadata {
                 ensure_safe_directory(&version_dir, instance, "каталог версии")?;
                 fs::create_dir_all(&version_dir).map_err(|error| format!("Не удалось создать каталог {}: {error}", version_dir.display()))?;
-                let mut state = read_integrity_state(instance, &version_dir)?;
+                let state = journal.lock().unwrap_or_else(|poison| poison.into_inner()).snapshot(instance, &version_dir)?;
                 if integrity_cache_matches(instance, &destination, &state, &metadata) || verify_with_metadata(&self.http, &destination, Some(&metadata)) {
-                    let relative = relative_posix(&destination, instance).unwrap_or_default();
-                    state.insert(relative, json!({ "metadata": metadata, "fingerprint": file_fingerprint(&destination)? }));
-                    write_integrity_state(instance, &version_dir, &state)?;
+                    journal
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner())
+                        .record(instance, &version_dir, &destination, &metadata)?;
                     return Ok(destination);
                 }
                 return Err(format!("Client jar повреждён, но для версии {version_id} нет URL загрузки"));
@@ -343,17 +406,33 @@ impl MinecraftInstaller {
         Err(format!("У версии {version_id} нет client download"))
     }
 
-    fn download_libraries(&mut self, instance: &Path, version_json: &Value, natives_dir: &Path, repair_only: bool) -> Result<Vec<PathBuf>, String> {
+    fn download_libraries(
+        &self,
+        instance: &Path,
+        version_json: &Value,
+        natives_dir: &Path,
+        repair_only: bool,
+        journal: &IntegrityJournalHandle,
+    ) -> Result<Vec<PathBuf>, String> {
+        super::events::emit_status("Загружаю библиотеки и нативы…");
         ensure_safe_directory(natives_dir, instance, "каталог native")?;
         let had_natives = natives_dir.is_dir();
         fs::create_dir_all(natives_dir).map_err(|error| format!("Не удалось создать каталог {}: {error}", natives_dir.display()))?;
         let version_dir = natives_dir.parent().unwrap().to_path_buf();
-        let mut state = read_integrity_state(instance, &version_dir)?;
-        let previous = state.clone();
+        let state = journal.lock().unwrap_or_else(|poison| poison.into_inner()).snapshot(instance, &version_dir)?;
         let mut libraries: Vec<PathBuf> = Vec::new();
         let mut needs_native_extraction = !repair_only || !had_natives;
+        // серверным экземплярам natives не нужны вовсе.
+        let bundle_natives = true;
         let empty_libraries = Vec::new();
         let entries = version_json.get("libraries").and_then(Value::as_array).unwrap_or(&empty_libraries);
+        struct LibraryJob {
+            url: String,
+            destination: PathBuf,
+            metadata: Option<Value>,
+        }
+        let mut jobs: Vec<LibraryJob> = Vec::new();
+        let mut seen_destinations: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
         for library in entries {
             if !library.is_object() || !rules_allow(library.get("rules")) {
                 continue;
@@ -367,6 +446,9 @@ impl MinecraftInstaller {
             let coordinates: Vec<&str> = name.split(':').collect();
             let native_only = coordinates.len() >= 4 && coordinates[3].starts_with("natives-");
             if native_only && artifact.is_some() {
+                if !bundle_natives {
+                    continue;
+                }
                 let artifact = artifact.unwrap();
                 let path = artifact.get("path").and_then(Value::as_str).filter(|value| !value.is_empty()).map(str::to_owned);
                 let path = match path {
@@ -375,14 +457,14 @@ impl MinecraftInstaller {
                 };
                 let native_destination = instance.join("libraries").join(safe_relative_path(&path, "native library")?);
                 let url = library_url(library, None)?;
-                let (downloaded, cached) = self.download_managed_file(instance, &mut state, &url, &native_destination, artifact, repair_only)?;
-                if downloaded || !cached {
-                    needs_native_extraction = true;
+                let metadata = integrity_metadata(artifact)?;
+                if self.library_file_ready(instance, &native_destination, metadata.as_ref(), repair_only, &state) {
+                    continue;
                 }
-                if needs_native_extraction {
-                    let excluded = extract_excludes(library);
-                    safe_extract(&native_destination, natives_dir, &excluded)?;
+                if !seen_destinations.insert(native_destination.clone()) {
+                    continue;
                 }
+                jobs.push(LibraryJob { url, destination: native_destination, metadata });
                 continue;
             }
             if artifact.is_some() || downloads.is_none() {
@@ -394,7 +476,11 @@ impl MinecraftInstaller {
                 };
                 let artifact_destination = instance.join("libraries").join(safe_relative_path(&path, "library")?);
                 let url = library_url(library, None)?;
-                self.download_managed_file(instance, &mut state, &url, &artifact_destination, &artifact_value, repair_only)?;
+                let metadata = integrity_metadata(&artifact_value)?;
+                let ready = self.library_file_ready(instance, &artifact_destination, metadata.as_ref(), repair_only, &state);
+                if !ready && seen_destinations.insert(artifact_destination.clone()) {
+                    jobs.push(LibraryJob { url, destination: artifact_destination.clone(), metadata });
+                }
                 if !native_only {
                     libraries.push(artifact_destination);
                 }
@@ -403,6 +489,9 @@ impl MinecraftInstaller {
             let platform_key = platform_key();
             let native_classifier = natives.and_then(|value| value.get(platform_key)).and_then(Value::as_str).map(str::to_owned);
             if let Some(native_classifier) = native_classifier {
+                if !bundle_natives {
+                    continue;
+                }
                 let classifier = native_classifier.replace("${arch}", "64");
                 let classifier_info = downloads
                     .and_then(|value| value.get("classifiers"))
@@ -417,23 +506,138 @@ impl MinecraftInstaller {
                 };
                 let native_destination = instance.join("libraries").join(safe_relative_path(&path, "native classifier")?);
                 let url = library_url(library, Some(&classifier))?;
-                let (downloaded, cached) = self.download_managed_file(instance, &mut state, &url, &native_destination, &classifier_info, repair_only)?;
-                if downloaded || !cached {
-                    needs_native_extraction = true;
+                let metadata = integrity_metadata(&classifier_info)?;
+                if self.library_file_ready(instance, &native_destination, metadata.as_ref(), repair_only, &state) {
+                    continue;
                 }
-                if needs_native_extraction {
-                    let excluded = extract_excludes(library);
+                if !seen_destinations.insert(native_destination.clone()) {
+                    continue;
+                }
+                jobs.push(LibraryJob { url, destination: native_destination, metadata });
+            }
+        }
+        // библиотеки качаем пулом: на высоколинентных каналах последовательные
+        // запросы к piston-data растягивают установку на минуты
+        if !jobs.is_empty() {
+            let workers = self.max_workers.min(16).max(4);
+            let queue = std::sync::Arc::new(std::sync::Mutex::new(jobs.into_iter()));
+            let failed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let first_error: std::sync::Arc<std::sync::Mutex<Option<String>>> = std::sync::Arc::new(std::sync::Mutex::new(None));
+            let mut downloaded: Vec<(PathBuf, Option<Value>, bool)> = Vec::new();
+            std::thread::scope(|scope| {
+                let mut handles = Vec::new();
+                for _ in 0..workers {
+                    let queue = queue.clone();
+                    let failed = failed.clone();
+                    let first_error = first_error.clone();
+                    let http = self.http.clone();
+                    handles.push(scope.spawn(move || -> Result<Vec<(PathBuf, Option<Value>, bool)>, String> {
+                        let mut done: Vec<(PathBuf, Option<Value>, bool)> = Vec::new();
+                        loop {
+                            if failed.load(std::sync::atomic::Ordering::Relaxed) {
+                                return Ok(done);
+                            }
+                            let job = { queue.lock().unwrap_or_else(|poison| poison.into_inner()).next() };
+                            let Some(job) = job else { return Ok(done) };
+                            let touched = match download_with_metadata(&http, &job.url, &job.destination, job.metadata.as_ref()) {
+                                Ok(touched) => touched,
+                                Err(error) => {
+                                    failed.store(true, std::sync::atomic::Ordering::Relaxed);
+                                    *first_error.lock().unwrap_or_else(|poison| poison.into_inner()) = Some(error);
+                                    return Ok(done);
+                                }
+                            };
+                            done.push((job.destination, job.metadata, touched));
+                        }
+                    }));
+                }
+                drop(queue);
+                for handle in handles {
+                    if let Ok(Ok(mut part)) = handle.join() {
+                        downloaded.append(&mut part);
+                    }
+                }
+            });
+            if let Some(error) = first_error.lock().unwrap_or_else(|poison| poison.into_inner()).take() {
+                return Err(error);
+            }
+            // integrity-записи копим в журнал: сброс на диск один, после пула
+            {
+                let mut journal_guard = journal.lock().unwrap_or_else(|poison| poison.into_inner());
+                for (destination, metadata, touched) in downloaded {
+                    if touched {
+                        needs_native_extraction = true;
+                    }
+                    if let Some(metadata) = &metadata {
+                        journal_guard.record(instance, &version_dir, &destination, metadata)?;
+                    }
+                }
+            }
+        }
+        // распаковка нативов поверх пула: отдельно, по списку классификаторов
+        if needs_native_extraction {
+            for library in entries {
+                if !library.is_object() || !rules_allow(library.get("rules")) {
+                    continue;
+                }
+                let name = library.get("name").and_then(Value::as_str).unwrap_or("");
+                if name.is_empty() {
+                    continue;
+                }
+                let downloads = library.get("downloads").filter(|value| value.is_object());
+                let artifact = downloads.and_then(|value| value.get("artifact")).filter(|value| value.is_object());
+                let coordinates: Vec<&str> = name.split(':').collect();
+                let native_only = coordinates.len() >= 4 && coordinates[3].starts_with("natives-");
+                let excluded = extract_excludes(library);
+                if native_only && artifact.is_some() {
+                    let artifact = artifact.unwrap();
+                    let path = artifact.get("path").and_then(Value::as_str).filter(|value| !value.is_empty()).map(str::to_owned);
+                    let path = match path {
+                        Some(path) => path,
+                        None => maven_path(name, None)?,
+                    };
+                    let native_destination = instance.join("libraries").join(safe_relative_path(&path, "native library")?);
+                    safe_extract(&native_destination, natives_dir, &excluded)?;
+                    continue;
+                }
+                let natives = library.get("natives").filter(|value| value.is_object());
+                let platform_key = platform_key();
+                let native_classifier = natives.and_then(|value| value.get(platform_key)).and_then(Value::as_str).map(str::to_owned);
+                if let Some(native_classifier) = native_classifier {
+                    let classifier = native_classifier.replace("${arch}", "64");
+                    let classifier_info = downloads
+                        .and_then(|value| value.get("classifiers"))
+                        .and_then(|value| value.get(&classifier))
+                        .filter(|value| value.is_object())
+                        .cloned()
+                        .unwrap_or_else(|| json!({}));
+                    let path = classifier_info.get("path").and_then(Value::as_str).filter(|value| !value.is_empty()).map(str::to_owned);
+                    let path = match path {
+                        Some(path) => path,
+                        None => maven_path(name, Some(&classifier))?,
+                    };
+                    let native_destination = instance.join("libraries").join(safe_relative_path(&path, "native classifier")?);
                     safe_extract(&native_destination, natives_dir, &excluded)?;
                 }
             }
         }
-        if state != previous {
-            write_integrity_state(instance, &version_dir, &state)?;
-        }
         Ok(libraries)
     }
 
-    fn download_assets(&mut self, instance: &Path, version_json: &Value, download_objects: bool, repair_only: bool) -> Result<(String, PathBuf), String> {
+    // файл библиотеки уже на месте и совпадает с метаданными — качать не надо
+    fn library_file_ready(&self, instance: &Path, destination: &Path, metadata: Option<&Value>, repair_only: bool, state: &Map<String, Value>) -> bool {
+        if let Some(metadata) = metadata {
+            if integrity_cache_matches(instance, destination, state, metadata) {
+                return true;
+            }
+        }
+        if repair_only && destination.is_file() && metadata.is_none() {
+            return true;
+        }
+        false
+    }
+
+    fn download_assets(&self, instance: &Path, version_json: &Value, download_objects: bool, repair_only: bool) -> Result<(String, PathBuf), String> {
         let assets_root = instance.join("assets");
         ensure_safe_directory(&assets_root, instance, "каталог assets")?;
         fs::create_dir_all(&assets_root).map_err(|error| format!("Не удалось создать каталог {}: {error}", assets_root.display()))?;
@@ -454,6 +658,7 @@ impl MinecraftInstaller {
         assert_safe_cached_file(&index_path, instance)?;
         let index_url = asset_index.get("url").and_then(Value::as_str).unwrap_or("");
         if !index_unchanged && !(repair_only && index_path.is_file() && index_metadata.is_none()) {
+            super::events::emit_status(&format!("Загружаю индекс ассетов {index_name}…"));
             download_with_metadata(&self.http, index_url, &index_path, index_metadata.as_ref())?;
         }
         let index_fingerprint = if index_path.is_file() { Some(file_fingerprint(&index_path)?) } else { None };
@@ -507,27 +712,55 @@ impl MinecraftInstaller {
             });
         }
         if !jobs.is_empty() {
-            // Пул как в Python: очередь работ, воркеры до max_downloads.
-            let workers = self.max_workers.min(32).max(1);
+            super::events::emit_status(&format!("Загружаю ассеты: {} файлов…", jobs.len()));
+            // ассеты — тысячи мелких файлов, поэтому воркеров больше, чем
+            // заявлено в настройках: держим 2x с потолком 32
+            let workers = (self.max_workers * 2).clamp(8, 32);
+            let total_jobs = jobs.len();
             let queue = Arc::new(std::sync::Mutex::new(jobs.into_iter()));
+            // после первой ошибки остальные потоки не берут новые файлы:
+            // иначе установка «висела», докачивая тысячи assets впустую.
+            let failed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            // счётчик готовых файлов: раз в 250 файлов сообщаем прогресс,
+            // иначе журнал ACTIVITY съедают тысячи одинаковых строк.
+            let completed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
             std::thread::scope(|scope| {
                 let mut handles = Vec::new();
                 for _ in 0..workers {
                     let queue = queue.clone();
+                    let failed = failed.clone();
+                    let completed = completed.clone();
                     let http = self.http.clone();
                     handles.push(scope.spawn(move || -> Result<(), String> {
                         loop {
-                            let job = { queue.lock().unwrap().next() };
+                            if failed.load(std::sync::atomic::Ordering::Relaxed) {
+                                return Ok(());
+                            }
+                            let job = { queue.lock().unwrap_or_else(|poison| poison.into_inner()).next() };
                             let Some(job) = job else { return Ok(()) };
-                            http.download(&job.url, &job.path, Some(&job.digest), None, None, job.size, None, None, None)?;
+                            if let Err(error) = http.download(&job.url, &job.path, Some(&job.digest), None, None, job.size, None, None, None) {
+                                failed.store(true, std::sync::atomic::Ordering::Relaxed);
+                                return Err(error);
+                            }
+                            let done = completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                            if done % 250 == 0 || done == total_jobs {
+                                super::events::emit_status(&format!("Ассеты: {done} из {total_jobs}"));
+                            }
                         }
                     }));
                 }
                 drop(queue);
+                let mut first_error: Option<String> = None;
                 for handle in handles {
-                    handle.join().map_err(|_| "Поток загрузки assets упал".to_owned())??;
+                    let outcome = handle.join().map_err(|_| "Поток загрузки assets упал".to_owned()).and_then(|result| result);
+                    if let Err(error) = outcome {
+                        first_error.get_or_insert(error);
+                    }
                 }
-                Ok::<(), String>(())
+                match first_error {
+                    Some(error) => Err(error),
+                    None => Ok::<(), String>(()),
+                }
             })?;
         }
         let materialized = materialize_legacy_assets(instance, &assets_root, &index_name, &index, marker_data.get("materialized"))?;
@@ -540,7 +773,14 @@ impl MinecraftInstaller {
         Ok((index_name, assets_root))
     }
 
-    fn download_logging(&mut self, instance: &Path, version_json: &Value, version_dir: Option<&Path>, repair_only: bool) -> Result<Option<PathBuf>, String> {
+    fn download_logging(
+        &self,
+        instance: &Path,
+        version_json: &Value,
+        version_dir: Option<&Path>,
+        repair_only: bool,
+        journal: &IntegrityJournalHandle,
+    ) -> Result<Option<PathBuf>, String> {
         let file_info = version_json
             .pointer("/logging/client/file")
             .filter(|value| value.is_object())
@@ -560,13 +800,8 @@ impl MinecraftInstaller {
         let version_dir = version_dir.ok_or_else(|| "Каталог версии недоступен".to_owned())?;
         ensure_safe_directory(version_dir, instance, "каталог версии")?;
         fs::create_dir_all(version_dir).map_err(|error| format!("Не удалось создать каталог {}: {error}", version_dir.display()))?;
-        let mut state = read_integrity_state(instance, version_dir)?;
-        let previous = state.clone();
         let url = file_info.get("url").and_then(Value::as_str).unwrap_or("");
-        self.download_managed_file(instance, &mut state, url, &destination, &file_info, repair_only)?;
-        if state != previous {
-            write_integrity_state(instance, version_dir, &state)?;
-        }
+        self.download_managed_file(instance, journal, version_dir, url, &destination, &file_info, repair_only)?;
         Ok(Some(destination))
     }
 
@@ -619,7 +854,7 @@ impl MinecraftInstaller {
         if let Some((local_json_path, local_json)) = find_external_version(&base.instance_dir, loader, loader_version, minecraft_version) {
             let parent_id = local_json.get("inheritsFrom").and_then(Value::as_str).map(str::to_owned);
             let resolved = match parent_id {
-                Some(parent) => merge_version_json(&self.repository.resolve(&parent)?, &local_json),
+                Some(parent) => merge_version_json(&self.repository().resolve(&parent)?, &local_json),
                 None => local_json,
             };
             let version_id = local_json_path.file_stem().map(|value| value.to_string_lossy().to_string()).unwrap_or_default();
@@ -643,6 +878,7 @@ impl MinecraftInstaller {
             .download_cache
             .join("installers")
             .join(format!("{}-{}.jar", safe_component(loader, "loader")?, safe_component(&loader_version, "loader version")?));
+        super::events::emit_status(&format!("Загружаю установщик {loader} {loader_version}…"));
         let validator = |url: &str| validate_loader_installer_url(url);
         self.http.download(
             &installer_url,
@@ -655,6 +891,7 @@ impl MinecraftInstaller {
             None,
             Some(&validator),
         )?;
+        super::events::emit_status(&format!("Запускаю установщик {loader} {loader_version}…"));
         let java = self.runtime.java_for(&base.version_json, None)?;
         let local_installer = base.instance_dir.join(format!(".trial-loader-installer-{loader}-{loader_version}.jar"));
         if is_symlink(&local_installer) {
@@ -689,11 +926,11 @@ impl MinecraftInstaller {
                         if is_symlink(&path) || is_symlink(&dir) {
                             continue;
                         }
-                        let resolved = match path.canonicalize() {
+                        let resolved = match canonical_path(&path) {
                             Ok(resolved) => resolved,
                             Err(_) => continue,
                         };
-                        let instance_root = base.instance_dir.canonicalize().unwrap_or_else(|_| base.instance_dir.clone());
+                        let instance_root = canonical_path(&base.instance_dir).unwrap_or_else(|_| base.instance_dir.clone());
                         if !within(&resolved, &instance_root) {
                             continue;
                         }
@@ -728,7 +965,7 @@ impl MinecraftInstaller {
         }
         let parent_id = local_json.get("inheritsFrom").and_then(Value::as_str).map(str::to_owned);
         let resolved = match parent_id {
-            Some(parent) => merge_version_json(&self.repository.resolve(&parent)?, &local_json),
+            Some(parent) => merge_version_json(&self.repository().resolve(&parent)?, &local_json),
             None => local_json,
         };
         let version_id = local_json_path.file_stem().map(|value| value.to_string_lossy().to_string()).unwrap_or_default();
@@ -770,14 +1007,55 @@ fn tail_text(stdout: &str, stderr: &str, limit: usize) -> String {
     }
 }
 
-/// forge/neoforge installer — внешний java-процесс. bwrap-песочница из
-/// security.py пока не портирована, поэтому процесс идёт в окружении
-/// compat: отдельная сессия, чистое окружение, каталог экземпляра.
+fn loader_installer_args(installer: &Path, target: &Path) -> Vec<String> {
+    vec![
+        "-jar".to_owned(),
+        simplify_path(installer.to_path_buf()).to_string_lossy().into_owned(),
+        "--installClient".to_owned(),
+        simplify_path(target.to_path_buf()).to_string_lossy().into_owned(),
+    ]
+}
+
+fn ensure_launcher_profiles(target: &Path) -> Result<(), String> {
+    let path = target.join("launcher_profiles.json");
+    if is_symlink(&path) {
+        return Err("launcher_profiles.json экземпляра является символьной ссылкой".to_owned());
+    }
+    if path.is_file() {
+        return Ok(());
+    }
+    fs::write(&path, "{\"profiles\":{},\"selectedProfile\":\"\",\"version\":3}\n")
+        .map_err(|error| format!("Не удалось подготовить launcher_profiles.json: {error}"))
+}
+
+fn read_stream_tail(mut stream: impl Read, limit: usize) -> String {
+    let mut tail: Vec<u8> = Vec::new();
+    let mut buffer = [0u8; 16 * 1024];
+    loop {
+        match stream.read(&mut buffer) {
+            Ok(0) | Err(_) => break,
+            Ok(count) => {
+                tail.extend_from_slice(&buffer[..count]);
+                if tail.len() > limit * 2 {
+                    let excess = tail.len() - limit;
+                    tail.drain(..excess);
+                }
+            }
+        }
+    }
+    if tail.len() > limit {
+        let excess = tail.len() - limit;
+        tail.drain(..excess);
+    }
+    String::from_utf8_lossy(&tail).into_owned()
+}
+
 fn run_loader_installer(loader: &str, java: &Path, installer: &Path, working_dir: &Path, http: &HttpClient) -> Result<ProcessOutput, String> {
-    use std::process::{Command, Stdio};
-    let mut command = Command::new(java);
+    use std::process::Stdio;
+    ensure_launcher_profiles(working_dir)?;
+    let mut command = super::platform::command(simplify_path(java.to_path_buf()));
     command
-        .args(["-jar", &installer.to_string_lossy(), "--installClient", "--target", &working_dir.to_string_lossy()])
+        .args(loader_installer_args(installer, working_dir))
         .current_dir(working_dir)
         .env_clear()
         .envs(safe_process_environment(false))
@@ -789,43 +1067,53 @@ fn run_loader_installer(loader: &str, java: &Path, installer: &Path, working_dir
         use std::os::unix::process::CommandExt;
         command.process_group(0);
     }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
     let mut child = command.spawn().map_err(|error| format!("Не удалось запустить installer: {error}"))?;
+    const OUTPUT_LIMIT: usize = 256 * 1024;
+    let stdout_reader = child.stdout.take().map(|stream| std::thread::spawn(move || read_stream_tail(stream, OUTPUT_LIMIT)));
+    let stderr_reader = child.stderr.take().map(|stream| std::thread::spawn(move || read_stream_tail(stream, OUTPUT_LIMIT)));
+    let collect = |reader: Option<std::thread::JoinHandle<String>>| reader.and_then(|handle| handle.join().ok()).unwrap_or_default();
     let deadline = Instant::now() + Duration::from_secs(10 * 60);
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                let mut stdout = String::new();
-                let mut stderr = String::new();
-                if let Some(mut stream) = child.stdout.take() {
-                    let _ = stream.read_to_string(&mut stdout);
-                }
-                if let Some(mut stream) = child.stderr.take() {
-                    let _ = stream.read_to_string(&mut stderr);
-                }
+                let stdout = collect(stdout_reader);
+                let stderr = collect(stderr_reader);
                 return Ok(ProcessOutput { success: status.success(), code: status.code(), stdout, stderr });
             }
             Ok(None) => {}
-            Err(error) => return Err(format!("Не удалось запустить installer: {error}")),
-        }
-        if let Some(token) = &http.cancellation {
-            if let Err(error) = token.check() {
+            Err(error) => {
                 let _ = child.kill();
-                return Err(error);
+                let _ = child.wait();
+                return Err(format!("Не удалось запустить installer: {error}"));
             }
         }
-        if Instant::now() >= deadline {
+        let failure = if let Some(Err(error)) = http.cancellation.as_ref().map(|token| token.check()) {
+            Some(error)
+        } else if Instant::now() >= deadline {
+            Some(format!("{loader} installer превысил лимит времени"))
+        } else {
+            None
+        };
+        if let Some(error) = failure {
             let _ = child.kill();
-            return Err(format!("{loader} installer превысил лимит времени"));
+            let _ = child.wait();
+            let _ = collect(stdout_reader);
+            let _ = collect(stderr_reader);
+            return Err(error);
         }
         std::thread::sleep(Duration::from_millis(250));
     }
 }
 
-// ------------------------- вспомогательные -------------------------
-
 fn instance_absolute(path: &Path) -> PathBuf {
     let expanded = shellexpand_home(path);
-    expanded.canonicalize().unwrap_or(expanded)
+    canonical_path(&expanded).unwrap_or(expanded)
 }
 
 fn shellexpand_home(path: &Path) -> PathBuf {
@@ -882,9 +1170,11 @@ fn platform_key() -> &'static str {
     }
     #[cfg(not(windows))]
     {
+        // и в natives, и в правилах Mojang платформа называется «osx» —
+        // не darwin и не macos.
         match std::env::consts::OS {
             "linux" => "linux",
-            "macos" => "darwin",
+            "macos" => "osx",
             other => other,
         }
     }
@@ -901,8 +1191,6 @@ fn truthy(value: Option<&Value>) -> bool {
     }
 }
 
-/// Поднимаемся от path к root: любая символическая ссылка по пути —
-/// небезопасно; выход за root — тоже.
 fn contains_symlink(path: &Path, root: &Path) -> bool {
     let mut current = path;
     loop {
@@ -968,7 +1256,7 @@ fn safe_relative_path(value: &str, label: &str) -> Result<PathBuf, String> {
     let normalized = value.replace('\\', "/");
     let relative = Path::new(&normalized);
     if relative.is_absolute() || normalized.is_empty() || normalized.split('/').any(|part| part.is_empty() || part == ".." || part == ".") {
-        // Python пропускает только «..» и абсолютные; пустые части между
+        // python пропускает только «..» и абсолютные; пустые части между
         // слешами Path нормализует, мы отвергаем сразу — строже и предсказуемее.
         if relative.is_absolute() || normalized.split('/').any(|part| part == "..") {
             return Err(format!("Небезопасный путь {label}: {value}"));
@@ -981,8 +1269,6 @@ fn safe_relative_path(value: &str, label: &str) -> Result<PathBuf, String> {
     Ok(parts.iter().collect::<PathBuf>())
 }
 
-/// Метаданные целостности из записи манифеста: подмножество
-/// {sha1,sha256,sha512,size} с нижним регистром хешей.
 fn integrity_metadata(info: &Value) -> Result<Option<Value>, String> {
     let mut metadata = Map::new();
     for algorithm in ["sha1", "sha256", "sha512"] {
@@ -1001,6 +1287,46 @@ fn integrity_metadata(info: &Value) -> Result<Option<Value>, String> {
         metadata.insert("size".into(), json!(size));
     }
     Ok(if metadata.is_empty() { None } else { Some(Value::Object(metadata)) })
+}
+
+// стадии загрузки идут параллельно и делят общий .trial-integrity каталога
+// версии: журнал читает его один раз, копит записи в памяти и сбрасывает на
+// диск в конце прогона — иначе последняя запись затирала бы чужие.
+#[derive(Default)]
+struct IntegrityJournal {
+    states: HashMap<PathBuf, Map<String, Value>>,
+    dirty: HashSet<PathBuf>,
+}
+
+type IntegrityJournalHandle = Arc<Mutex<IntegrityJournal>>;
+
+impl IntegrityJournal {
+    fn snapshot(&mut self, instance: &Path, dir: &Path) -> Result<Map<String, Value>, String> {
+        if !self.states.contains_key(dir) {
+            let state = read_integrity_state(instance, dir)?;
+            self.states.insert(dir.to_path_buf(), state);
+        }
+        Ok(self.states.get(dir).cloned().unwrap_or_default())
+    }
+
+    fn record(&mut self, instance: &Path, dir: &Path, destination: &Path, metadata: &Value) -> Result<(), String> {
+        let relative = relative_posix(destination, instance)
+            .ok_or_else(|| format!("Небезопасный путь файла экземпляра: {}", destination.display()))?;
+        let fingerprint = file_fingerprint(destination)?;
+        let state = self.states.entry(dir.to_path_buf()).or_default();
+        state.insert(relative, json!({ "metadata": metadata, "fingerprint": fingerprint }));
+        self.dirty.insert(dir.to_path_buf());
+        Ok(())
+    }
+
+    fn flush(&mut self, instance: &Path) -> Result<(), String> {
+        for dir in std::mem::take(&mut self.dirty) {
+            if let Some(state) = self.states.get(&dir) {
+                write_integrity_state(instance, &dir, state)?;
+            }
+        }
+        Ok(())
+    }
 }
 
 fn download_with_metadata(http: &HttpClient, url: &str, destination: &Path, metadata: Option<&Value>) -> Result<bool, String> {
@@ -1158,7 +1484,7 @@ fn rule_matches(rule: &Value) -> bool {
         }
     }
     if let Some(features) = rule.get("features").and_then(Value::as_object) {
-        // Лаунчер — обычный десктопный клиент, флаговые сборки не поддержаны.
+        // лаунчер — обычный десктопный клиент, флаговые сборки не поддержаны.
         if features.values().any(|value| truthy(Some(value))) {
             return false;
         }
@@ -1199,8 +1525,6 @@ fn extract_excludes(library: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Распаковка native-архива с лимитами: не более 256 МиБ на файл,
-/// 1 ГиБ суммарно, без символьных ссылок и выходов за каталог.
 fn safe_extract(archive: &Path, destination: &Path, excluded: &[String]) -> Result<(), String> {
     if is_symlink(destination) {
         return Err("Каталог native archive является символьной ссылкой".to_owned());
@@ -1246,7 +1570,7 @@ fn extract_member(item: &mut zip::read::ZipFile<'_>, destination: &Path, parts: 
     if root < 0 {
         return Err(format!("Каталог native archive недоступен: {}", destination.display()));
     }
-    // Спускаемся по цепочке каталогов, создавая недостающие (mkdirat).
+    // спускаемся по цепочке каталогов, создавая недостающие (mkdirat).
     let mut parent = root;
     let mut opened = vec![root];
     for part in &parts[..parts.len() - 1] {
@@ -1291,7 +1615,9 @@ fn extract_member(item: &mut zip::read::ZipFile<'_>, destination: &Path, parts: 
 
 #[cfg(not(unix))]
 fn extract_member(item: &mut zip::read::ZipFile<'_>, destination: &Path, parts: &[&str], total_size: &u64) -> Result<u64, String> {
-    let target = parts.iter().collect::<PathBuf>();
+    // Путь строится от каталога natives: раньше он собирался относительно
+    // текущего каталога процесса, и natives на Windows ложились «не туда».
+    let target = parts.iter().fold(destination.to_path_buf(), |path, part| path.join(part));
     let parent = target.parent().unwrap_or(destination);
     fs::create_dir_all(parent).map_err(|error| format!("Не удалось создать каталог: {error}"))?;
     let mut output = File::create(&target).map_err(|error| error.to_string())?;
@@ -1415,8 +1741,6 @@ fn write_asset_marker(
     fs::write(marker, text).map_err(|error| format!("Файл состояния assets недоступен: {error}"))
 }
 
-/// Legacy-схемы assets (virtual / map_to_resources): объекты раскладываются
-/// по человекочитаемым путям поверх копий из objects.
 fn materialize_legacy_assets(instance: &Path, assets_root: &Path, index_name: &str, index: &Value, cached: Option<&Value>) -> Result<Map<String, Value>, String> {
     let destination_root = if index.get("virtual").and_then(Value::as_bool).unwrap_or(false) {
         assets_root.join("virtual").join(index_name)
@@ -1487,7 +1811,7 @@ fn find_external_version(instance: &Path, loader: &str, loader_version: Option<&
     if is_symlink(instance) || !instance.is_dir() {
         return None;
     }
-    let instance_root = instance.canonicalize().ok()?;
+    let instance_root = canonical_path(instance).ok()?;
     let versions_dir = instance.join("versions");
     if is_symlink(&versions_dir) || !versions_dir.is_dir() {
         return None;
@@ -1519,7 +1843,7 @@ fn find_external_version(instance: &Path, loader: &str, loader_version: Option<&
             if is_symlink(&path) || is_symlink(&dir) {
                 continue;
             }
-            let Ok(resolved) = path.canonicalize() else { continue };
+            let Ok(resolved) = canonical_path(&path) else { continue };
             if !within(&resolved, &instance_root) {
                 continue;
             }
@@ -1563,8 +1887,6 @@ fn rebase_install_result(result: InstallResult, source: &Path, destination: &Pat
     }
 }
 
-/// Смена staging ↔ target: если есть renameat2(RENAME_EXCHANGE) — атомарно,
-/// иначе через резервную копию с откатом.
 fn swap_staged_directory(staging: &Path, target: &Path) -> Result<Option<PathBuf>, String> {
     if target.symlink_metadata().is_err() {
         fs::rename(staging, target).map_err(|error| format!("Не удалось установить экземпляр: {error}"))?;
@@ -1620,8 +1942,6 @@ fn remove_instance_path(path: &Path) -> Result<(), String> {
     }
 }
 
-/// Уникальный суффикс имён временных файлов: уникальность достаточна,
-/// криптографичность не нужна.
 fn random_hex(bytes: usize) -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -1649,8 +1969,6 @@ fn random_hex(bytes: usize) -> String {
     })
 }
 
-// ------------------------------ операция ------------------------------
-
 pub fn install(request: &Value) -> Result<Value, String> {
     let mut config = ConfigStore::load()?;
     let store = InstanceStore::new(&config)?;
@@ -1675,12 +1993,17 @@ pub fn install(request: &Value) -> Result<Value, String> {
         config.set_values(&json!({ "memory": memory }))?;
     }
     let operation_id = request.get("operation_id").and_then(Value::as_str).unwrap_or("");
-    let http = client_from_settings(config.settings(), operation_id)?;
+    // клиент с наблюдателями прогресса: панель ACTIVITY видит загрузки
+    let http = progress_client_from_settings(config.settings(), operation_id)?;
     let mut installer = MinecraftInstaller::new(&config, http)?;
     let loader_version = request.get("loader_version").and_then(Value::as_str).filter(|value| !value.is_empty());
     let instance_name = request.get("instance_name").and_then(Value::as_str).filter(|value| !value.is_empty());
     let loader = request.get("loader").and_then(Value::as_str).unwrap_or("vanilla");
     let version = request.get("version").and_then(Value::as_str).unwrap_or("");
+    super::events::emit_status(&format!(
+        "Устанавливаю Minecraft {version}{}…",
+        if loader == "vanilla" { String::new() } else { format!(" · {}", loader) }
+    ));
     let result = installer.install(
         version,
         loader,
@@ -1689,6 +2012,7 @@ pub fn install(request: &Value) -> Result<Value, String> {
         !truthy(request.get("no_assets")),
         truthy(request.get("replace_existing")),
     )?;
+    super::events::emit_status_event("operation-finished", "Экземпляр установлен.");
     let list: Vec<Value> = store.list().iter().map(|info| info.public()).collect();
     Ok(json!({
         "version_id": result.version_id,
@@ -1706,6 +2030,34 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).expect("создать временный каталог");
         dir
+    }
+
+    #[test]
+    fn loader_installer_uses_install_client_directory_argument() {
+        let args = loader_installer_args(Path::new("/x/installer.jar"), Path::new("/x/instance"));
+        assert_eq!(args, vec!["-jar", "/x/installer.jar", "--installClient", "/x/instance"]);
+        assert!(!args.iter().any(|value| value == "--target"));
+    }
+
+    #[test]
+    fn launcher_profiles_is_created_once() {
+        let root = temp_root("launcher-profiles");
+        ensure_launcher_profiles(&root).unwrap();
+        let path = root.join("launcher_profiles.json");
+        let value: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(value["profiles"].is_object());
+        fs::write(&path, "{\"profiles\":{\"keep\":{}}}").unwrap();
+        ensure_launcher_profiles(&root).unwrap();
+        assert!(fs::read_to_string(&path).unwrap().contains("keep"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn stream_tail_keeps_only_last_bytes() {
+        let data = vec![b'a'; 100_000].into_iter().chain(b"END".iter().copied()).collect::<Vec<u8>>();
+        let tail = read_stream_tail(std::io::Cursor::new(data), 10);
+        assert_eq!(tail.len(), 10);
+        assert!(tail.ends_with("END"));
     }
 
     #[test]
@@ -1766,7 +2118,7 @@ mod tests {
         let inner = root.join("instance");
         fs::create_dir_all(&inner).unwrap();
         assert!(!contains_symlink(&inner, &root));
-        // Путь вне root останавливает подъём к корню.
+        // путь вне root останавливает подъём к корню.
         assert!(contains_symlink(Path::new("/etc/passwd"), &root));
         #[cfg(unix)]
         {
@@ -1774,8 +2126,6 @@ mod tests {
             assert!(is_symlink(&root.join("link")));
         }
         // «..»-суффикс лексически внутри root — как в Python, подъём по
-        // parent() сворачивает его раньше сравнения; реальную защиту даёт
-        // канонизация пути в load_existing.
         assert!(!contains_symlink(&root.join(".."), &root));
         let _ = fs::remove_dir_all(&root);
     }
@@ -1824,5 +2174,3 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 }
-
-

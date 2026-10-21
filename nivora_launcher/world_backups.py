@@ -1,9 +1,4 @@
-"""Резервные копии миров по расписанию: локально и на WebDAV.
-
-Копируется только игровое содержимое (saves/ у клиента, world* у сервера),
-без служебных файлов лаунчера. Расписание — глобальные настройки по умолчанию
-плюс переопределение на экземпляр.
-"""
+"""резервные копии миров по расписанию: локально и на WebDAV."""
 from __future__ import annotations
 
 import json
@@ -24,13 +19,10 @@ MAX_BACKUP_FILE_BYTES = 512 * 1024 * 1024
 MAX_BACKUP_FILES = 100_000
 SERVER_WORLD_NAMES = ("world", "world_nether", "world_the_end")
 
-
 class WorldBackupStore:
     def __init__(self, config: ConfigStore, instances: InstanceStore) -> None:
         self.config = config
         self.instances = instances
-
-    # ── расписание ────────────────────────────────────────────────────────
 
     @staticmethod
     def _normalize_instance_schedule(value: dict[str, Any]) -> dict[str, Any]:
@@ -64,8 +56,6 @@ class WorldBackupStore:
         current["override"] = bool(stored.get("override", False))
         self._write_config(info.path, current)
         return self.schedule(name)
-
-    # ── копии ─────────────────────────────────────────────────────────────
 
     def local_root(self, name: str) -> Path:
         info = self.instances.get(name)
@@ -165,8 +155,6 @@ class WorldBackupStore:
             path.unlink()
         return {"backups": self.list(name)}
 
-    # ── планировщик ───────────────────────────────────────────────────────
-
     def run_due(self, *, running_check: Callable[[str], bool], emit: Callable[[dict[str, Any]], None] | None = None) -> None:
         for info in self.instances.list():
             if info.game_edition != "java":
@@ -192,8 +180,6 @@ class WorldBackupStore:
                 self.set_schedule(info.name, {"last_run": time.time(), "last_error": str(exc)})
                 if emit:
                     emit({"kind": "status", "event": "world-backup-failed", "instance_name": info.name, "message": f"Резервная копия не создана: {exc}"})
-
-    # ── внутреннее ────────────────────────────────────────────────────────
 
     def _read_config(self, instance_path: Path) -> dict[str, Any]:
         path = instance_path / BACKUP_CONFIG_FILE

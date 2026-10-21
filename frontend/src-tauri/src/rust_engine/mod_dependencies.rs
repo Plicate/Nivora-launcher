@@ -1,7 +1,4 @@
-// Дерево зависимостей модов по манифестам внутри jar-файлов.
-// Читаем fabric.mod.json, quilt.mod.json, META-INF/mods.toml и mcmod.info —
-// без сети, поэтому граф строится даже для локальных модов. Идентификаторы
-// загрузчика и игры (minecraft, fabricloader, java) отфильтрованы как шум.
+// дерево зависимостей модов по манифестам внутри jar-файлов.
 use regex::Regex;
 use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet};
@@ -110,7 +107,7 @@ fn read_zip_member(archive: &mut zip::ZipArchive<File>, name: &str) -> Vec<u8> {
         return Vec::new();
     }
     let mut buffer = Vec::new();
-    // Ограничение ещё и на чтение: заголовок size в архиве мог солгать.
+    // ограничение ещё и на чтение: заголовок size в архиве мог солгать.
     let mut limited = entry.take(MAX_MANIFEST_BYTES + 1);
     if limited.read_to_end(&mut buffer).is_err() || buffer.len() as u64 > MAX_MANIFEST_BYTES {
         return Vec::new();
@@ -219,7 +216,7 @@ fn toml_manifest(raw: &[u8]) -> Option<Value> {
     let version = re_toml_version().captures(&text).and_then(|captures| captures.get(1)).map(|m| m.as_str().to_owned());
     let loader = if text.to_lowercase().contains("neoforge") { "neoforge" } else { "forge" };
     let mut dependencies: Vec<Value> = Vec::new();
-    // Тело блока — до следующей строки с «[» (эквивалент lookahead из Python).
+    // тело блока — до следующей строки с «[» (эквивалент lookahead из Python).
     let markers: Vec<usize> = re_toml_block_start().find_iter(&text).map(|found| found.end()).collect();
     for start in markers {
         let body_end = text[start..]
@@ -458,7 +455,7 @@ pub(crate) fn dependency_graph(mods_directory: &Path) -> Result<Value, String> {
     Ok(json!({ "nodes": nodes, "edges": edges, "missing": missing }))
 }
 
-/// Что сломается, если удалить мод: обратный обход по рёбрам.
+/// что сломается, если удалить мод: обратный обход по рёбрам.
 pub(crate) fn removal_impact(graph: &Value, mod_id: &str) -> Value {
     let mut reverse: HashMap<String, Vec<String>> = HashMap::new();
     if let Some(edges) = graph.get("edges").and_then(Value::as_array) {
@@ -490,8 +487,6 @@ pub(crate) fn removal_impact(graph: &Value, mod_id: &str) -> Value {
     json!({ "mod_id": mod_id, "breaks": broken })
 }
 
-// ------------------------------------------------------ Операции GUI ----
-
 pub fn mod_dependency_graph(request: &Value) -> Result<Value, String> {
     let name = request.get("name").and_then(Value::as_str).unwrap_or_default();
     let config = ConfigStore::load()?;
@@ -511,8 +506,6 @@ pub fn mod_removal_impact(request: &Value) -> Result<Value, String> {
     let graph = dependency_graph(&info.path.join("mods"))?;
     Ok(removal_impact(&graph, request.get("mod_id").and_then(Value::as_str).unwrap_or_default()))
 }
-
-// ----------------------------------------------------------- Тесты ----
 
 #[cfg(test)]
 mod tests {
@@ -606,8 +599,6 @@ type="optional"
         assert_eq!(deps[0]["optional"], json!(false));
         assert_eq!(deps[1]["optional"], json!(true));
 
-        // Loader определяется по содержимому TOML, а не по имени файла —
-        // без слова neoforge в тексте даже neoforge.mods.toml даёт forge.
         let neo_jar = root.join("neoforge.jar");
         make_jar(&neo_jar, &[("META-INF/neoforge.mods.toml", "modId=\"neothing\"\n[[dependencies.neoforge]]\nmodId=\"neoforge\"\ntype=\"required\"\n")]);
         let manifest = read_mod_manifest(&neo_jar).unwrap();
@@ -646,7 +637,7 @@ type="optional"
         )
         .unwrap();
 
-        // Как и в Python, sidecar-файл сам попадает в узлы графа — фильтрует UI.
+        // как и в Python, sidecar-файл сам попадает в узлы графа — фильтрует UI.
         let graph = dependency_graph(&mods).unwrap();
         let nodes = graph["nodes"].as_array().unwrap();
         let ids: Vec<&str> = nodes.iter().map(|node| node["id"].as_str().unwrap()).collect();

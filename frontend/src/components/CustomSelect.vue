@@ -39,11 +39,6 @@ function closeOnOutside(event: MouseEvent) {
   open.value = false
 }
 
-// Масштаб интерфейса (--ui-scale) вешается на body как CSS `zoom`, а меню
-// телепортировано в body и позиционируется `fixed`. Формула «делим на масштаб»
-// расходилась с реальным движком (Chromium и WebKitGTK трактуют zoom по-разному),
-// поэтому меню калибруется по факту: ставим его в видимых пикселях, измеряем,
-// какой коэффициент реально применил движок, и пересчитываем координаты один раз.
 function uiScaleGuess(): number {
   const value = Number.parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--ui-scale'))
   return Number.isFinite(value) && value > 0 ? value : 1
@@ -100,7 +95,7 @@ async function updatePosition() {
   await nextTick()
   const element = menu.value
   if (!element || box.width <= 0) return
-  // Фактический коэффициент: видимая ширина меню делить на заданную в CSS ширину
+  // фактический коэффициент: видимая ширина меню делить на заданную в CSS ширину
   const visibleWidth = element.getBoundingClientRect().width
   const actual = guess * visibleWidth / box.width
   if (Number.isFinite(actual) && actual > 0.2 && actual < 5 && Math.abs(actual - guess) > 0.005) applyBox(box, actual)

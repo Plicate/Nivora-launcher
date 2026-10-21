@@ -24,15 +24,13 @@ from .errors import LauncherError
 from .loaders import LoaderRepository
 from .metadata import VersionRepository, maven_path, merge_version_json, safe_instance_name
 from .net import HttpClient, verify_file
-from .platform_support import is_reparse_point, process_start_options, set_private_fd
+from .platform_support import is_reparse_point, mojang_os_name, process_start_options, set_private_fd
 from .portable_fs import regular_file, safe_path
 from .runtime import JavaRuntimeManager, safe_process_environment
 from .security import prepare_process
 
-
 _DIRECTORY_OPEN_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
 _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
-
 
 @dataclass
 class InstallResult:
@@ -45,7 +43,6 @@ class InstallResult:
     assets_root: Path
     asset_index_name: str
     logging_file: Path | None
-
 
 class MinecraftInstaller:
     def __init__(
@@ -109,6 +106,60 @@ class MinecraftInstaller:
             return self._install_staged(instance, build)
         return self._materialize(launch_id, instance, resolved, assets=assets)
 
+    def repair_version(
+        self,
+        instance_dir: Path,
+        minecraft_version: str,
+        *,
+        loader: str = "vanilla",
+        loader_version: str | None = None,
+        version_id: str | None = None,
+    ) -> InstallResult:
+        """пересоздать версию/модлоадер экземпляра, не трогая mods и config."""
+        instance_dir = instance_dir.expanduser().resolve()
+        instances_root = (self.config.game_dir / "instances").resolve()
+        if instance_dir == instances_root or not _within(instance_dir, instances_root) or not instance_dir.is_dir():
+            raise LauncherError(f"Недопустимый путь экземпляра: {instance_dir}")
+        if self._instance_dir(instance_dir.name).resolve() != instance_dir:
+            raise LauncherError(f"Имя экземпляра не соответствует папке: {instance_dir.name}")
+        minecraft_version = str(minecraft_version).strip()
+        if not minecraft_version:
+            raise LauncherError("Не указана версия Minecraft")
+        target_version = str(version_id or minecraft_version).strip()
+        _safe_version_id(target_version)
+        versions_root = instance_dir / "versions"
+        if versions_root.is_symlink():
+            raise LauncherError("Каталог версий является символьной ссылкой")
+        versions_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        version_dir = versions_root / target_version
+        backup = versions_root / f".trial-repair-{uuid.uuid4().hex}.part"
+        moved = False
+        if os.path.lexists(version_dir):
+            if version_dir.is_symlink() or not version_dir.is_dir():
+                raise LauncherError(f"Каталог версии не является папкой: {version_dir}")
+            if _contains_symlink(version_dir, instance_dir):
+                raise LauncherError("Каталог версии содержит символьные ссылки")
+            os.rename(version_dir, backup)
+            moved = True
+        try:
+            return self.install(
+                minecraft_version,
+                loader=loader,
+                loader_version=loader_version,
+                instance_name=instance_dir.name,
+                assets=False,
+                replace_existing=False,
+            )
+        except Exception:
+            if moved:
+                if os.path.lexists(version_dir):
+                    _remove_instance_path(version_dir)
+                os.rename(backup, version_dir)
+            raise
+        finally:
+            if moved and os.path.lexists(backup):
+                _remove_instance_path(backup)
+
     def load_existing(self, instance_dir: Path, version_id: str | None = None) -> InstallResult:
         """Build a launchable result from files already present in an instance."""
         instance_dir = instance_dir.expanduser().resolve()
@@ -146,7 +197,7 @@ class MinecraftInstaller:
         if not version_json.get("mainClass"):
             parent_id = str(version_json.get("inheritsFrom") or "").strip()
             if parent_id and parent_id != version_id:
-                # Профили forge/neoforge наследуют ванильный JSON: без
+                # профили forge/neoforge наследуют ванильный JSON: без
                 # родителя нет mainClass и половины classpath.
                 try:
                     version_json = merge_version_json(self.repository.resolve(parent_id), version_json)
@@ -336,6 +387,7 @@ class MinecraftInstaller:
         version_dir = natives_dir.parent
         state = _read_integrity_state(instance, version_dir)
         previous = dict(state)
+        version_json = _apply_library_overrides(version_json, _instance_library_overrides(instance))
         libraries: list[Path] = []
         needs_native_extraction = not repair_only or not had_natives
         for library in version_json.get("libraries", []):
@@ -383,7 +435,7 @@ class MinecraftInstaller:
                 if not native_only:
                     libraries.append(artifact_destination)
             natives = library.get("natives", {})
-            platform_key = "windows" if os.name == "nt" else platform.system().lower()
+            platform_key = mojang_os_name()
             native_classifier = natives.get(platform_key) if isinstance(natives, dict) else None
             if native_classifier:
                 classifier = str(native_classifier).replace("${arch}", "64")
@@ -628,7 +680,8 @@ class MinecraftInstaller:
             raise LauncherError(f"Локальный installer является символьной ссылкой: {local_installer}")
         shutil.copy2(installer_path, local_installer)
         local_installer.chmod(0o600)
-        command = [str(java), "-jar", str(local_installer), "--installClient", "--target", str(base.instance_dir)]
+        _ensure_launcher_profiles(base.instance_dir)
+        command = loader_installer_command(java, local_installer, base.instance_dir)
         process: subprocess.Popen[str] | None = None
         try:
             prepared_command, prepared_cwd, prepared_environment, _ = prepare_process(
@@ -721,6 +774,19 @@ class MinecraftInstaller:
                 return algorithm, match.group(1)
         raise LauncherError("Loader installer не имеет корректного SHA-512, SHA-256 или SHA-1 checksum")
 
+def loader_installer_command(java: Path | str, installer: Path, target: Path) -> list[str]:
+    """командная строка Forge/NeoForge installer для установки клиента."""
+    return [str(java), "-jar", str(installer), "--installClient", str(target)]
+
+def _ensure_launcher_profiles(target: Path) -> None:
+    """forge/NeoForge installer отказывается ставить клиент без launcher_profiles.json"""
+    path = target / "launcher_profiles.json"
+    if path.is_symlink():
+        raise LauncherError("launcher_profiles.json экземпляра является символьной ссылкой")
+    if path.is_file():
+        return
+    path.write_text(json.dumps({"profiles": {}, "selectedProfile": "", "version": 3}) + "\n", encoding="utf-8")
+
 def _rebase_install_result(result: InstallResult, source: Path, destination: Path) -> InstallResult:
     def rebase(path: Path) -> Path:
         try:
@@ -742,7 +808,6 @@ def _rebase_install_result(result: InstallResult, source: Path, destination: Pat
         logging_file=rebase(result.logging_file) if result.logging_file else None,
     )
 
-
 def _swap_staged_directory(staging: Path, target: Path) -> Path | None:
     if not os.path.lexists(target):
         os.replace(staging, target)
@@ -763,7 +828,6 @@ def _swap_staged_directory(staging: Path, target: Path) -> Path | None:
             raise LauncherError(f"Не удалось восстановить предыдущий экземпляр; он сохранён в {backup}") from rollback_error
         raise
     return backup
-
 
 def _rename_exchange(source: Path, destination: Path) -> bool:
     if os.name != "posix":
@@ -788,7 +852,6 @@ def _rename_exchange(source: Path, destination: Path) -> bool:
         return False
     raise OSError(error, os.strerror(error), f"{source} <-> {destination}")
 
-
 def _remove_instance_path(path: Path) -> None:
     if not os.path.lexists(path):
         return
@@ -796,7 +859,6 @@ def _remove_instance_path(path: Path) -> None:
         path.unlink()
     else:
         shutil.rmtree(path)
-
 
 def _integrity_metadata(info: dict[str, Any]) -> dict[str, Any] | None:
     metadata: dict[str, Any] = {}
@@ -814,7 +876,6 @@ def _integrity_metadata(info: dict[str, Any]) -> dict[str, Any] | None:
         metadata["size"] = size
     return metadata or None
 
-
 def _file_fingerprint(path: Path) -> dict[str, int]:
     value = path.stat()
     return {
@@ -825,13 +886,11 @@ def _file_fingerprint(path: Path) -> dict[str, int]:
         "ctime_ns": value.st_ctime_ns,
     }
 
-
 def _assert_safe_cached_file(path: Path, root: Path) -> None:
     if path.is_symlink() or _contains_symlink(path.parent, root):
         raise LauncherError(f"Небезопасный путь файла экземпляра: {path}")
     if os.path.lexists(path) and not path.is_file():
         raise LauncherError(f"Путь файла экземпляра не является обычным файлом: {path}")
-
 
 def _integrity_cache_matches(
     instance: Path,
@@ -854,7 +913,6 @@ def _integrity_cache_matches(
     except OSError:
         return False
 
-
 def _read_integrity_state(instance: Path, version_dir: Path) -> dict[str, Any]:
     _ensure_safe_directory(version_dir, instance, "каталог версии")
     marker = version_dir / ".trial-integrity"
@@ -870,7 +928,6 @@ def _read_integrity_state(instance: Path, version_dir: Path) -> dict[str, Any]:
         return {}
     files = value.get("files") if isinstance(value, dict) else None
     return files if isinstance(files, dict) else {}
-
 
 def _write_integrity_state(instance: Path, version_dir: Path, files: dict[str, Any]) -> None:
     _ensure_safe_directory(version_dir, instance, "каталог версии")
@@ -893,7 +950,6 @@ def _write_integrity_state(instance: Path, version_dir: Path, files: dict[str, A
         except FileNotFoundError:
             pass
 
-
 def _rules_allow(rules: Any) -> bool:
     if not rules:
         return True
@@ -904,11 +960,9 @@ def _rules_allow(rules: Any) -> bool:
         allowed = rule.get("action") == "allow"
     return allowed
 
-
 def _safe_version_id(value: str) -> None:
     if not value or len(value) > 200 or value in {".", ".."} or not re.fullmatch(r"[A-Za-z0-9._+-]+", value):
         raise LauncherError(f"Небезопасный идентификатор версии: {value}")
-
 
 def _validate_loader_installer_url(url: str) -> None:
     try:
@@ -926,12 +980,10 @@ def _validate_loader_installer_url(url: str) -> None:
     ):
         raise LauncherError("Loader installer должен загружаться с официального Maven endpoint")
 
-
 def _safe_component(value: str, label: str) -> str:
     if not value or not re.fullmatch(r"[A-Za-z0-9._+-]+", value):
         raise LauncherError(f"Небезопасный {label}: {value}")
     return value
-
 
 def _safe_relative_path(value: str, label: str) -> Path:
     relative = Path(str(value).replace("\\", "/"))
@@ -939,12 +991,11 @@ def _safe_relative_path(value: str, label: str) -> Path:
         raise LauncherError(f"Небезопасный путь {label}: {value}")
     return relative
 
-
 def _rule_matches(rule: dict[str, Any]) -> bool:
     operating_system = rule.get("os", {})
     if isinstance(operating_system, dict):
         name = operating_system.get("name")
-        current_os = "windows" if os.name == "nt" else platform.system().lower()
+        current_os = mojang_os_name()
         if name and name != current_os:
             return False
         arch = operating_system.get("arch")
@@ -959,11 +1010,10 @@ def _rule_matches(rule: dict[str, Any]) -> bool:
             if str(arch).lower() not in aliases:
                 return False
     features = rule.get("features", {})
-    # Релиз поддерживает обычный настольный клиент, без feature-флагов.
+    # релиз поддерживает обычный настольный клиент, без feature-флагов.
     if isinstance(features, dict) and any(bool(value) for value in features.values()):
         return False
     return True
-
 
 def _safe_extract(archive: Path, destination: Path, excluded: set[str]) -> None:
     if os.name == "nt":
@@ -1007,7 +1057,6 @@ def _safe_extract(archive: Path, destination: Path, excluded: set[str]) -> None:
         raise LauncherError(f"Native library не является ZIP/JAR: {archive}") from exc
     finally:
         os.close(root_fd)
-
 
 def _safe_extract_windows(archive: Path, destination: Path, excluded: set[str]) -> None:
     if is_reparse_point(destination):
@@ -1062,7 +1111,6 @@ def _safe_extract_windows(archive: Path, destination: Path, excluded: set[str]) 
     except zipfile.BadZipFile as exc:
         raise LauncherError(f"Native library не является ZIP/JAR: {archive}") from exc
 
-
 def _open_directory_chain(root_fd: int, parts: tuple[str, ...], *, create: bool) -> int:
     current_fd = os.dup(root_fd)
     try:
@@ -1084,7 +1132,6 @@ def _open_directory_chain(root_fd: int, parts: tuple[str, ...], *, create: bool)
         os.close(current_fd)
         raise
 
-
 def _contains_symlink(path: Path, root: Path) -> bool:
     current = path
     while True:
@@ -1095,7 +1142,6 @@ def _contains_symlink(path: Path, root: Path) -> bool:
         if current == current.parent or not _within(current, root):
             return True
         current = current.parent
-
 
 def _ensure_safe_directory(path: Path, root: Path, label: str) -> None:
     if root.is_symlink():
@@ -1109,7 +1155,6 @@ def _ensure_safe_directory(path: Path, root: Path, label: str) -> None:
         if current == current.parent or not _within(current, root):
             raise LauncherError(f"Небезопасный путь {label}: {path}")
         current = current.parent
-
 
 def _materialize_legacy_assets(
     instance: Path,
@@ -1163,6 +1208,64 @@ def _materialize_legacy_assets(
         materialized[target_key] = {"digest": digest, "fingerprint": _file_fingerprint(target)}
     return materialized
 
+MAVEN_CENTRAL_BASE = "https://repo1.maven.org/maven2"
+_INSTANCE_SETTINGS_FILE_FOR_OVERRIDES = ".trial-launcher.json"
+
+def _instance_library_overrides(instance: Path) -> dict[str, str]:
+    """Оверрайды версий LWJGL из настроек экземпляра (вкладка «Версии»)."""
+    path = instance / _INSTANCE_SETTINGS_FILE_FOR_OVERRIDES
+    if path.is_symlink() or not path.is_file():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    value = raw.get("library_overrides") if isinstance(raw, dict) else None
+    if not isinstance(value, dict):
+        return {}
+    from .instance_workspace import _normalize_library_overrides
+
+    return _normalize_library_overrides(value)
+
+def _apply_library_overrides(version_json: dict[str, Any], overrides: dict[str, str]) -> dict[str, Any]:
+    """подменяет версии библиотек из настроек экземпляра."""
+    if not overrides:
+        return version_json
+    libraries: list[Any] = []
+    for library in version_json.get("libraries", []):
+        if isinstance(library, dict):
+            name = str(library.get("name", ""))
+            key = ":".join(name.split(":")[:2])
+            override = overrides.get(key)
+            if override:
+                library = _rewrite_library_version(library, override)
+        libraries.append(library)
+    return {**version_json, "libraries": libraries}
+
+def _rewrite_library_version(library: dict[str, Any], version: str) -> dict[str, Any]:
+    parts = str(library.get("name", "")).split(":")
+    if len(parts) < 3:
+        return library
+    rewritten = dict(library)
+    rewritten["name"] = ":".join([parts[0], parts[1], version, *parts[4:]])
+    downloads = library.get("downloads")
+    if isinstance(downloads, dict):
+        downloads = json.loads(json.dumps(downloads))
+        artifact = downloads.get("artifact")
+        if isinstance(artifact, dict):
+            downloads["artifact"] = _maven_central_artifact(parts[0], parts[1], version)
+        classifiers = downloads.get("classifiers")
+        if isinstance(classifiers, dict):
+            for classifier, info in classifiers.items():
+                if isinstance(info, dict):
+                    classifiers[classifier] = _maven_central_artifact(parts[0], parts[1], version, classifier)
+        rewritten["downloads"] = downloads
+    return rewritten
+
+def _maven_central_artifact(group: str, artifact: str, version: str, classifier: str | None = None) -> dict[str, Any]:
+    suffix = f"-{classifier}" if classifier else ""
+    path = f"{group.replace('.', '/')}/{artifact}/{version}/{artifact}-{version}{suffix}.jar"
+    return {"path": path, "url": f"{MAVEN_CENTRAL_BASE}/{path}"}
 
 def _within(path: Path, root: Path) -> bool:
     try:
@@ -1170,7 +1273,6 @@ def _within(path: Path, root: Path) -> bool:
         return True
     except ValueError:
         return False
-
 
 def _assets_marker_valid(
     marker: Path,
@@ -1197,7 +1299,6 @@ def _assets_marker_valid(
             return False
     return True
 
-
 def _read_asset_marker(marker: Path) -> dict[str, Any]:
     if marker.is_symlink() or _contains_symlink(marker.parent, marker.parent.parent) or not marker.is_file():
         return {}
@@ -1208,7 +1309,6 @@ def _read_asset_marker(marker: Path) -> dict[str, Any]:
     except (OSError, ValueError, TypeError):
         return {}
     return value if isinstance(value, dict) else {}
-
 
 def _asset_marker_fingerprints(marker: Path, objects: dict[str, dict[str, Any]]) -> dict[str, Any]:
     value = _read_asset_marker(marker)
@@ -1221,7 +1321,6 @@ def _asset_marker_fingerprints(marker: Path, objects: dict[str, dict[str, Any]])
         for digest, item in objects.items()
         if cached_objects.get(digest) == item.get("size") and isinstance(fingerprints.get(digest), dict)
     }
-
 
 def _asset_fingerprint_matches(
     root: Path,
@@ -1240,7 +1339,6 @@ def _asset_fingerprint_matches(
         return _file_fingerprint(path) == fingerprint
     except (OSError, TypeError, ValueError, LauncherError):
         return False
-
 
 def _write_asset_marker(
     marker: Path,
@@ -1268,7 +1366,6 @@ def _write_asset_marker(
         + "\n",
         encoding="utf-8",
     )
-
 
 def _find_external_version(
     instance: Path,

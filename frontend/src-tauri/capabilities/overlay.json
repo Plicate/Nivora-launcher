@@ -2,7 +2,15 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "overlay-windows",
   "description": "Игровой оверлей Nivora: горячие клавиши, окно поверх игры, запись экрана.",
-  "windows": ["main", "nivora-overlay"],
+  "windows": [
+    "main",
+    "nivora-overlay"
+  ],
+  "platforms": [
+    "linux",
+    "macOS",
+    "windows"
+  ],
   "permissions": [
     "core:default",
     "core:window:allow-close",

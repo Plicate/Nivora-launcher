@@ -1,8 +1,4 @@
-"""Plugin signing, publisher trust, and revocation primitives.
-
-There is intentionally no bundled publisher or revocation key. The trust root
-is established only by keys that the user explicitly pins in a trust store.
-"""
+"""plugin signing, publisher trust, and revocation primitives."""
 
 from __future__ import annotations
 
@@ -23,7 +19,6 @@ from typing import Any
 
 from .errors import LauncherError
 
-
 MAX_PACKAGE_FILES = 4096
 _STORE_FILENAME = "plugin-trust.json"
 _STORE_SCHEMA_VERSION = 1
@@ -34,7 +29,6 @@ _IDENTIFIER_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z", re.ASCII)
 _WINDOWS_DRIVE_RE = re.compile(r"[A-Za-z]:")
 _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z", re.ASCII)
 
-
 def _load_crypto():
     """Load cryptography only when a signing or verification operation needs it."""
     try:
@@ -44,7 +38,6 @@ def _load_crypto():
     except ImportError as exc:
         raise LauncherError("Plugin signatures require the cryptography package") from exc
     return serialization, Ed25519PrivateKey, Ed25519PublicKey, InvalidSignature, UnsupportedAlgorithm
-
 
 def _validate_json_value(value: Any, *, label: str, depth: int = 0, ancestors: set[int] | None = None) -> None:
     if depth > 128:
@@ -82,7 +75,6 @@ def _validate_json_value(value: Any, *, label: str, depth: int = 0, ancestors: s
     finally:
         active.remove(identity)
 
-
 def _canonical_json_bytes(value: Any, *, label: str) -> bytes:
     _validate_json_value(value, label=label)
     try:
@@ -95,7 +87,6 @@ def _canonical_json_bytes(value: Any, *, label: str) -> bytes:
         ).encode("utf-8")
     except (TypeError, ValueError, UnicodeEncodeError, RecursionError) as exc:
         raise LauncherError(f"{label} cannot be encoded as canonical JSON") from exc
-
 
 def _copy_json_object(value: Any, *, label: str) -> dict[str, Any]:
     if not isinstance(value, Mapping):
@@ -113,12 +104,10 @@ def _copy_json_object(value: Any, *, label: str) -> dict[str, Any]:
         raise LauncherError(f"{label} must be a JSON object")
     return result
 
-
 def _validate_identifier(value: Any, *, label: str) -> str:
     if type(value) is not str or not _IDENTIFIER_RE.fullmatch(value):
         raise LauncherError(f"{label} must be a non-empty ASCII identifier")
     return value
-
 
 def _validate_reason(value: Any, *, label: str = "Revocation reason") -> str:
     if type(value) is not str or len(value) > _MAX_REASON_LENGTH or "\x00" in value:
@@ -128,7 +117,6 @@ def _validate_reason(value: Any, *, label: str = "Revocation reason") -> str:
     except UnicodeEncodeError as exc:
         raise LauncherError(f"{label} must be valid UTF-8 text") from exc
     return value
-
 
 def _validate_package_path(value: Any) -> str:
     if type(value) is not str or not value or "\x00" in value:
@@ -143,7 +131,6 @@ def _validate_package_path(value: Any) -> str:
     if value == "plugin.json":
         raise LauncherError("plugin.json is excluded from the plugin file hash map")
     return value
-
 
 def _normalize_file_bytes(file_bytes: Any) -> dict[str, bytes]:
     if not isinstance(file_bytes, Mapping):
@@ -166,7 +153,6 @@ def _normalize_file_bytes(file_bytes: Any) -> dict[str, bytes]:
             raise LauncherError(f"Plugin file contents could not be read: {normalized_path}") from exc
     return result
 
-
 def _decode_base64(value: Any, *, expected_length: int, label: str) -> bytes:
     if type(value) is not str:
         raise LauncherError(f"{label} must be a base64 string")
@@ -184,7 +170,6 @@ def _decode_base64(value: Any, *, expected_length: int, label: str) -> bytes:
         raise LauncherError(f"{label} must decode to exactly {expected_length} bytes")
     return decoded
 
-
 def _coerce_public_key(value: Any, *, label: str = "Public key") -> bytes:
     if isinstance(value, str):
         return _decode_base64(value, expected_length=32, label=label)
@@ -194,10 +179,8 @@ def _coerce_public_key(value: Any, *, label: str = "Public key") -> bytes:
             return raw
     raise LauncherError(f"{label} must be 32 raw Ed25519 bytes or their base64 encoding")
 
-
 def _fingerprint(public_key: bytes) -> str:
     return f"sha256:{hashlib.sha256(public_key).hexdigest()}"
-
 
 def _parse_signature(signature: Any, *, label: str) -> tuple[str, bytes, bytes]:
     if type(signature) is not dict or set(signature) != {"algorithm", "key_id", "public_key", "value"}:
@@ -208,7 +191,6 @@ def _parse_signature(signature: Any, *, label: str) -> tuple[str, bytes, bytes]:
     public_key = _decode_base64(signature["public_key"], expected_length=32, label=f"{label} public_key")
     signature_value = _decode_base64(signature["value"], expected_length=64, label=f"{label} signature value")
     return key_id, public_key, signature_value
-
 
 def _validate_integrity(manifest: dict[str, Any], file_bytes: Any) -> dict[str, bytes]:
     integrity = manifest.get("integrity")
@@ -236,16 +218,8 @@ def _validate_integrity(manifest: dict[str, Any], file_bytes: Any) -> dict[str, 
             raise LauncherError(f"Plugin file hash mismatch: {path}")
     return actual
 
-
 def sign_manifest(manifest: Mapping[str, Any], file_bytes: Mapping[str, bytes], private_key_pem: bytes | str) -> dict[str, Any]:
-    """Return a manifest signed over canonical JSON and exact package file hashes.
-
-    ``file_bytes`` must contain every regular package file except ``plugin.json``.
-    Callers enumerating a package on disk must reject symlinks before supplying
-    bytes, since a byte mapping alone cannot report filesystem file types.
-    An existing ``signature.key_id`` is preserved; otherwise the public-key
-    SHA-256 fingerprint is used as the key ID.
-    """
+    """return a manifest signed over canonical JSON and exact package file hashes."""
     if not isinstance(manifest, Mapping):
         raise LauncherError("Plugin manifest must be a JSON object")
     try:
@@ -298,15 +272,8 @@ def sign_manifest(manifest: Mapping[str, Any], file_bytes: Mapping[str, bytes], 
     }
     return unsigned
 
-
 def verify_manifest(manifest: Mapping[str, Any], file_bytes: Mapping[str, bytes]) -> dict[str, Any]:
-    """Verify manifest signature and exact file coverage without consulting trust.
-
-    The returned ``valid`` flag means both the Ed25519 signature and every file
-    hash are valid. It does not mean the publisher is trusted; callers must
-    compare the returned key ID and public key against their user-pinned store.
-    On-disk callers must reject symlinks before constructing ``file_bytes``.
-    """
+    """verify manifest signature and exact file coverage without consulting trust."""
     signed = isinstance(manifest, Mapping) and "signature" in manifest
     result: dict[str, Any] = {
         "signed": signed,
@@ -347,7 +314,6 @@ def verify_manifest(manifest: Mapping[str, Any], file_bytes: Mapping[str, bytes]
         result["error"] = "Plugin manifest contains invalid data"
     return result
 
-
 def _initial_store_state() -> dict[str, Any]:
     return {
         "schema_version": _STORE_SCHEMA_VERSION,
@@ -362,14 +328,12 @@ def _initial_store_state() -> dict[str, Any]:
         },
     }
 
-
 def _validate_reason_map(value: Any, *, label: str, publisher_ids: bool = False) -> None:
     if type(value) is not dict:
         raise LauncherError(f"Plugin trust store {label} must be an object")
     for identifier, reason in value.items():
         _validate_identifier(identifier, label="Publisher key ID" if publisher_ids else "Plugin ID")
         _validate_reason(reason, label=f"Plugin trust store {label} reason")
-
 
 def _validate_store_state(value: Any) -> dict[str, Any]:
     required = {
@@ -423,7 +387,6 @@ def _validate_store_state(value: Any) -> dict[str, Any]:
         raise LauncherError("Plugin trust store has revocations without an imported sequence")
     return value
 
-
 def _json_no_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, item in pairs:
@@ -432,10 +395,8 @@ def _json_no_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
         result[key] = item
     return result
 
-
 def _reject_json_constant(_value: str) -> None:
     raise ValueError("non-finite JSON number")
-
 
 def _parse_revocation_entries(value: Any, *, label: str, id_field: str, publisher_ids: bool = False) -> dict[str, str]:
     if type(value) is not list:
@@ -453,15 +414,8 @@ def _parse_revocation_entries(value: Any, *, label: str, id_field: str, publishe
         result[identifier] = _validate_reason(entry["reason"])
     return result
 
-
 class PluginTrustStore:
-    """Private user-pinned publisher trust and revocation state.
-
-    ``root`` is a directory; the store is persisted as ``plugin-trust.json``
-    with private permissions and atomic replacement. No global key is trusted
-    by default. Users establish this store's trust root by explicitly pinning
-    publisher keys and, separately, marking any revocation authorities.
-    """
+    """private user-pinned publisher trust and revocation state."""
 
     def __init__(self, root: Path):
         try:

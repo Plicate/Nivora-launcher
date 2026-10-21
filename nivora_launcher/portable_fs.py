@@ -9,7 +9,6 @@ from typing import Callable
 from .errors import LauncherError
 from .platform_support import is_reparse_point, set_private_fd
 
-
 def safe_path(root: Path, parts: tuple[str, ...]) -> Path:
     """Resolve a relative path while rejecting links, junctions, and escapes."""
     if is_reparse_point(root):
@@ -32,7 +31,6 @@ def safe_path(root: Path, parts: tuple[str, ...]) -> Path:
                 raise LauncherError("Путь выходит за пределы корневого каталога") from exc
     return current
 
-
 def _validate_component(part: str) -> None:
     if (
         not part
@@ -48,7 +46,6 @@ def _validate_component(part: str) -> None:
     device_name = part.split(".", 1)[0].upper()
     if device_name in {"CON", "PRN", "AUX", "NUL", *(f"COM{index}" for index in range(1, 10)), *(f"LPT{index}" for index in range(1, 10))}:
         raise LauncherError("Путь содержит зарезервированное имя Windows")
-
 
 def atomic_write(root: Path, parts: tuple[str, ...], content: bytes) -> Path:
     if not parts:
@@ -75,7 +72,6 @@ def atomic_write(root: Path, parts: tuple[str, ...], content: bytes) -> Path:
             temporary.unlink()
         except FileNotFoundError:
             pass
-
 
 def remove_tree(
     root: Path,
@@ -111,7 +107,6 @@ def remove_tree(
         path.rmdir()
 
     remove(target, parts, 0)
-
 
 def regular_file(path: Path, *, maximum_size: int | None = None) -> os.stat_result:
     if is_reparse_point(path):

@@ -39,7 +39,6 @@ from .runtime import JavaRuntimeManager, java_version, safe_process_environment,
 from .server_traffic import ServerTrafficTracker
 from .security import load_protected_settings, prepare_process, save_protected_settings
 
-
 SERVER_METADATA_FILE = ".trial-launcher-server.json"
 SERVER_JAR = "server.jar"
 SERVER_PROPERTIES_FILE = "server.properties"
@@ -85,7 +84,6 @@ _SERVER_SOURCE_HOSTS = {
 
 _MOJANG_VERSION_MANIFEST_URL = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json"
 
-
 def core_options() -> list[dict[str, Any]]:
     seen: set[str] = set()
     result: list[dict[str, Any]] = []
@@ -95,7 +93,6 @@ def core_options() -> list[dict[str, Any]]:
         seen.add(value["id"])
         result.append(dict(value))
     return result
-
 
 def download_server_core(
     http: HttpClient,
@@ -206,7 +203,6 @@ def download_server_core(
         "trusted_hash": bool(expected_sha256),
     }
 
-
 def server_core_versions(http: HttpClient, core: str) -> list[str]:
     core_id = str(core).strip().lower()
     if core_id in {"paper", "folia", "velocity", "waterfall"}:
@@ -253,7 +249,6 @@ def server_core_versions(http: HttpClient, core: str) -> list[str]:
         raw_versions = [item for group in raw_versions.values() if isinstance(group, list) for item in group]
     return _unique_versions(raw_versions)
 
-
 def _unique_versions(values: Any) -> list[str]:
     result: list[str] = []
     seen: set[str] = set()
@@ -264,9 +259,7 @@ def _unique_versions(values: Any) -> list[str]:
         if version and version not in seen:
             seen.add(version)
             result.append(version)
-    # Порядок каталога ненадёжен (Purpur отдаёт от старых к новым), а вместе с
-    # релизами попадаются rc/pre-сборки. Сортируем от новых к старым по
-    # числовому ключу; всё, что ключа не имеет, из выбора убираем.
+    # порядок каталога ненадёжен (Purpur отдаёт от старых к новым), а вместе с
     plain_release = re.compile(r"[0-9]+(?:\.[0-9]+)*")
     return sorted(
         (version for version in result if plain_release.fullmatch(version)),
@@ -274,14 +267,12 @@ def _unique_versions(values: Any) -> list[str]:
         reverse=True,
     )[:200]
 
-
 def _mojang_release_versions(http: HttpClient) -> list[str]:
     value = http.get_json(_MOJANG_VERSION_MANIFEST_URL)
     raw_versions = value.get("versions", []) if isinstance(value, dict) else []
     return _unique_versions(
         [item.get("id") for item in raw_versions if isinstance(item, dict) and item.get("type") == "release"]
     )
-
 
 def _github_branch_versions(value: Any, prefix: str) -> list[str]:
     branches = value if isinstance(value, list) else []
@@ -293,7 +284,6 @@ def _github_branch_versions(value: Any, prefix: str) -> list[str]:
             versions.append(match.group(1))
     return _unique_versions(versions)
 
-
 def _patina_versions(value: Any) -> list[str]:
     releases = value if isinstance(value, list) else []
     versions: list[str] = []
@@ -303,7 +293,6 @@ def _patina_versions(value: Any) -> list[str]:
         text = f"{release.get('tag_name', '')} {release.get('name', '')}"
         versions.extend(re.findall(r"\b\d+\.\d+(?:\.\d+)?\b", text))
     return _unique_versions(versions)
-
 
 def _patina_download(http: HttpClient, version: str, build: str) -> tuple[str, str]:
     repository = http.get_json("https://api.github.com/repos/PatinaMC/Patina")
@@ -320,14 +309,12 @@ def _patina_download(http: HttpClient, version: str, build: str) -> tuple[str, s
         raise LauncherError(f"Patina не опубликовала официальный JAR для {version}")
     return selected, build or version
 
-
 def _validate_server_source_url(url: str) -> None:
     from urllib.parse import urlsplit
 
     host = (urlsplit(url).hostname or "").lower().rstrip(".")
     if host not in _SERVER_SOURCE_HOSTS:
         raise LauncherError(f"Источник ядра не входит в официальный allowlist: {host or 'неизвестный хост'}")
-
 
 def _build_spigot_with_buildtools(http: HttpClient, root: Path, version: str, *, confirm_unverified: bool) -> dict[str, Any]:
     if not confirm_unverified:
@@ -374,7 +361,6 @@ def _build_spigot_with_buildtools(http: HttpClient, root: Path, version: str, *,
         "trusted_hash": False,
     }
 
-
 def _server_public(info: Any, config: dict[str, Any] | None = None) -> dict[str, Any]:
     value = config or {}
     return {
@@ -395,7 +381,6 @@ def _server_public(info: Any, config: dict[str, Any] | None = None) -> dict[str,
         "server_port": int(value.get("port", getattr(info, "server_port", 25565)) or 25565),
         "server_eula": bool(value.get("eula_accepted", False)),
     }
-
 
 class ServerInstanceStore:
     def __init__(self, config: ConfigStore, instances: InstanceStore) -> None:
@@ -564,7 +549,6 @@ class ServerInstanceStore:
     def public(self, name: str) -> dict[str, Any]:
         info = self.get(name)
         return _server_public(info, self.config(name))
-
 
 class ServerFiles:
     def __init__(self, store: ServerInstanceStore) -> None:
@@ -829,7 +813,6 @@ class ServerFiles:
         parts = ServerFiles._parts(raw, allow_root=allow_root)
         return root.joinpath(*parts)
 
-
 @dataclass
 class _ServerProcess:
     name: str
@@ -848,12 +831,10 @@ class _ServerProcess:
     finished: threading.Event = field(default_factory=threading.Event)
     traffic: ServerTrafficTracker | None = None
 
-
 _PROCESSES: dict[str, _ServerProcess] = {}
 _PROCESS_LOCK = threading.RLock()
 _LAUNCH_ERRORS: dict[str, str] = {}
 _CONSOLE_FILE = ".trial-launcher-server-console.json"
-
 
 def _saved_console(root: Path) -> dict[str, Any]:
     path = root / _CONSOLE_FILE
@@ -868,7 +849,6 @@ def _saved_console(root: Path) -> dict[str, Any]:
     except (OSError, ValueError, RecursionError):
         return {}
 
-
 def _save_console(root: Path, lines: list[str], error: str = "") -> None:
     selected: list[str] = []
     remaining = 256 * 1024
@@ -880,7 +860,6 @@ def _save_console(root: Path, lines: list[str], error: str = "") -> None:
         remaining -= size
         selected.append(text)
     _atomic_json_write(root / _CONSOLE_FILE, {"lines": list(reversed(selected)), "error": error}, private=True)
-
 
 def _server_java_requirement(version: str) -> tuple[int, str]:
     match = re.fullmatch(r"1\.(\d+)(?:\.(\d+))?", version.strip())
@@ -895,14 +874,12 @@ def _server_java_requirement(version: str) -> tuple[int, str]:
         return 16, "java-runtime-alpha"
     return 8, "jre-legacy"
 
-
 def _initial_server_heap(memory: str) -> str:
     match = re.fullmatch(r"(\d+)([kKmMgG])", memory)
     if not match:
         return memory
     amount = int(match[1]) * {"k": 1024, "m": 1024 ** 2, "g": 1024 ** 3}[match[2].lower()]
     return "512M" if amount >= 512 * 1024 ** 2 else memory
-
 
 class ServerProcessManager:
     def __init__(self, config: ConfigStore, store: ServerInstanceStore) -> None:
@@ -1030,7 +1007,7 @@ class ServerProcessManager:
                     write_last_snapshot(state.root, snapshot)
                 with _PROCESS_LOCK:
                     is_current = _PROCESSES.get(state.name) is state
-                    # Keep stopped console output; discard only oldest stopped entries.
+                    # keep stopped console output; discard only oldest stopped entries.
                     stopped = [key for key, item in _PROCESSES.items() if item.process.poll() is not None and item is not state]
                     for key in stopped[:-31]:
                         _PROCESSES.pop(key, None)
@@ -1227,13 +1204,11 @@ class ServerProcessManager:
     def _write_live(root: Path, running: bool, pid: int, started_at: float) -> None:
         _atomic_json_write(root / ".trial-launcher-live.json", {"running": running, "pid": pid, "started_at": started_at}, private=True)
 
-
 def server_memory_limit_kib(total_kib: int | None = None) -> int:
     total = system_memory_kib() if total_kib is None else int(total_kib)
     if total <= 0:
         return _UNKNOWN_RAM_SERVER_LIMIT_KIB
     return max(1, total * 3 // 4)
-
 
 def _normalize_server_config(value: dict[str, Any], *, clamp_memory: bool = False) -> dict[str, Any]:
     core = str(value.get("core", "custom")).strip().lower()
@@ -1247,11 +1222,14 @@ def _normalize_server_config(value: dict[str, Any], *, clamp_memory: bool = Fals
         max_players = min(100000, max(1, int(value.get("max_players", 20))))
     except (TypeError, ValueError) as exc:
         raise LauncherError("Порт и количество игроков должны быть числами") from exc
-    memory = str(value.get("memory", "4GiB")).strip() or "4GiB"
+    raw_memory = str(value.get("memory", "")).strip()
+    memory = raw_memory or "4GiB"
     memory_kib = parse_memory_kib(memory)
     memory_limit_kib = server_memory_limit_kib()
+    # дефолтные 4GiB на машине с ≤5,3 ГБ ОЗУ не должны валить создание
+    default_memory = memory_kib == 4 * 1024 * 1024
     if memory_kib > memory_limit_kib:
-        if not clamp_memory:
+        if not clamp_memory and not default_memory:
             raise LauncherError(
                 "Память JVM сервера не может превышать "
                 f"{format_memory_kib(memory_limit_kib)} (75% физической памяти; остальное оставлено системе)"
@@ -1296,7 +1274,6 @@ def _normalize_server_config(value: dict[str, Any], *, clamp_memory: bool = Fals
         "snapshot_max_count": max_count,
     }
 
-
 def _normalize_restart_schedule(value: Any) -> dict[str, Any]:
     raw = value if isinstance(value, dict) else {}
     time_value = str(raw.get("time", "04:00")).strip()
@@ -1314,10 +1291,8 @@ def _normalize_restart_schedule(value: Any) -> dict[str, Any]:
         "last_run": last_run if re.fullmatch(r"\d{4}-\d{2}-\d{2}", last_run) else "",
     }
 
-
 def _write_server_config(path: Path, values: dict[str, Any]) -> None:
     _atomic_json_write(path, {key: value for key, value in values.items() if key not in SERVER_SECURITY_KEYS}, private=True)
-
 
 def _write_eula_file(root: Path, accepted: bool) -> None:
     temporary_name = f".eula.txt.{uuid.uuid4().hex}.part"
@@ -1355,7 +1330,6 @@ def _write_eula_file(root: Path, accepted: bool) -> None:
             except FileNotFoundError:
                 pass
             os.close(directory_fd)
-
 
 def _apply_server_port(root: Path, port: int, *, public_bind: bool = False) -> None:
     if not 1 <= port <= 65535:
@@ -1427,13 +1401,11 @@ def _apply_server_port(root: Path, port: int, *, public_bind: bool = False) -> N
                 pass
             os.close(directory_fd)
 
-
 def _safe_server_name(value: str) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", str(value).strip()).strip(".-")
     if not cleaned:
         raise LauncherError("Имя сервера не может быть пустым")
     return cleaned[:64]
-
 
 def _server_properties_with_port(content: bytes, port: int, *, public_bind: bool = False) -> bytes:
     text = content.decode("utf-8", errors="surrogateescape")
@@ -1456,14 +1428,13 @@ def _server_properties_with_port(content: bytes, port: int, *, public_bind: bool
         updated.append(f"server-port={port}{newline}")
     result = "".join(updated)
     if public_bind:
-        # Preserve all unrelated properties, including online-mode / whitelist.
+        # preserve all unrelated properties, including online-mode / whitelist.
         result, matches = re.subn(r"(?m)^[ \t]*server-ip[ \t]*(?:=|:|[ \t]+)[^\r\n]*", "server-ip=", result)
         if not matches:
             if result and not result.endswith(("\n", "\r")):
                 result += newline
             result += f"server-ip={newline}"
     return result.encode("utf-8", errors="surrogateescape")
-
 
 def _server_is_running(root: Path) -> bool:
     state = root / ".trial-launcher-live.json"
@@ -1505,7 +1476,6 @@ def _server_is_running(root: Path) -> bool:
         pass
     return False
 
-
 def _remove_entry_at(parent_fd: int, name: str) -> None:
     item_stat = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
     if stat.S_ISLNK(item_stat.st_mode):
@@ -1522,7 +1492,6 @@ def _remove_entry_at(parent_fd: int, name: str) -> None:
     if not stat.S_ISREG(item_stat.st_mode):
         raise LauncherError("Можно удалить только файл или папку")
     os.unlink(name, dir_fd=parent_fd)
-
 
 def _directory_size_nofollow(root: Path) -> int:
     total = 0

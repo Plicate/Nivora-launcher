@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { pickFile } from '../services/fileBrowser'
 import Icon from './Icon.vue'
 import Collapsible from './Collapsible.vue'
 import CustomSelect from './CustomSelect.vue'
@@ -67,14 +68,10 @@ const currentDirectory = ref('')
 const selectedFile = ref<ServerFile>()
 const editorContent = ref('')
 const editorDirty = ref(false)
-const fileInput = ref<HTMLInputElement | null>(null)
-const coreInput = ref<HTMLInputElement | null>(null)
 const coreDropActive = ref(false)
 let coreDragDepth = 0
-const profileIconInput = ref<HTMLInputElement | null>(null)
-const profileBannerInput = ref<HTMLInputElement | null>(null)
-const profileIconFile = ref<File>()
-const profileBannerFile = ref<File>()
+const profileIconFile = ref<{ fileName: string; data: string; size: number }>()
+const profileBannerFile = ref<{ fileName: string; data: string; size: number }>()
 const profileIconPreview = ref('')
 const profileBannerPreview = ref('')
 const clearProfileIcon = ref(false)
@@ -160,7 +157,11 @@ const memorySetting = computed(() => {
 })
 const running = computed(() => Boolean(details.value?.status.running))
 const coreLabel = computed(() => details.value?.config.core || instance.value?.server_core || 'custom')
-const visibleTabs = computed(() => tabs.filter((item) => groupTabs[activeGroup.value].includes(item.id) && (props.showSettingsTab || item.id !== 'settings')))
+const visibleTabs = computed(() => tabs.filter((item) =>
+  groupTabs[activeGroup.value].includes(item.id)
+  && (props.showSettingsTab || item.id !== 'settings')
+,
+))
 
 function selectGroup(group: ServerGroup) {
   activeGroup.value = group
@@ -250,20 +251,21 @@ const profileGroupOptions = computed<SelectOption[]>(() => [
 ])
 
 function chooseProfileAsset(kind: 'icon' | 'banner') {
-  ;(kind === 'icon' ? profileIconInput.value : profileBannerInput.value)?.click()
+  void pickFile({
+    accept: 'image/png,image/jpeg,image/webp',
+    title: kind === 'icon' ? 'Иконка сервера' : 'Баннер сервера',
+  }).then((file) => {
+    if (file) loadProfileAsset(file, kind)
+  })
 }
 
-function loadProfileAsset(event: Event, kind: 'icon' | 'banner') {
-  const input = event.target as HTMLInputElement
-  const file = input.files?.[0]
-  if (!file) return
+function loadProfileAsset(file: { fileName: string; data: string; size: number }, kind: 'icon' | 'banner') {
   const limit = kind === 'icon' ? 2 * 1024 * 1024 : 8 * 1024 * 1024
-  if (file.size > limit || !['image/png', 'image/jpeg', 'image/webp'].includes(file.type)) {
-    emit('toast', file.size > limit ? 'Файл профиля слишком большой' : 'Поддерживаются PNG, JPEG и WebP')
-    input.value = ''
+  if (file.size > limit) {
+    emit('toast', 'Файл профиля слишком большой')
     return
   }
-  const preview = URL.createObjectURL(file)
+  const preview = `data:${profileAssetMime(file.fileName)};base64,${file.data}`
   if (kind === 'icon') {
     if (profileIconPreview.value.startsWith('blob:')) URL.revokeObjectURL(profileIconPreview.value)
     profileIconFile.value = file
@@ -275,7 +277,13 @@ function loadProfileAsset(event: Event, kind: 'icon' | 'banner') {
     profileBannerPreview.value = preview
     clearProfileBanner.value = false
   }
-  input.value = ''
+}
+
+function profileAssetMime(name: string): string {
+  const lower = name.toLowerCase()
+  if (lower.endsWith('.png')) return 'image/png'
+  if (lower.endsWith('.webp')) return 'image/webp'
+  return 'image/jpeg'
 }
 
 function clearProfileAsset(kind: 'icon' | 'banner') {
@@ -305,12 +313,12 @@ async function saveProfile() {
       clear_banner: clearProfileBanner.value,
     }
     if (profileIconFile.value) {
-      payload.icon_file_name = profileIconFile.value.name
-      payload.icon_data = await encodeFile(profileIconFile.value)
+      payload.icon_file_name = profileIconFile.value.fileName
+      payload.icon_data = profileIconFile.value.data
     }
     if (profileBannerFile.value) {
-      payload.banner_file_name = profileBannerFile.value.name
-      payload.banner_data = await encodeFile(profileBannerFile.value)
+      payload.banner_file_name = profileBannerFile.value.fileName
+      payload.banner_data = profileBannerFile.value.data
     }
     const result = await bridge.updateInstanceProfile(payload)
     profileGroups.value = result.groups || profileGroups.value
@@ -345,7 +353,7 @@ async function refreshCoreVersions(core: string, resetCurrent = true) {
     if (!coreVersionOptions.value.length && draft.version) {
       coreVersionOptions.value = [{ value: draft.version, label: draft.version, meta: 'Текущая версия' }]
     } else if (!coreVersionOptions.value.some((option) => option.value === draft.version)) {
-      // Сменили ядро, а прежней версии у нового нет — берём свежую;
+      // сменили ядро, а прежней версии у нового нет — берём свежую;
       // при обычной перезагрузке списка сохранённую версию не теряем.
       if (resetCurrent) draft.version = coreVersionOptions.value[0].value
       else if (draft.version) coreVersionOptions.value.unshift({ value: draft.version, label: draft.version, meta: 'Текущая версия' })
@@ -391,7 +399,7 @@ async function refreshStatus() {
     if (details.value) details.value.status = status
     recordMetric(status.metrics)
   } catch {
-    // The dashboard is best effort while the backend is restarting.
+    // the dashboard is best effort while the backend is restarting.
   } finally {
     statusBusy.value = false
   }
@@ -406,7 +414,7 @@ async function refreshLogs() {
     logCursor.value = value.cursor ?? logCursor.value
     if (details.value) details.value.status.running = value.running
   } catch {
-    // The status poll remains the fallback.
+    // the status poll remains the fallback.
   } finally {
     logBusy.value = false
   }
@@ -489,6 +497,17 @@ async function sendCommand() {
   }
 }
 
+async function sendQuickCommand(value: string) {
+  if (!instance.value || !running.value) return
+  try {
+    if (details.value) details.value.status = await bridge.serverCommand(instance.value.name, value)
+    emit('toast', `Отправлено: ${value}`)
+    await refreshLogs()
+  } catch (error) {
+    emit('toast', errorMessage(error))
+  }
+}
+
 async function openFile(file: ServerFile) {
   if (file.kind !== 'file' || !file.editable || !instance.value) return
   try {
@@ -512,32 +531,28 @@ async function saveFile() {
   }
 }
 
-async function uploadFile(event: Event, core = false) {
+async function chooseServerFile(core = false) {
   if (!instance.value || running.value) return
-  const input = event.target as HTMLInputElement
-  const file = input.files?.[0]
+  const file = await pickFile(core ? { accept: '.jar', title: 'Ядро сервера (server.jar)' } : { title: 'Загрузка файла на сервер' })
   if (!file) return
   try {
     if (core) {
       await uploadCoreFile(file)
     } else {
-      const data = await encodeFile(file)
-      await bridge.serverFileUpload(instance.value.name, `${currentDirectory.value ? `${currentDirectory.value}/` : ''}${file.name}`, data)
+      await bridge.serverFileUpload(instance.value.name, `${currentDirectory.value ? `${currentDirectory.value}/` : ''}${file.fileName}`, file.data)
       await load()
       emit('toast', 'Файл загружен')
     }
   } catch (error) {
     emit('toast', errorMessage(error))
-  } finally {
-    input.value = ''
   }
 }
 
-async function uploadCoreFile(file: File) {
+async function uploadCoreFile(file: { fileName: string; data: string; size: number }) {
   if (!instance.value || running.value) return
-  if (!file.name.toLowerCase().endsWith('.jar')) throw new Error('Загрузите файл ядра с расширением .jar')
+  if (!file.fileName.toLowerCase().endsWith('.jar')) throw new Error('Загрузите файл ядра с расширением .jar')
   if (file.size > 512 * 1024 * 1024) throw new Error('Файл ядра превышает лимит 512 MiB')
-  await bridge.uploadServerCore(instance.value.name, file.name, await encodeFile(file))
+  await bridge.uploadServerCore(instance.value.name, file.fileName, file.data)
   await load()
   emit('toast', 'Ядро загружено')
 }
@@ -558,7 +573,15 @@ function onCoreDrop(event: DragEvent) {
   coreDropActive.value = false
   const file = event.dataTransfer?.files[0]
   if (!file) return
-  void uploadCoreFile(file).catch((error) => emit('toast', errorMessage(error)))
+  // drag-and-drop остаётся быстрым путём: File читается прямо здесь.
+  void file.arrayBuffer().then((buffer) => {
+    let binary = ''
+    const bytes = new Uint8Array(buffer)
+    for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+      binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000))
+    }
+    return { fileName: file.name, data: btoa(binary), size: file.size }
+  }).then((picked) => uploadCoreFile(picked)).catch((error) => emit('toast', errorMessage(error)))
 }
 
 async function downloadCore() {
@@ -579,15 +602,6 @@ async function downloadCore() {
   } finally {
     coreDownloadBusy.value = false
   }
-}
-
-function encodeFile(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onload = () => resolve(String(reader.result).split(',', 2)[1] || '')
-    reader.onerror = () => reject(reader.error || new Error('Не удалось прочитать файл'))
-    reader.readAsDataURL(file)
-  })
 }
 
 function enterDirectory(file: ServerFile) {
@@ -849,7 +863,7 @@ async function loadProfileGroups() {
   try {
     profileGroups.value = (await bridge.instanceGroups()).groups || []
   } catch {
-    // Groups are optional profile metadata.
+    // groups are optional profile metadata.
   }
 }
 
@@ -943,6 +957,21 @@ defineExpose({ openSettings, stop })
       <ServerAccessPanel v-if="tab === 'players'" :key="instance.name" :name="instance.name" :running="running" @toast="emit('toast', $event)" />
       <ServerNetworkPanel v-if="tab === 'network'" :key="instance.name" :name="instance.name" :port="details.config.port" :running="running" :core="coreLabel" @toast="emit('toast', $event)" />
       <div v-else-if="tab === 'overview'" class="server-overview">
+          :name="instance.name"
+          :display-name="instance.display_name || instance.name"
+          :running="running"
+          :busy="actionBusy"
+          :active-action="activeAction"
+          :port="details.config.port"
+          :players="details.status.players"
+          :max-players="details.status.max_players"
+          :plugin-files="details.plugin_files || []"
+          @start="start"
+          @stop="stop"
+          @restart="restart"
+          @command="sendQuickCommand"
+          @toast="emit('toast', $event)"
+        />
         <div class="server-metric-grid">
            <div class="server-metric"><span>CPU</span><strong>{{ details.status.metrics.cpu_percent.toFixed(1) }}%</strong><svg viewBox="0 0 100 42" preserveAspectRatio="none" aria-label="График CPU"><polyline :points="metricPoints('cpu_percent')" /></svg><small>пиковое {{ (details.status.metrics.peak_cpu_percent || 0).toFixed(1) }}%</small></div>
            <div class="server-metric"><span>RAM</span><strong>{{ formatBytes(details.status.metrics.ram_bytes) }}</strong><svg viewBox="0 0 100 42" preserveAspectRatio="none" aria-label="График RAM"><polyline :points="metricPoints('ram_bytes')" /></svg><small>пик {{ formatBytes(details.status.metrics.peak_ram_bytes || 0) }}</small></div>
@@ -964,8 +993,8 @@ defineExpose({ openSettings, stop })
              <div class="server-core-drop" :class="{ 'server-core-drop--active': coreDropActive, 'server-core-drop--disabled': running }" :aria-disabled="running" @dragenter.prevent="onCoreDragEnter" @dragover.prevent="coreDropActive = true" @dragleave.prevent="onCoreDragLeave" @drop.prevent="onCoreDrop">
                <Icon name="upload" :size="17" />
                <span><strong>{{ coreDropActive ? 'Отпустите JAR, чтобы заменить ядро' : 'Заменить ядро' }}</strong><small>{{ running ? 'Сначала остановите сервер.' : 'Перетащите server.jar сюда или выберите файл.' }}</small></span>
-               <button class="button button--small button--outline" type="button" :disabled="running" @click="coreInput?.click()">Выбрать JAR</button>
-               <input ref="coreInput" class="workspace-file-input" type="file" accept=".jar" @change="uploadFile($event, true)" />
+               <button class="button button--small button--outline" type="button" :disabled="running" @click="chooseServerFile(true)">Выбрать JAR</button>
+               
              </div>
              <button class="button button--small button--quiet" type="button" @click="selectTab('settings')">Открыть конфигурацию</button>
            </section>
@@ -973,7 +1002,7 @@ defineExpose({ openSettings, stop })
         </div>
       </div>
       <ServerConsole v-else-if="tab === 'console'" v-model:command="command" :logs="logs" :running="running" :busy="actionBusy" expanded @send="sendCommand" />
-      <section v-else-if="tab === 'files'" class="workspace-card server-files"><div class="workspace-card-heading"><div><h3>Файлы сервера</h3><span class="muted">/{{ currentDirectory || 'root' }}</span></div><div class="workspace-card-actions"><button v-if="currentDirectory" class="button button--small button--quiet" type="button" @click="parentDirectory">Вверх</button><button class="button button--small button--outline" type="button" @click="fileInput?.click()"><Icon name="upload" :size="14" />Загрузить</button><input ref="fileInput" class="workspace-file-input" type="file" @change="uploadFile" /></div></div><div class="server-file-list"><button v-for="file in files" :key="file.path" class="server-file-row" type="button" @click="file.kind === 'directory' ? enterDirectory(file) : openFile(file)"><Icon :name="file.kind === 'directory' ? 'folder' : 'file'" :size="15" /><span><strong>{{ file.name }}</strong><small>{{ file.kind === 'directory' ? 'Папка' : formatBytes(file.size) }}</small></span><Icon v-if="file.kind === 'file' && file.editable" name="edit" :size="14" /></button><span v-if="!files.length" class="muted workspace-empty">В этой папке нет файлов.</span></div></section>
+      <section v-else-if="tab === 'files'" class="workspace-card server-files"><div class="workspace-card-heading"><div><h3>Файлы сервера</h3><span class="muted">/{{ currentDirectory || 'root' }}</span></div><div class="workspace-card-actions"><button v-if="currentDirectory" class="button button--small button--quiet" type="button" @click="parentDirectory">Вверх</button><button class="button button--small button--outline" type="button" @click="chooseServerFile(false)"><Icon name="upload" :size="14" />Загрузить</button></div></div><div class="server-file-list"><button v-for="file in files" :key="file.path" class="server-file-row" type="button" @click="file.kind === 'directory' ? enterDirectory(file) : openFile(file)"><Icon :name="file.kind === 'directory' ? 'folder' : 'file'" :size="15" /><span><strong>{{ file.name }}</strong><small>{{ file.kind === 'directory' ? 'Папка' : formatBytes(file.size) }}</small></span><Icon v-if="file.kind === 'file' && file.editable" name="edit" :size="14" /></button><span v-if="!files.length" class="muted workspace-empty">В этой папке нет файлов.</span></div></section>
       <section v-else-if="tab === 'plugins'" class="workspace-card">
         <div class="workspace-card-heading">
           <div><h3>Плагины сервера</h3><span class="muted">Установка из Modrinth, Spigot, Hangar или custom API</span></div>
@@ -1020,8 +1049,7 @@ defineExpose({ openSettings, stop })
              <button v-if="profileBannerPreview" class="text-button" type="button" @click="clearProfileAsset('banner')">Убрать</button>
            </div>
          </div>
-         <input ref="profileIconInput" class="workspace-file-input" type="file" accept="image/png,image/jpeg,image/webp" @change="loadProfileAsset($event, 'icon')" />
-         <input ref="profileBannerInput" class="workspace-file-input" type="file" accept="image/png,image/jpeg,image/webp" @change="loadProfileAsset($event, 'banner')" />
+         
          <div class="workspace-form-grid">
            <label class="field"><span>Отображаемое название</span><input v-model="profileDraft.display_name" maxlength="80" /></label>
            <div class="field"><span>Группа</span><CustomSelect v-model="profileDraft.group" :options="profileGroupOptions" /></div>

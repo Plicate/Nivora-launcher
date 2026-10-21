@@ -1,7 +1,4 @@
-// Экспорт экземпляра в формат Modrinth (.mrpack). Моды с Modrinth-метаданными
-// попадают в files[] с URL и sha1 (запрашиваем у каталога по version_id),
-// всё остальное — в overrides/. Так модпак остаётся обновляемым у получателя,
-// а локальные моды не теряются.
+// экспорт экземпляра в формат Modrinth (.mrpack). Моды с Modrinth-метаданными
 use serde_json::{json, Value};
 use std::fs::{self, File};
 use std::io::{Read, Write};
@@ -113,7 +110,7 @@ fn is_symlink(path: &Path) -> bool {
     fs::symlink_metadata(path).map(|meta| meta.is_symlink()).unwrap_or(false)
 }
 
-/// Локальная метка времени вида 2026.10.13-1442 — как time.strftime.
+/// локальная метка времени вида 2026.10.13-1442 — как time.strftime.
 fn local_timestamp() -> String {
     #[cfg(unix)]
     unsafe {
@@ -276,7 +273,7 @@ pub(crate) fn export_instance_as_mrpack(
         dependencies[loader_key] = json!(resolved_loader_version);
     }
 
-    // Как в Python: выбор по истинности (пустая строка — ложь), без trim.
+    // как в Python: выбор по истинности (пустая строка — ложь), без trim.
     let name = if !display_name.is_empty() {
         display_name.to_owned()
     } else if !instance.display_name.is_empty() {
@@ -413,14 +410,14 @@ mod tests {
             loader_version("fabric-loader-0.92.2-1.20.4", "1.20.4"),
             "0.92.2"
         );
-        // Без версии игры паттерн жадный и забирает всё до конца, как в Python.
+        // без версии игры паттерн жадный и забирает всё до конца, как в Python.
         assert_eq!(loader_version("neoforge-47.1.3-1.20.4", ""), "47.1.3-1.20.4");
         assert_eq!(loader_version("vanilla", ""), "");
     }
 
     #[test]
     fn archive_slug_is_safe_and_bounded() {
-        // Кириллица не попадает в [A-Za-z0-9._-] — всё схлопывается в fallback.
+        // кириллица не попадает в [A-Za-z0-9._-] — всё схлопывается в fallback.
         assert_eq!(archive_slug("Мой крутой пак!", "fallback"), "fallback");
         assert_eq!(archive_slug("Cool Pack v2", "fallback"), "Cool-Pack-v2");
         assert_eq!(archive_slug("...---", "fallback"), "fallback");

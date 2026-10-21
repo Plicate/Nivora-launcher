@@ -22,9 +22,8 @@ from .security import (
 )
 from .snapshots import SnapshotStore
 
-
 INSTANCE_SETTINGS_FILE = ".trial-launcher.json"
-SECURITY_POLICY_VERSION = 3
+SECURITY_POLICY_VERSION = 4
 PROJECT_METADATA_SUFFIX = ".trial-project.json"
 MODPACK_MARKER = ".trial-launcher-modpacks.json"
 MAX_ASSET_METADATA_BYTES = 64 * 1024
@@ -55,8 +54,9 @@ DEFAULT_INSTANCE_SETTINGS: dict[str, Any] = {
     "jvm_preset": "none",
     "console_colors": DEFAULT_CONSOLE_COLORS,
     "security_profile": "strict",
-    "security_permissions": ["files:instance", "desktop:display", "desktop:audio"],
+    "security_permissions": ["network:game", "files:instance", "desktop:display", "desktop:audio"],
     "security_policy_version": SECURITY_POLICY_VERSION,
+    "library_overrides": {},
 }
 INSTANCE_SNAPSHOT_CATEGORIES = ("mods", "resourcepacks", "shaders", "saves")
 MAX_NBT_FILE_BYTES = 64 * 1024 * 1024
@@ -69,10 +69,9 @@ INSTANCE_REGULAR_KEYS = tuple(key for key in DEFAULT_INSTANCE_SETTINGS if key no
 INSTANCE_SECURITY_DEFAULTS: dict[str, Any] = {
     "java_path": "",
     "security_profile": "strict",
-    "security_permissions": ["files:instance", "desktop:display", "desktop:audio"],
+    "security_permissions": ["network:game", "files:instance", "desktop:display", "desktop:audio"],
     "security_policy_version": SECURITY_POLICY_VERSION,
 }
-
 
 class InstanceWorkspace:
     def __init__(self, config: ConfigStore, instances: InstanceStore) -> None:
@@ -505,6 +504,29 @@ class InstanceWorkspace:
             raise LauncherError("Мир не найден")
         return world
 
+LIBRARY_OVERRIDE_ALLOWLIST = frozenset({
+    "org.lwjgl:lwjgl",
+    "org.lwjgl:lwjgl-freetype",
+    "org.lwjgl:lwjgl-glfw",
+    "org.lwjgl:lwjgl-jemalloc",
+    "org.lwjgl:lwjgl-openal",
+    "org.lwjgl:lwjgl-opengl",
+    "org.lwjgl:lwjgl-stb",
+    "org.lwjgl:lwjgl-tinyfd",
+})
+_LIBRARY_OVERRIDE_VERSION = __import__("re").compile(r"^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9._-]+)?$")
+
+def _normalize_library_overrides(value: Any) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    cleaned: dict[str, str] = {}
+    for name, version in value.items():
+        key = str(name).strip()
+        raw = str(version).strip()
+        if key not in LIBRARY_OVERRIDE_ALLOWLIST or not _LIBRARY_OVERRIDE_VERSION.fullmatch(raw):
+            continue
+        cleaned[key] = raw
+    return cleaned
 
 def _normalize_instance_settings(values: dict[str, Any]) -> dict[str, Any]:
     result = dict(DEFAULT_INSTANCE_SETTINGS)
@@ -532,6 +554,7 @@ def _normalize_instance_settings(values: dict[str, Any]) -> dict[str, Any]:
     result["fullscreen"] = bool(result.get("fullscreen", False))
     result["quick_play_world"] = str(result.get("quick_play_world", "")).strip()[:256]
     result["quick_play_server"] = str(result.get("quick_play_server", "")).strip()[:256]
+    result["library_overrides"] = _normalize_library_overrides(result.get("library_overrides"))
     raw_colors = result.get("console_colors")
     raw_colors = raw_colors if isinstance(raw_colors, dict) else {}
     console_colors: dict[str, str] = {}
@@ -540,7 +563,7 @@ def _normalize_instance_settings(values: dict[str, Any]) -> dict[str, Any]:
         console_colors[key] = color.lower() if re.fullmatch(r"#[0-9a-fA-F]{6}", color) else default
     result["console_colors"] = console_colors
     result["security_profile"] = normalize_security_profile(result.get("security_profile", "strict"))
-    # Аргументы JVM задаются на экземпляр и перекрывают профиль запуска —
+    # аргументы JVM задаются на экземпляр и перекрывают профиль запуска —
     # нормализация та же, что у глобальных профилей.
     result["jvm_arguments"] = _profile_arguments(result.get("jvm_arguments"))
     result["game_arguments"] = _profile_arguments(result.get("game_arguments"))
@@ -551,15 +574,14 @@ def _normalize_instance_settings(values: dict[str, Any]) -> dict[str, Any]:
     except (TypeError, ValueError):
         previous_policy_version = 0
     if previous_policy_version < SECURITY_POLICY_VERSION:
-        # Older defaults exposed both network and desktop channels without a consent step.
-        permissions = [permission for permission in permissions if permission != "network:game"]
-        for permission in ("desktop:display", "desktop:audio"):
+        # миграция v4: ≤3 молча выключали network:game, и Minecraft не видел серверов
+        # (ручной выбор пользователя после миграции не трогаем)
+        for permission in ("network:game", "desktop:display", "desktop:audio"):
             if permission not in permissions:
                 permissions.append(permission)
     result["security_permissions"] = permissions
     result["security_policy_version"] = SECURITY_POLICY_VERSION
     return result
-
 
 def _pretty_asset_name(file_name: str) -> str:
     value = file_name
@@ -574,7 +596,6 @@ def _pretty_asset_name(file_name: str) -> str:
     value = re.sub(r"[-_]+", " ", value)
     return " ".join(value.split()) or "Неизвестный ресурс"
 
-
 def _safe_asset_icon_url(value: str) -> str:
     try:
         parsed = urlsplit(value.strip())
@@ -583,7 +604,6 @@ def _safe_asset_icon_url(value: str) -> str:
     if parsed.scheme.lower() != "https" or not parsed.hostname or parsed.username or parsed.password:
         return ""
     return value.strip()[:2048]
-
 
 def _read_zip_entry(archive: zipfile.ZipFile, name: str, limit: int) -> bytes:
     if not name or name.startswith("/") or ".." in Path(name).parts:
@@ -596,7 +616,6 @@ def _read_zip_entry(archive: zipfile.ZipFile, name: str, limit: int) -> bytes:
     except (KeyError, OSError, RuntimeError, ValueError, zipfile.BadZipFile):
         return b""
 
-
 def _text_value(value: Any) -> str:
     if isinstance(value, str):
         return value.strip()
@@ -606,7 +625,6 @@ def _text_value(value: Any) -> str:
         return " ".join(part for part in (_text_value(item) for item in value) if part).strip()
     return ""
 
-
 def _author_value(value: Any) -> str:
     if isinstance(value, str):
         return value.strip()
@@ -615,7 +633,6 @@ def _author_value(value: Any) -> str:
     if isinstance(value, list):
         return ", ".join(part for part in (_author_value(item) for item in value) if part)
     return ""
-
 
 def _parse_archive_metadata(entry: str, raw: bytes) -> dict[str, str]:
     text = raw.decode("utf-8", errors="replace")
@@ -661,7 +678,6 @@ def _parse_archive_metadata(entry: str, raw: bytes) -> dict[str, str]:
         return {"display_name": match("displayName"), "version": match("version"), "author": match("authors")}
     return {}
 
-
 def _find_archive_icon(archive: zipfile.ZipFile) -> str:
     preferred = ("icon.png", "logo.png", "pack.png")
     names = archive.namelist()
@@ -675,7 +691,6 @@ def _find_archive_icon(archive: zipfile.ZipFile) -> str:
     )
     return candidates[0] if candidates else ""
 
-
 def _asset_image_data_url(value: bytes) -> str:
     if value.startswith(b"\x89PNG\r\n\x1a\n"):
         mime = "image/png"
@@ -687,10 +702,8 @@ def _asset_image_data_url(value: bytes) -> str:
         return ""
     return f"data:{mime};base64,{base64.b64encode(value).decode('ascii')}"
 
-
 def _write_instance_settings(path: Path, values: dict[str, Any]) -> None:
     _atomic_json_write(path, {key: values[key] for key in INSTANCE_REGULAR_KEYS}, private=True)
-
 
 def _within(path: Path, root: Path) -> bool:
     try:
@@ -698,7 +711,6 @@ def _within(path: Path, root: Path) -> bool:
         return True
     except ValueError:
         return False
-
 
 def _directory_size(path: Path) -> int:
     total = 0
@@ -709,7 +721,6 @@ def _directory_size(path: Path) -> int:
             except OSError:
                 continue
     return total
-
 
 def _unique_file(directory: Path, file_name: str) -> Path:
     candidate = directory / file_name
@@ -724,14 +735,12 @@ def _unique_file(directory: Path, file_name: str) -> Path:
             return candidate
         index += 1
 
-
 def _as_int(value: Any) -> int | None:
     try:
         number = int(value)
     except (TypeError, ValueError):
         return None
     return number if number > 0 else None
-
 
 def _image_data_url(path: Path) -> str:
     if path.is_symlink() or not path.is_file() or path.stat().st_size > 2 * 1024 * 1024:
@@ -743,7 +752,6 @@ def _image_data_url(path: Path) -> str:
         return "data:image/png;base64," + base64.b64encode(raw).decode("ascii")
     except OSError:
         return ""
-
 
 def _read_nbt(path: Path) -> dict[str, Any]:
     try:
@@ -775,7 +783,6 @@ def _read_nbt(path: Path) -> dict[str, Any]:
     except (IndexError, ValueError, UnicodeDecodeError, RecursionError) as exc:
         raise LauncherError(f"Некорректный NBT-файл: {path.name}") from exc
     return value if isinstance(value, dict) else {}
-
 
 class _NbtReader:
     def __init__(self, raw: bytes) -> None:
@@ -860,7 +867,6 @@ class _NbtReader:
         value = self.raw[self.offset : self.offset + size]
         self.offset += size
         return value
-
 
 def _write_private_file(path: Path, content: bytes) -> None:
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)

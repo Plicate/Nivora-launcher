@@ -10,7 +10,6 @@ from .config import ConfigStore, _atomic_json_write
 from .errors import LauncherError
 from .plugins import PluginStore
 
-
 def _requests(config):
     path = config.paths.data_home / 'plugin-dev-reload.json'
     if path.is_symlink(): raise LauncherError('Unsafe developer reload file')
@@ -23,12 +22,11 @@ def _requests(config):
         raise LauncherError('Invalid reload identity or timestamp')
     return data
 
-
 def request_reload(plugin_id: str, config: ConfigStore | None = None):
     config = config or ConfigStore()
     if not config.settings.developer_mode: raise LauncherError('Plugin reload requires developer mode')
     store = PluginStore(config)
-    # An explicit reload is not an implicit grant to run edited or unsigned code.
+    # an explicit reload is not an implicit grant to run edited or unsigned code.
     store.runtime_source(plugin_id)
     requests = _requests(config)
     if len(requests) >= 128 and plugin_id not in requests: raise LauncherError('Reload registry is full')
@@ -36,12 +34,11 @@ def request_reload(plugin_id: str, config: ConfigStore | None = None):
     _atomic_json_write(config.paths.data_home / 'plugin-dev-reload.json', requests, private=True)
     return requests[plugin_id]
 
-
 def changes(config: ConfigStore):
     if not config.settings.developer_mode: return {'enabled': False, 'generation': '', 'requests': {}}
     store = PluginStore(config)
     entries = []
-    # Entry scripts are single-file bundles; no arbitrary recursive directory walk.
+    # entry scripts are single-file bundles; no arbitrary recursive directory walk.
     for root in islice(store.root.iterdir(), 128):
         if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,79}', root.name) or not root.is_dir(): continue
         item = {'id': root.name}

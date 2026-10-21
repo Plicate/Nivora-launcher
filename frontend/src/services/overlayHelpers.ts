@@ -1,6 +1,4 @@
-// Чистые helpers оверлея без зависимостей: используются и в окне лаунчера,
-// и в окне оверлея, и в node-тестах.
-
+// чистые helpers оверлея без зависимостей: используются и в окне лаунчера,
 export const OVERLAY_WINDOW_LABEL = 'nivora-overlay'
 
 export const DEFAULT_OVERLAY_SETTINGS = {
@@ -20,19 +18,15 @@ export const DEFAULT_OVERLAY_SETTINGS = {
   compact: false,
   show_clock: true,
   show_system_metrics: true,
+  metrics_gpu: true,
   metrics_cpu: true,
   metrics_ram: true,
-  metrics_gpu: true,
   metrics_disk: true,
   metrics_temperatures: true,
   system_metrics_display: 'overlay',
   show_chat: true,
 } as const
 
-// Модификаторы и клавиши, которые реально умеет регистрировать системный
-// слой глобальных горячих клавиш. Всему прочему (пунктуация, «е» из русской
-// раскладки, имя окна) здесь не место — раньше поле было свободным текстом,
-// и мусор в нём молча убивал оверлей.
 const MODIFIERS = new Set(['ctrl', 'control', 'alt', 'option', 'shift', 'meta', 'super', 'command', 'commandorcontrol'])
 const SPECIAL_KEYS = new Set([
   'tab', 'space', 'enter', 'return', 'up', 'down', 'left', 'right',
@@ -50,9 +44,6 @@ function canonicalModifier(part: string): string | null {
   return 'Ctrl'
 }
 
-// Точечный список пунктуационных клавиш: без него «Ctrl+,» (настройки по
-// умолчанию) нельзя ни записать рекордером, ни сохранить — canonicalKey
-// возвращал null и normalizeHotkey затирал значение фолбэком.
 const PUNCTUATION_KEYS = new Set([',', '.', '/', ';', "'", '[', ']', '\\', '-', '=', '`'])
 
 function canonicalKey(part: string): string | null {
@@ -102,8 +93,6 @@ export function normalizeHotkey(value: string | undefined, fallback: string): st
   return [...modifiers, keys[0]].join('+')
 }
 
-// Сбор комбинации из события клавиатуры: пока нажаты только модификаторы,
-// ждём основную клавишу. Неподдерживаемую клавишу игнорируем.
 export function hotkeyFromEvent(event: { ctrlKey?: boolean; altKey?: boolean; shiftKey?: boolean; metaKey?: boolean; key: string }): string {
   const key = canonicalKey(event.key || '')
   if (!key || isModifierOnly(event.key || '')) return ''
@@ -118,11 +107,7 @@ export function hotkeyFromEvent(event: { ctrlKey?: boolean; altKey?: boolean; sh
 
 export function overlayWindowRequested(): boolean {
   if (typeof window === 'undefined') return false
-  // Два независимых признака. Параметр URL может потеряться при редиректах
-  // и особенностях протокола webview, а вот метка окна зашита в рантайм
-  // Tauri — её потерять нельзя. Раньше при потере параметра окно оверлея
-  // рисовало ВЕСЬ лаунчер заново (второй bootstrap, «чудо с уменьшенным
-  // окном»), вместо самого оверлея.
+  // два независимых признака: параметр URL живёт при редиректах webview
   if (new URLSearchParams(window.location.search).get('window') === 'overlay') return true
   try {
     const internals = (window as Window & { __TAURI_INTERNALS__?: { metadata?: { currentWindow?: { label?: string } } } }).__TAURI_INTERNALS__
@@ -138,19 +123,6 @@ export function recordingFileName(file: string): string {
   return parts[parts.length - 1] || file
 }
 
-// Параметры создания окна оверлея. Три режима:
-//  - 'x11'      — прозрачное бордерлесс-окно на весь монитор, поверх всех
-//                 (обычный путь для X11 и XWayland-сборок пакета);
-//  - 'wayland'  — нативный Wayland: клиент не может ставить себя поверх
-//                 других окон и позиционировать себя, поэтому окно обычное,
-//                 непрозрачное, с рамкой, по центру и не больше 980×640;
-//  - 'fallback' — совместимое окно вместо прозрачного: либо прозрачное
-//                 НЕ создалось (аварийно, NVIDIA/XWayland и т.п.), либо
-//                 среда заведомо рискованная и непрозрачность включена
-//                 превентивно (см. setOverlayOpaqueWindow в overlay.ts):
-//                 там прозрачное окно перерисовывается только под курсором.
-//                 Лучше непрозрачный работающий оверлей, чем «кнопка
-//                 ничего не делает».
 export type OverlayWindowMode = 'x11' | 'wayland' | 'fallback'
 
 export interface OverlayWindowPlan {
@@ -191,7 +163,7 @@ export function overlayWindowPlan(
     url: 'index.html?window=overlay',
     transparent: true,
     decorations: false,
-    // Тень у бордерлесс-окна на WebKitGTK — источник артефактов, оверлею
+    // тень у бордерлесс-окна на WebKitGTK — источник артефактов, оверлею
     // она не нужна.
     shadow: false,
     alwaysOnTop: true,

@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { openInLauncherExplorer, pickDirectory, pickFile, pickFiles } from '../services/fileBrowser'
+import { openContextMenu, type ContextMenuItem } from '../services/contextMenu'
 import CustomSelect from './CustomSelect.vue'
 import Icon from './Icon.vue'
 import Collapsible from './Collapsible.vue'
@@ -7,16 +9,20 @@ import LoaderBadge from './LoaderBadge.vue'
 import MemoryField from './MemoryField.vue'
 import ModAuditDialog from './ModAuditDialog.vue'
 import NumericStepper from './NumericStepper.vue'
+import ShaderAnalysisDialog from './ShaderAnalysisDialog.vue'
+import UsageStatisticsDialog from './UsageStatisticsDialog.vue'
 import { bridge } from '../services/bridge'
-import { confirmDialog, promptDialog } from '../services/dialogs'
-import type { BackupSchedule, CrashReport, InstanceAsset, InstanceConsoleColors, InstanceDetails, InstanceFile, InstanceInfo, InstanceLogArchive, InstanceSettings, ModDependencyGraph, ProjectType, ResourceUpdate, SecurityPermission, SecurityProfile, ServerMetrics, ServerSnapshot, WorldBackup } from '../types'
+import { chooseDialog, confirmDialog, promptDialog } from '../services/dialogs'
+import { diagnoseLaunchFailure, diagnoseManually, offerAutoRepair } from '../services/autoRepair'
+import type { AccountInfo, BackupSchedule, CrashReport, InstanceAsset, InstanceConsoleColors, InstanceDetails, InstanceFile, InstanceInfo, InstanceLogArchive, InstanceSettings, InstanceVersionsPayload, InstanceVersionComponent, InstanceWorld, ModDependencyGraph, ProjectType, ResourceUpdate, SecurityPermission, SecurityProfile, ServerMetrics, ServerSnapshot, WorldBackup } from '../types'
 import type { PluginInstanceRef } from '../../../plugins/api'
 
-type WorkspaceTab = 'overview' | 'console' | 'mods' | 'resourcepacks' | 'shaders' | 'datapacks' | 'worlds' | 'servers' | 'snapshots' | 'backups' | 'screenshots' | 'files' | 'settings'
+type WorkspaceTab = 'overview' | 'console' | 'mods' | 'resourcepacks' | 'shaders' | 'datapacks' | 'worlds' | 'servers' | 'versions' | 'snapshots' | 'backups' | 'screenshots' | 'files' | 'settings'
 
 const props = withDefaults(defineProps<{
   instance?: InstanceInfo
   account?: string
+  accountInfo?: AccountInfo
   confirmDestructive?: boolean
   focusTab?: WorkspaceTab
   settingsOnly?: boolean
@@ -43,6 +49,7 @@ const tabs: Array<{ id: WorkspaceTab; label: string; icon: string }> = [
   { id: 'datapacks', label: 'Датапаки', icon: 'file' },
   { id: 'worlds', label: 'Миры', icon: 'instances' },
   { id: 'servers', label: 'Серверы', icon: 'globe' },
+  { id: 'versions', label: 'Версии', icon: 'list' },
   { id: 'snapshots', label: 'Снапшоты', icon: 'archive' },
   { id: 'backups', label: 'Бэкапы', icon: 'shield' },
   { id: 'screenshots', label: 'Скриншоты', icon: 'image' },
@@ -66,16 +73,16 @@ const graphicsOptions = [
 const securityProfileOptions: Array<{ value: SecurityProfile; label: string; meta: string }> = [
   { value: 'compat', label: 'Compatibility', meta: 'Старые моды: исходные HOME/XDG и без sandbox' },
   { value: 'manual', label: 'Manual', meta: 'Разрешения экземпляра и мягкая cell-изоляция' },
-  { value: 'strict', label: 'Strict', meta: 'bubblewrap, закрытая домашняя папка и deny-by-default' },
+  { value: 'strict', label: 'Strict', meta: 'bubblewrap (Linux) / AppContainer (Windows), закрытая домашняя папка и deny-by-default' },
   { value: 'off', label: 'Off', meta: 'Без ограничений лаунчера, только для доверенных сборок' },
 ]
 
 const securityPermissionOptions: Array<{ value: SecurityPermission; label: string; description: string; highRisk?: boolean }> = [
-  { value: 'network:game', label: 'Сеть игры', description: 'Доступ ко всем адресам, включая интернет и локальную сеть; включайте только для нужных сетевых функций', highRisk: true },
+  { value: 'network:game', label: 'Сеть игры', description: 'Доступ к серверам: интернет и локальная сеть. Без него игра не находит ни один сервер', highRisk: true },
   { value: 'files:instance', label: 'Файлы экземпляра', description: 'Запись в папку текущего экземпляра' },
-  { value: 'desktop:display', label: 'Экран игры', description: 'Окно игры и GPU; X11/XWayland может раскрывать экран и ввод других окон', highRisk: true },
-  { value: 'desktop:audio', label: 'Звук игры', description: 'Подключение к PipeWire/PulseAudio и доступ к звуковым устройствам', highRisk: true },
-  { value: 'files:host-read', label: 'Чтение файлов компьютера', description: 'Доступ за пределами папки экземпляра', highRisk: true },
+  { value: 'desktop:display', label: 'Экран игры', description: 'Окно игры и GPU; X11/XWayland может раскрывать экран и ввод других окон. На Windows без него закрыты буфер обмена и чужие окна', highRisk: true },
+  { value: 'desktop:audio', label: 'Звук игры', description: 'Подключение к PipeWire/PulseAudio и доступ к звуковым устройствам; на Windows звук отдельно не запрещается', highRisk: true },
+  { value: 'files:host-read', label: 'Чтение файлов компьютера', description: 'Доступ за пределами папки экземпляра; в Strict на Windows не поддерживается', highRisk: true },
   { value: 'files:host-write', label: 'Запись файлов компьютера', description: 'Изменение данных за пределами папки экземпляра', highRisk: true },
   { value: 'process:spawn', label: 'Запуск процессов', description: 'Не ограничивается внутри одной JVM; доступно только в Off', highRisk: true },
   { value: 'chat:read', label: 'Чтение чата и команд', description: 'Требует Java instrumentation; доступно только в Off', highRisk: true },
@@ -94,8 +101,6 @@ const settingsSaveState = ref<'saved' | 'dirty' | 'saving' | 'error'>('saved')
 const settingsSaveMessage = ref('Изменения сохранены')
 const syncingSettings = ref(false)
 const importing = ref(false)
-const fileInput = ref<HTMLInputElement | null>(null)
-const workspaceFileInput = ref<HTMLInputElement | null>(null)
 const profileIconInput = ref<HTMLInputElement | null>(null)
 const profileBannerInput = ref<HTMLInputElement | null>(null)
 const logs = ref<string[]>([])
@@ -111,6 +116,13 @@ const archiveLoading = ref(false)
 const running = ref(false)
 const metrics = ref<ServerMetrics>()
 const metricHistory = ref<ServerMetrics[]>([])
+const lastMetrics = ref<ServerMetrics | Record<string, unknown>>()
+const usageDialogOpen = ref(false)
+const versionsPayload = ref<InstanceVersionsPayload>()
+const versionsLoading = ref(false)
+const versionsBusy = ref(false)
+const versionJsonInput = ref<HTMLInputElement | null>(null)
+const shaderAnalysisTarget = ref<{ name: string; size?: number } | null>(null)
 const consoleRef = ref<HTMLElement | null>(null)
 const consoleStickToBottom = ref(true)
 const instanceFiles = ref<InstanceFile[]>([])
@@ -137,8 +149,8 @@ const updateResults = ref<ResourceUpdate[]>([])
 const checkingUpdates = ref(false)
 const updatingResourceId = ref('')
 const profileSaving = ref(false)
-const profileIconFile = ref<File>()
-const profileBannerFile = ref<File>()
+const profileIconFile = ref<{ fileName: string; data: string; size: number }>()
+const profileBannerFile = ref<{ fileName: string; data: string; size: number }>()
 const profileIconPreview = ref('')
 const profileBannerPreview = ref('')
 const clearProfileIcon = ref(false)
@@ -172,7 +184,7 @@ const draft = reactive<InstanceSettings>({
   jvm_preset: 'none',
   console_colors: { ...defaultConsoleColors },
   security_profile: 'strict',
-  security_permissions: ['files:instance', 'desktop:display', 'desktop:audio'],
+  security_permissions: ['network:game', 'files:instance', 'desktop:display', 'desktop:audio'],
 })
 
 const activeAssets = computed<InstanceAsset[]>(() => {
@@ -197,7 +209,9 @@ const activeResourceProjectType = computed<Exclude<ProjectType, 'plugin' | 'modp
   return undefined
 })
 const canCheckResourceUpdates = computed(() => Boolean(activeResourceProjectType.value))
-const visibleTabs = computed(() => tabs.filter((item) => props.showSettingsTab || item.id !== 'settings'))
+const visibleTabs = computed(() => tabs.filter((item) =>
+  props.showSettingsTab || item.id !== 'settings',
+))
 const snapshots = computed<ServerSnapshot[]>(() => details.value?.snapshots?.[snapshotCategory.value] || [])
 const snapshotCount = computed(() => Object.values(details.value?.snapshots || {}).reduce((total, values) => total + values.length, 0))
 const consoleDisplayLines = computed(() => {
@@ -227,6 +241,154 @@ function selectTab(value: WorkspaceTab) {
   if (value === 'console') activeArchiveId.value = ''
   if (value === 'files') void loadWorkspaceFiles()
   if (value === 'screenshots') void loadScreenshots()
+  if (value === 'versions') void loadVersions()
+}
+
+async function loadVersions() {
+  if (!props.instance || versionsLoading.value) return
+  versionsLoading.value = true
+  try {
+    versionsPayload.value = await bridge.instanceVersions(props.instance.name)
+  } catch (error) {
+    emit('toast', errorMessage(error))
+  } finally {
+    versionsLoading.value = false
+  }
+}
+
+async function changeMinecraftVersion(component: InstanceVersionComponent) {
+  if (!props.instance || versionsBusy.value) return
+  try {
+    const versions = await bridge.versions(true)
+    const releases = versions.versions.filter((value) => value.type === 'release').slice(0, 60)
+    const choice = await chooseDialog(
+      `Текущая версия: ${component.version}`,
+      releases.map((value) => ({ value: value.id, label: value.id, description: formatDate(Math.round(new Date(value.release_time).getTime() / 1000)) })),
+      { title: 'Смена версии Minecraft', detail: 'Моды, миры и настройки сохранятся; файлы версии будут скачаны заново. Моды, собранные под старую версию, могут не запуститься.', confirmLabel: 'Сменить' },
+    )
+    if (!choice || choice === component.version) return
+    if (!(await confirmDialog(`Заменить Minecraft ${component.version} на ${choice} в этом экземпляре?`, { confirmLabel: 'Заменить' }))) return
+    versionsBusy.value = true
+    await bridge.repairInstanceVersion(props.instance.name, { version: choice })
+    emit('toast', `Версия Minecraft изменена на ${choice}`)
+    emit('changed')
+    await loadVersions()
+  } catch (error) {
+    emit('toast', errorMessage(error))
+  } finally {
+    versionsBusy.value = false
+  }
+}
+
+async function changeLoader(component: InstanceVersionComponent) {
+  if (!props.instance || versionsBusy.value) return
+  try {
+    const loaderKinds: Array<{ value: string; label: string; description: string }> = [
+      { value: 'vanilla', label: 'Vanilla', description: 'Без модлоадера' },
+      { value: 'fabric', label: 'Fabric', description: 'Легкий модлоадер, свежие версии игры' },
+      { value: 'quilt', label: 'Quilt', description: 'Форк Fabric' },
+      { value: 'forge', label: 'Forge', description: 'Классика модов (установка требует Java)' },
+      { value: 'neoforge', label: 'NeoForge', description: 'Современный форк Forge' },
+    ]
+    const choice = await chooseDialog(
+      `Текущий модлоадер: ${component.title}${component.version !== '—' ? ` ${component.version}` : ''}`,
+      loaderKinds,
+      { title: 'Смена модлоадера', detail: 'Моды, миры и настройки сохранятся. Моды другого модлоадера работать не будут.', confirmLabel: 'Далее' },
+    )
+    if (!choice) return
+    let loaderVersion = ''
+    if (choice !== 'vanilla') {
+      const result = await bridge.loaderChoices(choice as 'fabric', props.instance.minecraft_version || component.version)
+      const available = result.choices.slice(0, 30)
+      if (!available.length) {
+        emit('toast', `Для ${props.instance.minecraft_version || component.version} нет сборок ${choice}`)
+        return
+      }
+      loaderVersion = await chooseDialog(
+        'Версия модлоадера',
+        available.map((value) => ({ value: value.version, label: value.version, description: '' })),
+        { title: choice, detail: 'Обычно подходит свежая версия.', confirmLabel: 'Применить' },
+      ) || available[0].version
+    } else if (component.removable) {
+      if (!(await confirmDialog('Убрать модлоадер и вернуть чистую версию Minecraft?', { confirmLabel: 'Убрать' }))) return
+    }
+    versionsBusy.value = true
+    await bridge.repairInstanceVersion(props.instance.name, { loader: choice as 'vanilla', loader_version: loaderVersion })
+    emit('toast', choice === 'vanilla' ? 'Экземпляр переведён на чистую версию' : `Модлоадер изменён на ${choice}`)
+    emit('changed')
+    await loadVersions()
+  } catch (error) {
+    emit('toast', errorMessage(error))
+  } finally {
+    versionsBusy.value = false
+  }
+}
+
+async function changeLwjgl(component: InstanceVersionComponent) {
+  if (!props.instance || versionsBusy.value || !versionsPayload.value) return
+  try {
+    const options = versionsPayload.value.lwjgl_versions.map((value) => ({
+      value,
+      label: `LWJGL ${value}`,
+      description: value === component.version ? 'текущая версия из version JSON' : '',
+    }))
+    if (component.overridden) options.unshift({ value: '__reset__', label: 'Вернуть версию из version JSON', description: `сейчас переопределено на ${component.overridden}` })
+    const choice = await chooseDialog(
+      `Текущая версия: ${component.version}${component.overridden ? ` (переопределена на ${component.overridden})` : ''}`,
+      options,
+      { title: 'Версия LWJGL 3', detail: 'Библиотека окна, ввода и OpenGL. Новые сборки качаются с Maven Central и помогают с багами драйверов на новых версиях.', confirmLabel: 'Применить' },
+    )
+    if (!choice) return
+    const overrides = { ...(versionsPayload.value.library_overrides || {}) }
+    if (choice === '__reset__') {
+      delete overrides['org.lwjgl:lwjgl']
+      delete overrides['org.lwjgl:lwjgl-glfw']
+      delete overrides['org.lwjgl:lwjgl-freetype']
+      delete overrides['org.lwjgl:lwjgl-jemalloc']
+      delete overrides['org.lwjgl:lwjgl-openal']
+      delete overrides['org.lwjgl:lwjgl-opengl']
+      delete overrides['org.lwjgl:lwjgl-stb']
+      delete overrides['org.lwjgl:lwjgl-tinyfd']
+    } else {
+      for (const name of ['org.lwjgl:lwjgl', 'org.lwjgl:lwjgl-glfw', 'org.lwjgl:lwjgl-freetype', 'org.lwjgl:lwjgl-jemalloc', 'org.lwjgl:lwjgl-openal', 'org.lwjgl:lwjgl-opengl', 'org.lwjgl:lwjgl-stb', 'org.lwjgl:lwjgl-tinyfd']) {
+        overrides[name] = choice
+      }
+    }
+    versionsBusy.value = true
+    await bridge.instanceVersionOverrideSave(props.instance.name, overrides)
+    emit('toast', choice === '__reset__' ? 'Версия LWJGL возвращена к версии Minecraft' : `LWJGL переопределён на ${choice}`)
+    await loadVersions()
+  } catch (error) {
+    emit('toast', errorMessage(error))
+  } finally {
+    versionsBusy.value = false
+  }
+}
+
+async function chooseVersionJson() {
+  const file = await pickFile({ accept: '.json,application/json', title: 'JSON-манифест версии' })
+  if (!file) return
+  await importVersionJson(file)
+}
+
+async function importVersionJson(file: { fileName: string; data: string; size: number }) {
+  if (!props.instance) return
+  if (file.size > 4 * 1024 * 1024) {
+    emit('toast', 'Файл версии превышает лимит 4 МиБ')
+    return
+  }
+  if (!(await confirmDialog(`Установить свою версию «${file.fileName}» в этот экземпляр? Файлы версии и библиотеки будут скачаны.`, { confirmLabel: 'Установить' }))) return
+  versionsBusy.value = true
+  try {
+    await bridge.instanceVersionImport(props.instance.name, file.fileName, file.data)
+    emit('toast', `Своя версия «${file.fileName.replace(/\.json$/i, '')}» установлена`)
+    emit('changed')
+    await loadVersions()
+  } catch (error) {
+    emit('toast', errorMessage(error))
+  } finally {
+    versionsBusy.value = false
+  }
 }
 
 function consoleLineColor(line: string): string {
@@ -433,25 +595,82 @@ const profileGroupOptions = computed(() => [
 ])
 
 function chooseProfileAsset(kind: 'icon' | 'banner') {
-  ;(kind === 'icon' ? profileIconInput.value : profileBannerInput.value)?.click()
+  void pickFile({
+    accept: 'image/png,image/jpeg,image/webp',
+    title: kind === 'icon' ? 'Иконка экземпляра' : 'Баннер экземпляра',
+  }).then((file) => {
+    if (file) loadProfileAsset(file, kind)
+  })
 }
 
-function loadProfileAsset(event: Event, kind: 'icon' | 'banner') {
-  const input = event.target as HTMLInputElement
-  const file = input.files?.[0]
-  if (!file) return
+// ── Ярлыки экземпляра (рабочий стол / меню приложений) ──────────────
+const shortcutBusy = ref(false)
+const shortcutStatus = ref<{ supported: boolean; platform: string; desktop: { exists: boolean; path: string }; menu: { exists: boolean; path: string } } | null>(null)
+
+async function refreshShortcutStatus() {
+  if (!props.instance) return
+  try {
+    shortcutStatus.value = await bridge.instanceShortcutStatus(props.instance.name)
+  } catch {
+    // недоступно (например, браузерный предпросмотр) — просто не показываем
+    shortcutStatus.value = null
+  }
+}
+
+async function toggleShortcut(location: 'desktop' | 'menu') {
+  if (!props.instance || shortcutBusy.value) return
+  shortcutBusy.value = true
+  try {
+    if (shortcutStatus.value?.[location]?.exists) {
+      await bridge.instanceShortcutRemove(props.instance.name, location)
+      emit('toast', location === 'desktop' ? 'Ярлык убран с рабочего стола' : 'Ярлык убран из меню приложений')
+    } else {
+      const created = await bridge.instanceShortcutCreate(props.instance.name, location)
+      emit('toast', location === 'desktop' ? `Ярлык создан: ${created.path}` : `Ярлык создан: ${created.path}`)
+    }
+  } catch (error) {
+    emit('toast', errorMessage(error))
+  } finally {
+    shortcutBusy.value = false
+    void refreshShortcutStatus()
+  }
+}
+
+// ── Экспорт списка модов (Markdown / CSV / текст) ───────────────────
+const modListBusy = ref(false)
+
+async function exportModList(format: 'markdown' | 'csv' | 'text') {
+  if (!props.instance || modListBusy.value) return
+  modListBusy.value = true
+  try {
+    const result = await bridge.instanceModListExport(props.instance.name, format)
+    const url = URL.createObjectURL(new Blob([result.content], { type: format === 'csv' ? 'text/csv;charset=utf-8' : 'text/plain;charset=utf-8' }))
+    const link = document.createElement('a')
+    link.href = url
+    link.download = result.file_name
+    link.click()
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+    emit('toast', result.count > 0 ? `Список модов сохранён: ${result.file_name} (${result.count})` : 'В экземпляре нет модов — файл пустой')
+  } catch (error) {
+    emit('toast', errorMessage(error))
+  } finally {
+    modListBusy.value = false
+  }
+}
+
+function profileAssetMime(name: string): string {  const lower = name.toLowerCase()
+  if (lower.endsWith('.png')) return 'image/png'
+  if (lower.endsWith('.webp')) return 'image/webp'
+  return 'image/jpeg'
+}
+
+function loadProfileAsset(file: { fileName: string; data: string; size: number }, kind: 'icon' | 'banner') {
   const limit = kind === 'icon' ? 2 * 1024 * 1024 : 8 * 1024 * 1024
   if (file.size > limit) {
     emit('toast', `Файл ${kind === 'icon' ? 'иконки' : 'баннера'} слишком большой`)
-    input.value = ''
     return
   }
-  if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type)) {
-    emit('toast', 'Поддерживаются PNG, JPEG и WebP')
-    input.value = ''
-    return
-  }
-  const preview = URL.createObjectURL(file)
+  const preview = `data:${profileAssetMime(file.fileName)};base64,${file.data}`
   if (kind === 'icon') {
     if (profileIconPreview.value.startsWith('blob:')) URL.revokeObjectURL(profileIconPreview.value)
     profileIconFile.value = file
@@ -463,7 +682,6 @@ function loadProfileAsset(event: Event, kind: 'icon' | 'banner') {
     profileBannerPreview.value = preview
     clearProfileBanner.value = false
   }
-  input.value = ''
 }
 
 function clearProfileAsset(kind: 'icon' | 'banner') {
@@ -495,12 +713,12 @@ async function saveProfile() {
       clear_banner: clearProfileBanner.value,
     }
     if (profileIconFile.value) {
-      payload.icon_file_name = profileIconFile.value.name
-      payload.icon_data = toBase64(new Uint8Array(await profileIconFile.value.arrayBuffer()))
+      payload.icon_file_name = profileIconFile.value.fileName
+      payload.icon_data = profileIconFile.value.data
     }
     if (profileBannerFile.value) {
-      payload.banner_file_name = profileBannerFile.value.name
-      payload.banner_data = toBase64(new Uint8Array(await profileBannerFile.value.arrayBuffer()))
+      payload.banner_file_name = profileBannerFile.value.fileName
+      payload.banner_data = profileBannerFile.value.data
     }
     const result = await bridge.updateInstanceProfile(payload)
     profileGroups.value = result.groups || profileGroups.value
@@ -536,7 +754,7 @@ async function refreshWorkspaceSnapshot() {
     syncProfileDraft(next.instance)
     running.value = Boolean(next.instance.running)
   } catch {
-    // Polling is best effort; the next event or interval will retry.
+    // polling is best effort; the next event or interval will retry.
   } finally {
     workspaceRefreshInFlight = false
   }
@@ -566,9 +784,10 @@ async function pollLiveLog() {
     }
     running.value = result.running
     recordMetrics(result.metrics)
+    if (result.last_metrics) lastMetrics.value = result.last_metrics
     void scrollConsoleIfNeeded()
   } catch {
-    // The event stream remains the fast path while the backend is restarting.
+    // the event stream remains the fast path while the backend is restarting.
   } finally {
     liveLogPollInFlight = false
   }
@@ -746,6 +965,35 @@ const canExportModpack = computed(() => {
   return Boolean(instance && (instance.game_edition || 'java') === 'java' && instance.loader !== 'vanilla')
 })
 
+const repairBusy = ref(false)
+const diagnoseBusy = ref(false)
+async function diagnoseInstance(exitCode?: number | null) {
+  if (!props.instance || diagnoseBusy.value) return
+  diagnoseBusy.value = true
+  try {
+    await diagnoseManually(props.instance.name, exitCode)
+  } catch (error) {
+    emit('toast', errorMessage(error))
+  } finally {
+    diagnoseBusy.value = false
+  }
+}
+
+async function repairVersion() {
+  if (!props.instance) return
+  if (!(await confirmDialog('Пересоздать версию и модлоадер этого экземпляра? Моды, конфиги, миры и настройки не затрагиваются; файлы версии будут скачаны заново.', { confirmLabel: 'Восстановить' }))) return
+  repairBusy.value = true
+  try {
+    const result = await bridge.repairInstanceVersion(props.instance.name)
+    emit('toast', `Версия восстановлена: ${result.version_id}`)
+    emit('changed')
+  } catch (error) {
+    emit('toast', errorMessage(error))
+  } finally {
+    repairBusy.value = false
+  }
+}
+
 async function duplicateCurrent() {
   if (!props.instance) return
   const target = await promptDialog(`Имя копии экземпляра «${props.instance.display_name || props.instance.name}»`, { placeholder: 'latin-имя-копии', initialValue: `${props.instance.name}-copy` })
@@ -770,7 +1018,7 @@ async function exportModpack() {
   try {
     const result = await bridge.exportModpack(props.instance.name, props.instance.display_name, label.trim())
     emit('toast', `Модпак собран: ${result.file_name} (${result.indexed_files} по индексу, ${result.override_files} в overrides)`)
-    void bridge.openFolder(result.path.replace(/[\\/][^\\/]+$/, ''))
+    openInLauncherExplorer(result.path.replace(/[\\/][^\\/]+$/, ''))
   } catch (error) {
     emit('toast', errorMessage(error))
   } finally {
@@ -813,7 +1061,220 @@ async function toggleMod(asset: InstanceAsset) {
   }
 }
 
+// правый клик по ресурсу: проводник, путь, вкл/выкл, проверка, удаление
+function assetMenu(asset: InstanceAsset, event: MouseEvent) {
+  const parent = asset.path.replace(/[\\/][^\\/]+$/, '')
+  const items: ContextMenuItem[] = [
+    {
+      id: 'reveal',
+      label: 'Открыть во встроенном проводнике',
+      icon: 'folder',
+      action: () => openInLauncherExplorer(parent || asset.path),
+    },
+    {
+      id: 'copy-path',
+      label: 'Копировать путь',
+      icon: 'copy',
+      action: () => void navigator.clipboard?.writeText(asset.path),
+    },
+  ]
+  if (asset.kind === 'mods') {
+    items.push({
+      id: 'toggle',
+      label: asset.enabled === false ? 'Включить мод' : 'Отключить мод',
+      icon: 'check',
+      action: () => void toggleMod(asset),
+    })
+    items.push({ id: 'audit', label: 'Проверить безопасность', icon: 'shield', action: () => auditMod(asset) })
+  }
+  if (asset.kind === 'shaders') {
+    items.push({ id: 'analyze', label: 'Анализ шейдера', icon: 'activity', action: () => analyzeShader(asset) })
+  }
+  items.push({ id: 'delete', label: 'Удалить', icon: 'trash', danger: true, action: () => void removeAsset(asset) })
+  openContextMenu(event, items, asset.display_name || asset.name)
+}
+
+// правый клик по миру: папка мира и запуск
+function worldMenu(world: InstanceWorld, event: MouseEvent) {
+  openContextMenu(event, [
+    { id: 'reveal', label: 'Открыть папку мира', icon: 'folder', action: () => openInLauncherExplorer(world.path) },
+    { id: 'copy-path', label: 'Копировать путь', icon: 'copy', action: () => void navigator.clipboard?.writeText(world.path) },
+    { id: 'play', label: 'Играть в этот мир', icon: 'play', action: () => launchWorld(world.id) },
+  ], world.name)
+}
+
+// ── Выделение модов и массовые действия ─────────────────────────────────
+const selectedModPaths = ref(new Set<string>())
+const modBulkBusy = ref(false)
+const installedModPaths = computed(() => (tab.value === 'mods' ? activeAssets.value.map((asset) => asset.path) : []))
+const selectedModCount = computed(() => installedModPaths.value.filter((path) => selectedModPaths.value.has(path)).length)
+const allModsSelected = computed(() => installedModPaths.value.length > 0 && selectedModCount.value === installedModPaths.value.length)
+
+function toggleModSelection(path: string) {
+  const next = new Set(selectedModPaths.value)
+  if (next.has(path)) next.delete(path)
+  else next.add(path)
+  selectedModPaths.value = next
+}
+
+function toggleSelectAllMods() {
+  selectedModPaths.value = allModsSelected.value ? new Set() : new Set(installedModPaths.value)
+}
+
+function selectedMods(): InstanceAsset[] {
+  return activeAssets.value.filter((asset) => asset.kind === 'mods' && selectedModPaths.value.has(asset.path))
+}
+
+async function removeSelectedMods() {
+  const targets = selectedMods()
+  if (!props.instance || !targets.length || modBulkBusy.value) return
+  if (running.value) {
+    emit('toast', 'Остановите игру перед удалением модов')
+    return
+  }
+  const preview = targets.slice(0, 5).map((asset) => `«${asset.display_name || asset.name}»`).join(', ') + (targets.length > 5 ? ` и ещё ${targets.length - 5}` : '')
+  if (props.confirmDestructive !== false && !(await confirmDialog(`Удалить выбранные моды (${targets.length}): ${preview}?`, { danger: true, confirmLabel: 'Удалить' }))) return
+  modBulkBusy.value = true
+  try {
+    const result = await bridge.modsRemoveFiles(props.instance.name, targets.map((asset) => asset.path))
+    details.value = result.details
+    selectedModPaths.value = new Set()
+    emit('changed')
+    emit('toast', result.failed.length ? `Удалено модов: ${result.removed.length}, не удалось: ${result.failed.length} (${result.failed[0].error})` : `Удалено модов: ${result.removed.length}`)
+  } catch (error) {
+    emit('toast', errorMessage(error))
+  } finally {
+    modBulkBusy.value = false
+  }
+}
+
+async function setSelectedModsEnabled(enabled: boolean) {
+  const targets = selectedMods().filter((asset) => (asset.enabled !== false) !== enabled)
+  if (!props.instance || !targets.length || modBulkBusy.value) return
+  modBulkBusy.value = true
+  let done = 0
+  const renamed = new Set<string>()
+  try {
+    for (const asset of targets) {
+      details.value = await bridge.toggleMod(props.instance.name, asset.path, enabled)
+      // файл переименовывается (*.disabled) — выделение переносим на новое имя.
+      renamed.add(enabled ? asset.path.replace(/\.disabled$/, '') : `${asset.path}.disabled`)
+      done += 1
+    }
+    emit('toast', enabled ? `Включено модов: ${done}` : `Отключено модов: ${done}`)
+  } catch (error) {
+    emit('toast', `${errorMessage(error)} (обработано: ${done})`)
+  } finally {
+    selectedModPaths.value = new Set([...selectedModPaths.value].filter((path) => !targets.some((asset) => asset.path === path)).concat([...renamed]))
+    modBulkBusy.value = false
+  }
+}
+
+watch([tab, () => props.instance?.name], () => { selectedModPaths.value = new Set() })
+watch(details, () => {
+  // удалённые/переименованные извне файлы не должны оставаться «выбранными».
+  const existing = new Set((details.value?.assets?.mods || []).map((asset) => asset.path))
+  if ([...selectedModPaths.value].some((path) => !existing.has(path))) {
+    selectedModPaths.value = new Set([...selectedModPaths.value].filter((path) => existing.has(path)))
+  }
+})
+
+// ── Импорт миров (архив или папка) ───────────────────────────────────────
+const worldImportBusy = ref(false)
+const worldImportProgress = ref(0)
+const worldImportLabel = ref('')
+const WORLD_ARCHIVE_ACCEPT = '.zip,.tar,.gz,.tgz,.bz2,.tbz2,.xz,.txz'
+const WORLD_CHUNK_BYTES = 4 * 1024 * 1024
+
+function selectWorldArchive() {
+  if (!worldImportBusy.value) void chooseWorldArchive()
+}
+
+async function selectWorldFolder() {
+  if (worldImportBusy.value || !props.instance) return
+  if (running.value) {
+    emit('toast', 'Остановите игру перед импортом мира')
+    return
+  }
+  const picked = await pickDirectory({ title: 'Папка мира (или saves/ с мирами)' })
+  if (!picked) return
+  worldImportBusy.value = true
+  worldImportProgress.value = 0
+  worldImportLabel.value = `Переношу папку «${picked.name}»…`
+  try {
+    const result = await bridge.worldImportPath(props.instance.name, picked.path)
+    details.value = await bridge.instanceDetails(props.instance.name)
+    emit('changed')
+    emit('toast', result.imported.length === 1 ? `Мир «${result.imported[0]}» добавлен` : `Добавлено миров: ${result.imported.length} (${result.imported.join(', ')})`)
+  } catch (error) {
+    emit('toast', errorMessage(error))
+  } finally {
+    worldImportBusy.value = false
+    worldImportProgress.value = 0
+    worldImportLabel.value = ''
+  }
+}
+
+async function uploadWorld(kind: 'archive' | 'folder', label: string, entries: Array<{ path: string; file: Blob & { size: number } }>) {
+  if (!props.instance || !entries.length) return
+  if (running.value) {
+    emit('toast', 'Остановите игру перед импортом мира')
+    return
+  }
+  const instanceName = props.instance.name
+  const total = entries.reduce((sum, entry) => sum + entry.file.size, 0) || 1
+  let sent = 0
+  let uploadId = ''
+  worldImportBusy.value = true
+  worldImportProgress.value = 0
+  worldImportLabel.value = kind === 'archive' ? `Загружаю архив «${label}»…` : `Загружаю папку «${label}»…`
+  try {
+    uploadId = (await bridge.worldImportBegin(instanceName, kind, label)).upload_id
+    for (const entry of entries) {
+      let offset = 0
+      do {
+        const piece = entry.file.slice(offset, offset + WORLD_CHUNK_BYTES)
+        const bytes = new Uint8Array(await piece.arrayBuffer())
+        await bridge.worldImportChunk(instanceName, uploadId, entry.path, offset, toBase64(bytes))
+        offset += bytes.length
+        sent += bytes.length
+        worldImportProgress.value = Math.min(99, Math.round((sent / total) * 100))
+      } while (offset < entry.file.size)
+    }
+    worldImportLabel.value = kind === 'archive' ? 'Распаковываю и ищу миры…' : 'Переношу мир в saves/…'
+    const result = await bridge.worldImportFinish(instanceName, uploadId)
+    uploadId = ''
+    if (props.instance?.name === instanceName) details.value = result.details
+    emit('changed')
+    emit('toast', result.imported.length === 1 ? `Мир «${result.imported[0]}» добавлен` : `Добавлено миров: ${result.imported.length} (${result.imported.join(', ')})`)
+  } catch (error) {
+    emit('toast', errorMessage(error))
+    if (uploadId) void bridge.worldImportCancel(instanceName, uploadId).catch(() => undefined)
+  } finally {
+    worldImportBusy.value = false
+    worldImportProgress.value = 0
+    worldImportLabel.value = ''
+  }
+}
+
+async function chooseWorldArchive() {
+  if (worldImportBusy.value) return
+  const picked = await pickFile({ accept: '.zip,application/zip', title: 'Архив мира (.zip)' })
+  if (!picked) return
+  await uploadWorld('archive', picked.fileName, [{ path: picked.fileName, file: pickedFileBlob(picked) }])
+}
+
+/** picked-файл → Blob для пути загрузки мира кусками. */
+function pickedFileBlob(file: { fileName: string; data: string; size: number }): Blob {
+  const bytes = Uint8Array.from(atob(file.data), (character) => character.charCodeAt(0))
+  return new Blob([bytes], { type: 'application/octet-stream' })
+}
+
 const modAuditDialog = ref<InstanceType<typeof ModAuditDialog> | null>(null)
+
+function analyzeShader(asset: InstanceAsset) {
+  shaderAnalysisTarget.value = { name: asset.name, size: asset.size }
+}
 
 function auditMod(asset: InstanceAsset) {
   if (!props.instance || asset.kind !== 'mods') return
@@ -875,7 +1336,7 @@ async function updateResource(update: ResourceUpdate) {
 }
 
 function selectFiles() {
-  fileInput.value?.click()
+  void chooseAssetFiles()
 }
 
 function toBase64(bytes: Uint8Array): string {
@@ -887,25 +1348,22 @@ function toBase64(bytes: Uint8Array): string {
   return btoa(binary)
 }
 
-async function importFiles(event: Event) {
+async function chooseAssetFiles() {
   if (!props.instance) return
-  const input = event.target as HTMLInputElement
-  const files = Array.from(input.files || [])
-  if (!files.length || !['mods', 'resourcepacks', 'shaders'].includes(tab.value)) return
+  const picked = await pickFiles({ title: 'Файлы для импорта' })
+  if (!picked?.length || !['mods', 'resourcepacks', 'shaders'].includes(tab.value)) return
   importing.value = true
   try {
-    for (const file of files) {
+    for (const file of picked) {
       if (file.size > 256 * 1024 * 1024) {
-        throw new Error(`Файл «${file.name}» превышает лимит 256 MiB`)
+        throw new Error(`Файл «${file.fileName}» превышает лимит 256 MiB`)
       }
-      const bytes = new Uint8Array(await file.arrayBuffer())
-      details.value = await bridge.importAsset(props.instance.name, tab.value, file.name, toBase64(bytes))
+      details.value = await bridge.importAsset(props.instance.name, tab.value, file.fileName, file.data)
     }
-    emit('toast', `Импортировано файлов: ${files.length}`)
+    emit('toast', `Импортировано файлов: ${picked.length}`)
   } catch (error) {
     emit('toast', errorMessage(error))
   } finally {
-    input.value = ''
     importing.value = false
   }
 }
@@ -1025,27 +1483,31 @@ async function closeWorkspaceFile() {
   clearWorkspaceEditor()
 }
 
-function selectWorkspaceUpload() {
-  if (!running.value && !fileMutationBusy.value) workspaceFileInput.value?.click()
+async function selectWorkspaceUpload() {
+  if (running.value || fileMutationBusy.value) {
+    if (running.value) emit('toast', 'Остановите игру перед изменением файлов экземпляра')
+    return
+  }
+  const picked = await pickFiles({ title: 'Загрузка файлов в экземпляр' })
+  if (!picked?.length) return
+  await uploadWorkspaceFiles(picked)
 }
 
-async function uploadWorkspaceFiles(value: FileList | File[]) {
+async function uploadWorkspaceFiles(files: Array<{ fileName: string; data: string; size: number }>) {
   if (!props.instance || running.value || fileMutationBusy.value) {
     if (running.value) emit('toast', 'Остановите игру перед изменением файлов экземпляра')
     return
   }
-  const files = Array.from(value)
   if (!files.length) return
   fileMutationBusy.value = true
   try {
     for (const file of files) {
-      if (!file.name || file.name === '.' || file.name === '..' || file.name.includes('/') || file.name.includes('\\')) {
-        throw new Error(`Недопустимое имя файла: ${file.name || 'без имени'}`)
+      if (!file.fileName || file.fileName === '.' || file.fileName === '..' || file.fileName.includes('/') || file.fileName.includes('\\')) {
+        throw new Error(`Недопустимое имя файла: ${file.fileName || 'без имени'}`)
       }
-      if (file.size > 32 * 1024 * 1024) throw new Error(`Файл «${file.name}» превышает лимит 32 MiB`)
-      const target = [fileDirectory.value, file.name].filter(Boolean).join('/')
-      const bytes = new Uint8Array(await file.arrayBuffer())
-      await bridge.instanceFileUpload(props.instance.name, target, toBase64(bytes))
+      if (file.size > 32 * 1024 * 1024) throw new Error(`Файл «${file.fileName}» превышает лимит 32 MiB`)
+      const target = [fileDirectory.value, file.fileName].filter(Boolean).join('/')
+      await bridge.instanceFileUpload(props.instance.name, target, file.data)
     }
     emit('toast', `Загружено файлов: ${files.length}`)
     await loadWorkspaceFiles()
@@ -1054,13 +1516,7 @@ async function uploadWorkspaceFiles(value: FileList | File[]) {
     emit('toast', errorMessage(error))
   } finally {
     fileMutationBusy.value = false
-    if (workspaceFileInput.value) workspaceFileInput.value.value = ''
   }
-}
-
-function handleWorkspaceUpload(event: Event) {
-  const input = event.target as HTMLInputElement
-  void uploadWorkspaceFiles(Array.from(input.files || []))
 }
 
 function onWorkspaceDragEnter(event: DragEvent) {
@@ -1078,7 +1534,16 @@ function onWorkspaceDragLeave(event: DragEvent) {
 function onWorkspaceDrop(event: DragEvent) {
   fileDragDepth.value = 0
   fileDropActive.value = false
-  if (event.dataTransfer?.files.length) void uploadWorkspaceFiles(Array.from(event.dataTransfer.files))
+  const files = Array.from(event.dataTransfer?.files || [])
+  if (!files.length) return
+  void (async () => {
+    const picked = await Promise.all(files.map(async (file) => ({
+      fileName: file.name,
+      data: toBase64(new Uint8Array(await file.arrayBuffer())),
+      size: file.size,
+    })))
+    await uploadWorkspaceFiles(picked)
+  })()
 }
 
 async function createWorkspaceDirectory() {
@@ -1193,9 +1658,37 @@ async function launchServer(server: string) {
   await launch({ server })
 }
 
+/** Оффлайн-аккаунт: мир — можно, серверы — предупреждаем; Bedrock — только Microsoft. */
+async function checkAccountForLaunch(options: { world?: string; server?: string }): Promise<boolean> {
+  const target = props.instance
+  if (!target) return true
+  const offline = props.accountInfo?.kind === 'offline'
+  if (target.game_edition === 'bedrock' && offline) {
+    await chooseDialog(
+      'Bedrock не запустится с оффлайн-аккаунтом',
+      [{ value: 'accounts', label: 'Открыть аккаунты', description: 'Подключить Microsoft-аккаунт во вкладке «Аккаунты»' }],
+      {
+        title: 'Нужен аккаунт Microsoft',
+        detail: 'Лицензия Bedrock привязана к аккаунту Microsoft: одиночные миры без входа недоступны, в отличие от Java Edition. Подключите аккаунт, которому принадлежит игра, и запустите снова.',
+        confirmLabel: 'Понятно',
+      },
+    )
+    emit('toast', 'Bedrock требует аккаунт Microsoft: одиночная игра без входа недоступна')
+    return false
+  }
+  if (offline && options.server && target.game_edition !== 'bedrock') {
+    return confirmDialog(
+      'Серверы с онлайн-проверкой сессий не пустят оффлайн-аккаунт. Войти на сервер всё равно?',
+      { confirmLabel: 'Подключиться' },
+    )
+  }
+  return true
+}
+
 async function launch(options: { world?: string; server?: string } = {}) {
   const launchTarget = props.instance
   if (!launchTarget || loading.value || running.value) return
+  if (!(await checkAccountForLaunch(options))) return
   const eventInstance = pluginInstanceRef(launchTarget)
   loading.value = true
   running.value = true
@@ -1211,6 +1704,7 @@ async function launch(options: { world?: string; server?: string } = {}) {
     if (result.exit_code !== 0) {
       await props.crash?.(eventInstance, 'Minecraft exited with a non-zero status.', result.exit_code)
       if (result.crash) lastCrash.value = result.crash
+      offerAutoRepair(result.repair)
     }
     if (!liveLogCount) {
       liveLogRevision += 1
@@ -1221,7 +1715,10 @@ async function launch(options: { world?: string; server?: string } = {}) {
     liveLogRevision += 1
     logs.value.push(errorMessage(error))
     if (logs.value.length > MAX_SESSION_LOG_LINES) logs.value.splice(0, logs.value.length - MAX_SESSION_LOG_LINES)
-    if (launchRequested && !isCancelled(error)) await props.crash?.(eventInstance, errorMessage(error))
+    if (launchRequested && !isCancelled(error)) {
+      await props.crash?.(eventInstance, errorMessage(error))
+      void diagnoseLaunchFailure(launchTarget.name, errorMessage(error))
+    }
     emit('toast', errorMessage(error))
   } finally {
     loading.value = false
@@ -1286,14 +1783,9 @@ async function stop() {
   }
 }
 
-async function openFolder() {
+function openFolder() {
   if (!details.value) return
-  try {
-    await bridge.openFolder(details.value.instance.path)
-    emit('toast', 'Папка экземпляра открыта')
-  } catch (error) {
-    emit('toast', errorMessage(error))
-  }
+  openInLauncherExplorer(details.value.instance.path)
 }
 
 function errorMessage(error: unknown): string {
@@ -1309,6 +1801,8 @@ function isCancelled(error: unknown): boolean {
 watch(() => props.instance?.name, () => {
   details.value = undefined
   detailsError.value = ''
+  shortcutStatus.value = null
+  void refreshShortcutStatus()
   loadRequestId += 1
   loadPromise = null
   loadPromiseName = ''
@@ -1386,6 +1880,7 @@ function handleWorkspaceVisibility() {
 
 onMounted(async () => {
   document.addEventListener('visibilitychange', handleWorkspaceVisibility)
+  void refreshShortcutStatus()
   stopBackendEvents = await bridge.subscribeEvents((event) => {
     if (event.instance_name !== props.instance?.name) return
     if (event.kind === 'status' && (event.event === 'workspace-changed' || event.event === 'operation-finished')) {
@@ -1432,7 +1927,7 @@ function openSettings() {
   void nextTick(() => workspaceRoot.value?.scrollIntoView({ behavior: 'smooth', block: 'start' }))
 }
 
-defineExpose({ openConsoleIfOverview, openSettings, stop, ensureLoaded })
+defineExpose({ openConsoleIfOverview, openSettings, stop, ensureLoaded, launch })
 </script>
 
 <template>
@@ -1490,6 +1985,8 @@ defineExpose({ openConsoleIfOverview, openSettings, stop, ensureLoaded })
           <div class="workspace-launch-actions">
             <button v-if="running" class="button button--outline" type="button" @click="stop"><Icon name="stop" :size="14" />Остановить</button>
             <button v-else class="button button--accent" type="button" :disabled="loading" @click="launch()"><Icon name="play" :size="15" />{{ loading ? 'Запускаю…' : 'Запустить игру' }}</button>
+            <button class="button button--quiet" type="button" :disabled="repairBusy || running" @click="repairVersion"><Icon name="refresh" :size="14" />{{ repairBusy ? 'Восстанавливаю…' : 'Восстановить версию' }}</button>
+            <button class="button button--quiet" type="button" :disabled="diagnoseBusy || running" @click="diagnoseInstance()"><Icon name="shield" :size="14" />{{ diagnoseBusy ? 'Проверяю…' : 'Проверить и починить' }}</button>
             <button class="button button--quiet" type="button" @click="selectTab('snapshots')"><Icon name="archive" :size="14" />Снапшоты</button>
           </div>
         </section>
@@ -1514,6 +2011,7 @@ defineExpose({ openConsoleIfOverview, openSettings, stop, ensureLoaded })
           <article class="workspace-metric workspace-metric--cpu"><div><span><Icon name="activity" :size="14" />CPU</span><strong>{{ (metrics?.cpu_percent || 0).toFixed(1) }}%</strong></div><svg viewBox="0 0 100 42" preserveAspectRatio="none" aria-label="График CPU"><polyline :points="metricPoints('cpu_percent')" /></svg><small>{{ running ? 'Текущая загрузка процесса' : 'Последний доступный замер' }}</small></article>
           <article class="workspace-metric workspace-metric--ram"><div><span><Icon name="memory" :size="14" />RAM</span><strong>{{ formatMetricBytes(metrics?.ram_bytes || 0) }}</strong></div><svg viewBox="0 0 100 42" preserveAspectRatio="none" aria-label="График RAM"><polyline :points="metricPoints('ram_bytes')" /></svg><small>Память, занятая игрой</small></article>
           <article class="workspace-metric workspace-metric--storage"><div><span><Icon name="hard-drive" :size="14" />Диск</span><strong>{{ formatMetricBytes(metrics?.storage_bytes || 0) }}</strong></div><svg viewBox="0 0 100 42" preserveAspectRatio="none" aria-label="График размера файлов"><polyline :points="metricPoints('storage_bytes')" /></svg><small>Размер файлов экземпляра</small></article>
+          <button class="workspace-metric-toggle" type="button" aria-label="Полная статистика использования" title="Полная статистика: GPU, моды, прошлые запуски" @click="usageDialogOpen = true"><Icon name="mods" :size="17" /></button>
         </div>
         <div class="workspace-columns">
           <section class="workspace-card">
@@ -1580,7 +2078,7 @@ defineExpose({ openConsoleIfOverview, openSettings, stop, ensureLoaded })
 
       <section v-else-if="tab === 'files'" key="files" class="workspace-card instance-file-explorer" :class="{ 'instance-file-explorer--dragging': fileDropActive }" @dragenter.prevent="onWorkspaceDragEnter" @dragover.prevent @dragleave.prevent="onWorkspaceDragLeave" @drop.prevent="onWorkspaceDrop">
         <div class="workspace-card-heading"><div><h3>Файлы экземпляра</h3><span class="muted">{{ fileDirectory ? `/${fileDirectory}` : 'Корневая папка' }} · изменения доступны после остановки игры</span></div><div class="workspace-card-actions"><button class="button button--small button--quiet" type="button" :disabled="fileLoading || fileMutationBusy" @click="loadWorkspaceFiles"><Icon name="refresh" :size="14" />Обновить</button><button class="button button--small button--quiet" type="button" :disabled="running || fileMutationBusy" @click="createWorkspaceDirectory"><Icon name="plus" :size="14" />Новая папка</button><button class="button button--small button--outline" type="button" :disabled="running || fileMutationBusy" @click="selectWorkspaceUpload"><Icon name="upload" :size="14" />Загрузить</button></div></div>
-        <input ref="workspaceFileInput" class="workspace-file-input" type="file" multiple @change="handleWorkspaceUpload" />
+        
         <nav class="instance-file-breadcrumbs" aria-label="Путь к папке">
           <button type="button" :class="{ active: !fileDirectory }" @click="goToWorkspaceDirectory('')">Экземпляр</button>
           <template v-for="crumb in fileBreadcrumbs" :key="crumb.path"><Icon name="chevron" :size="12" /><button type="button" :class="{ active: fileDirectory === crumb.path }" @click="goToWorkspaceDirectory(crumb.path)">{{ crumb.name }}</button></template>
@@ -1609,27 +2107,68 @@ defineExpose({ openConsoleIfOverview, openSettings, stop, ensureLoaded })
       </section>
 
        <div v-else-if="['mods', 'resourcepacks', 'shaders', 'datapacks'].includes(tab)" key="assets" class="workspace-card">
-          <div class="workspace-card-heading"><div><h3>Установленные {{ activeAssetLabel }}</h3><span class="muted">{{ tab === 'datapacks' ? 'По мирам экземпляра' : 'Файлы этого экземпляра' }}</span></div><div class="workspace-card-actions"><button v-if="canCheckResourceUpdates" class="button button--small button--quiet" type="button" :disabled="checkingUpdates || running" @click="checkResourceUpdates"><Icon name="refresh" :size="14" />{{ checkingUpdates ? 'Проверяю…' : 'Проверить обновления' }}</button><button v-if="tab !== 'datapacks'" class="button button--small button--outline" type="button" :disabled="importing" @click="selectFiles"><Icon name="upload" :size="14" />{{ importing ? 'Импорт…' : 'Импортировать' }}</button><button v-if="tab === 'mods' || tab === 'datapacks'" class="button button--small button--accent" type="button" @click="emit('browse-mods')"><Icon name="search" :size="14" />Каталог</button><button v-if="tab === 'mods'" class="button button--small button--quiet" type="button" @click="openDependencyGraph"><Icon name="globe" :size="14" />Зависимости</button></div></div>
+          <div class="workspace-card-heading"><div><h3>Установленные {{ activeAssetLabel }}</h3><span class="muted">{{ tab === 'datapacks' ? 'По мирам экземпляра' : 'Файлы этого экземпляра' }}</span></div><div class="workspace-card-actions"><button v-if="canCheckResourceUpdates" class="button button--small button--quiet" type="button" :disabled="checkingUpdates || running" @click="checkResourceUpdates"><Icon name="refresh" :size="14" />{{ checkingUpdates ? 'Проверяю…' : 'Проверить обновления' }}</button><button v-if="tab !== 'datapacks'" class="button button--small button--outline" type="button" :disabled="importing" @click="selectFiles"><Icon name="upload" :size="14" />{{ importing ? 'Импорт…' : 'Импортировать' }}</button><button v-if="tab === 'mods' || tab === 'datapacks'" class="button button--small button--accent" type="button" @click="emit('browse-mods')"><Icon name="search" :size="14" />Каталог</button><button v-if="tab === 'mods'" class="button button--small button--quiet" type="button" @click="openDependencyGraph"><Icon name="globe" :size="14" />Зависимости</button><button v-if="tab === 'mods'" class="button button--small button--quiet" type="button" :disabled="modListBusy" @click="exportModList('markdown')">Список .md</button></div></div>
           <div v-if="updateResults.length" class="instance-resource-updates"><article v-for="update in updateResults" :key="`${update.world_name || ''}:${update.path}`" class="instance-resource-update"><span><strong>{{ update.name }}</strong><small>{{ update.current_version || 'Установленная версия' }} → {{ update.version }}<template v-if="update.world_title"> · {{ update.world_title }}</template></small></span><button class="button button--small button--accent" type="button" :disabled="running || Boolean(updatingResourceId)" @click="updateResource(update)"><Icon name="refresh" :size="13" />{{ updatingResourceId === (update.path || update.project_id) ? 'Обновляю…' : 'Обновить' }}</button></article></div>
-        <input ref="fileInput" class="workspace-file-input" type="file" multiple :accept="assetAccept" @change="importFiles" />
+        
+          <div v-if="tab === 'mods' && activeAssets.length" class="workspace-mod-bulkbar">
+            <button class="button button--small button--quiet" type="button" :disabled="modBulkBusy" @click="toggleSelectAllMods"><Icon :name="allModsSelected ? 'close' : 'check'" :size="13" />{{ allModsSelected ? 'Снять выделение' : 'Выделить все' }}</button>
+            <span class="muted">Выбрано: {{ selectedModCount }} из {{ installedModPaths.length }}</span>
+            <span class="workspace-mod-bulkbar-actions">
+              <button class="button button--small button--quiet" type="button" :disabled="!selectedModCount || modBulkBusy || running" @click="setSelectedModsEnabled(true)">Включить</button>
+              <button class="button button--small button--quiet" type="button" :disabled="!selectedModCount || modBulkBusy || running" @click="setSelectedModsEnabled(false)">Отключить</button>
+              <button class="button button--small button--danger" type="button" :disabled="!selectedModCount || modBulkBusy || running" @click="removeSelectedMods"><Icon name="trash" :size="13" />{{ modBulkBusy ? 'Работаю…' : `Удалить выбранные${selectedModCount ? ` (${selectedModCount})` : ''}` }}</button>
+            </span>
+          </div>
           <div v-if="activeAssets.length" class="workspace-assets">
-            <div v-for="asset in activeAssets" :key="asset.path" class="workspace-asset" :class="{ 'workspace-asset--disabled': asset.kind === 'mods' && asset.enabled === false }"><span class="workspace-asset-copy"><span class="asset-icon"><img v-if="assetIconSource(asset) && !failedAssetIcons.has(asset.path)" :src="assetIconSource(asset)" alt="" loading="lazy" @error="markAssetIconFailed(asset.path)" /><Icon v-else :name="assetFallbackIcon(asset)" :size="16" /></span><span><strong>{{ asset.display_name || asset.name }}</strong><small><template v-if="asset.version">{{ asset.version }} · </template>{{ asset.author || assetProvider(asset) }}<template v-if="asset.author"> · {{ assetProvider(asset) }}</template> · {{ formatSize(asset.size) }}<template v-if="asset.kind === 'mods'"> · {{ asset.enabled === false ? 'отключён' : 'включён' }}</template></small></span></span><span class="workspace-asset-actions"><button v-if="asset.kind === 'mods'" class="button button--small button--quiet" type="button" @click="toggleMod(asset)">{{ asset.enabled === false ? 'Включить' : 'Отключить' }}</button><button v-if="asset.kind === 'mods'" class="icon-button" type="button" aria-label="Проверить безопасность мода" v-tooltip="'Проверить безопасность'" @click="auditMod(asset)"><Icon name="shield" :size="15" /></button><button class="icon-button" type="button" aria-label="Удалить" @click="removeAsset(asset)"><Icon name="trash" :size="15" /></button></span></div>
+            <div v-for="asset in activeAssets" :key="asset.path" class="workspace-asset" :class="{ 'workspace-asset--clickable': true, 'workspace-asset--disabled': asset.kind === 'mods' && asset.enabled === false, 'workspace-asset--selected': asset.kind === 'mods' && selectedModPaths.has(asset.path) }" @contextmenu.prevent="assetMenu(asset, $event)"><input v-if="asset.kind === 'mods'" class="workspace-asset-check" type="checkbox" :checked="selectedModPaths.has(asset.path)" :disabled="modBulkBusy" :aria-label="`Выбрать ${asset.display_name || asset.name}`" @change="toggleModSelection(asset.path)" /><span class="workspace-asset-copy"><span class="asset-icon"><img v-if="assetIconSource(asset) && !failedAssetIcons.has(asset.path)" :src="assetIconSource(asset)" alt="" loading="lazy" @error="markAssetIconFailed(asset.path)" /><Icon v-else :name="assetFallbackIcon(asset)" :size="16" /></span><span><strong>{{ asset.display_name || asset.name }}</strong><small><template v-if="asset.version">{{ asset.version }} · </template>{{ asset.author || assetProvider(asset) }}<template v-if="asset.author"> · {{ assetProvider(asset) }}</template> · {{ formatSize(asset.size) }}<template v-if="asset.kind === 'mods'"> · {{ asset.enabled === false ? 'отключён' : 'включён' }}</template></small></span></span><span class="workspace-asset-actions"><button v-if="asset.kind === 'mods'" class="button button--small button--quiet" type="button" @click="toggleMod(asset)">{{ asset.enabled === false ? 'Включить' : 'Отключить' }}</button><button v-if="asset.kind === 'mods'" class="icon-button" type="button" aria-label="Проверить безопасность мода" v-tooltip="'Проверить безопасность'" @click="auditMod(asset)"><Icon name="shield" :size="15" /></button><button v-if="asset.kind === 'shaders'" class="icon-button" type="button" aria-label="Проанализировать шейдер" v-tooltip="'Анализ шейдера и тест на железе'" @click="analyzeShader(asset)"><Icon name="activity" :size="15" /></button><button class="icon-button" type="button" aria-label="Удалить" @click="removeAsset(asset)"><Icon name="trash" :size="15" /></button></span></div>
         </div>
         <span v-else class="muted workspace-empty">Пока ничего не установлено.</span>
       </div>
 
       <div v-else-if="tab === 'worlds'" key="worlds" class="workspace-card">
-        <div class="workspace-card-heading"><h3>Миры</h3><span class="muted">saves/</span></div>
+        <div class="workspace-card-heading"><div><h3>Миры</h3><span class="muted">saves/ · архив распакуется автоматически, найденные миры попадут в saves/</span></div><div class="workspace-card-actions"><button class="button button--small button--outline" type="button" :disabled="worldImportBusy || running" @click="selectWorldArchive"><Icon name="archive" :size="14" />Импорт архива</button><button class="button button--small button--outline" type="button" :disabled="worldImportBusy || running" @click="selectWorldFolder"><Icon name="folder" :size="14" />Импорт папки</button></div></div>
+        
+        <div v-if="worldImportBusy" class="workspace-world-import" aria-live="polite"><span><span class="status-dot status-dot--busy" />{{ worldImportLabel }}</span><strong>{{ worldImportProgress }}%</strong><span class="workspace-world-import-bar"><span :style="{ width: `${worldImportProgress}%` }" /></span></div>
         <div v-if="details.worlds.length" class="workspace-assets">
-          <div v-for="world in details.worlds" :key="world.id" class="workspace-asset workspace-asset--world"><span class="workspace-world-copy"><img v-if="world.icon" :src="world.icon" alt="" class="world-icon" /><span><strong>{{ world.name }}</strong><small>{{ formatSize(world.size) }} · {{ formatDate(world.last_played) }}</small></span></span><button class="button button--small button--accent" type="button" :disabled="loading" @click="launchWorld(world.id)"><Icon name="play" :size="13" />Играть</button></div>
+          <div v-for="world in details.worlds" :key="world.id" class="workspace-asset workspace-asset--world" @contextmenu.prevent="worldMenu(world, $event)"><span class="workspace-world-copy"><img v-if="world.icon" :src="world.icon" alt="" class="world-icon" /><span><strong>{{ world.name }}</strong><small>{{ formatSize(world.size) }} · {{ formatDate(world.last_played) }}</small></span></span><button class="button button--small button--accent" type="button" :disabled="loading" @click="launchWorld(world.id)"><Icon name="play" :size="13" />Играть</button></div>
         </div>
-        <span v-else class="muted workspace-empty">Миров пока нет.</span>
+        <span v-else class="muted workspace-empty">Миров пока нет. Импортируйте архив (.zip, .tar.gz…) или папку сохранения.</span>
       </div>
 
       <div v-else-if="tab === 'servers'" key="servers" class="workspace-card">
         <div class="workspace-card-heading"><h3>Серверы</h3><span class="muted">servers.dat</span></div>
         <div v-if="details.servers.length" class="workspace-assets"><div v-for="server in details.servers" :key="server.id" class="workspace-asset"><span><strong>{{ server.name }}</strong><small>{{ server.address }}</small></span><button class="button button--small button--accent" type="button" :disabled="loading" @click="launchServer(server.address)"><Icon name="play" :size="13" />Играть</button></div></div>
         <span v-else class="muted workspace-empty">Посещённых серверов пока нет.</span>
+      </div>
+
+      <div v-else-if="tab === 'versions'" key="versions" class="workspace-card">
+        <div class="workspace-card-heading">
+          <div><h3>Версии</h3><span class="muted">Состав версии экземпляра · смена, удаление и свои файлы</span></div>
+          <div class="workspace-card-actions">
+            
+            <button class="button button--small button--quiet" type="button" :disabled="versionsLoading || versionsBusy" @click="loadVersions"><Icon name="refresh" :size="14" />Обновить</button>
+            <button class="button button--small button--outline" type="button" :disabled="versionsBusy || running" @click="chooseVersionJson"><Icon name="upload" :size="14" />Своя версия</button>
+          </div>
+        </div>
+        <div v-if="versionsLoading" class="workspace-loading">Читаю состав версии…</div>
+        <div v-else-if="versionsPayload" class="workspace-version-list">
+          <div v-for="component in versionsPayload.components" :key="component.id" class="workspace-version-row">
+            <span class="workspace-version-icon"><Icon :name="component.id === 'minecraft' ? 'instances' : component.id === 'loader' ? 'mods' : component.id === 'lwjgl' ? 'monitor' : component.id === 'java' ? 'settings' : 'archive'" :size="16" /></span>
+            <span class="workspace-version-copy">
+              <strong>{{ component.title }}</strong>
+              <small>{{ component.version }} · {{ component.meta }}</small>
+            </span>
+            <span class="workspace-version-actions">
+              <button v-if="component.changeable" class="button button--small button--outline" type="button" :disabled="versionsBusy || running" @click="component.id === 'minecraft' ? changeMinecraftVersion(component) : component.id === 'loader' ? changeLoader(component) : changeLwjgl(component)">
+                <Icon name="refresh" :size="13" />{{ versionsBusy ? 'Меняю…' : 'Поменять версию' }}
+              </button>
+              <button v-if="component.removable && component.id === 'loader'" class="button button--small button--quiet" type="button" :disabled="versionsBusy || running" @click="changeLoader(component)"><Icon name="trash" :size="13" />Убрать</button>
+              <button v-if="component.removable && component.id === 'lwjgl'" class="button button--small button--quiet" type="button" :disabled="versionsBusy || running" @click="changeLwjgl(component)"><Icon name="undo" :size="13" />Вернуть</button>
+            </span>
+          </div>
+          <p class="field-help">Смена версии Minecraft или модлоадера не трогает моды, миры и настройки — только файлы самой версии. Своя версия — это JSON-файл версии (например, кастомный профиль или фиксы); библиотеки скачаются автоматически.</p>
+        </div>
+        <span v-else class="muted workspace-empty">Откройте вкладку ещё раз — не удалось прочитать состав версии.</span>
       </div>
 
       <div v-else-if="tab === 'snapshots'" key="snapshots" class="workspace-card">
@@ -1690,14 +2229,42 @@ defineExpose({ openConsoleIfOverview, openSettings, stop, ensureLoaded })
                <button v-if="profileBannerPreview" class="text-button" type="button" @click="clearProfileAsset('banner')">Убрать</button>
              </div>
            </div>
-           <input ref="profileIconInput" class="workspace-file-input" type="file" accept="image/png,image/jpeg,image/webp" @change="loadProfileAsset($event, 'icon')" />
-           <input ref="profileBannerInput" class="workspace-file-input" type="file" accept="image/png,image/jpeg,image/webp" @change="loadProfileAsset($event, 'banner')" />
+           
            <div class="workspace-form-grid">
              <label class="field"><span>Отображаемое название</span><input v-model="profileDraft.display_name" maxlength="80" placeholder="Например, Survival" /></label>
              <div class="field"><span>Группа <button class="text-button" type="button" @click="createProfileGroup">Создать группу</button></span><CustomSelect v-model="profileDraft.group" :options="profileGroupOptions" /></div>
              <label class="field field--wide"><span>Описание</span><textarea v-model="profileDraft.description" maxlength="500" rows="3" placeholder="Короткое описание профиля и его задачи" /></label>
               <label class="field field--wide"><span>Заметки <small>видны только вам: порядок модов, что доделать</small></span><textarea v-model="profileDraft.notes" maxlength="4000" rows="4" placeholder="Заметки об экземпляре" /></label>
               <label class="field field--wide"><span>Теги <small>через запятую, до 12; фильтруют список экземпляров</small></span><input v-model="profileDraft.tags" placeholder="выживание, моды, тесты" /></label>
+           </div>
+         </section>
+         <section class="instance-integration-panel">
+           <div class="workspace-card-heading"><div><h3>Ярлыки и списки</h3><span class="muted">Запуск в один клик из системы и экспорт состава сборки</span></div></div>
+           <div class="workspace-form-grid">
+             <div class="field"><span>Ярлык на рабочем столе</span>
+               <div class="integration-toggle-row">
+                 <button class="button button--small button--outline" type="button" :disabled="shortcutBusy || !shortcutStatus" @click="toggleShortcut('desktop')">
+                   <Icon name="instances" :size="13" />{{ shortcutBusy ? '…' : shortcutStatus?.desktop?.exists ? 'Убрать ярлык' : 'Создать ярлык' }}
+                 </button>
+                 <small class="field-help">{{ shortcutStatus?.desktop?.exists ? shortcutStatus.desktop.path : 'Двойной клик запускает лаунчер и сразу этот экземпляр' }}</small>
+               </div>
+             </div>
+             <div class="field"><span>Ярлык в меню приложений</span>
+               <div class="integration-toggle-row">
+                 <button class="button button--small button--outline" type="button" :disabled="shortcutBusy || !shortcutStatus" @click="toggleShortcut('menu')">
+                   <Icon name="list" :size="13" />{{ shortcutBusy ? '…' : shortcutStatus?.menu?.exists ? 'Убрать ярлык' : 'Создать ярлык' }}
+                 </button>
+                 <small class="field-help">{{ shortcutStatus?.menu?.exists ? shortcutStatus.menu.path : 'Появляется в меню/пуске среди приложений' }}</small>
+               </div>
+             </div>
+             <div class="field field--wide"><span>Экспорт списка модов</span>
+               <div class="integration-toggle-row">
+                 <button class="button button--small button--quiet" type="button" :disabled="modListBusy" @click="exportModList('markdown')">Markdown</button>
+                 <button class="button button--small button--quiet" type="button" :disabled="modListBusy" @click="exportModList('csv')">CSV</button>
+                 <button class="button button--small button--quiet" type="button" :disabled="modListBusy" @click="exportModList('text')">Текст</button>
+                 <small class="field-help">Имена, версии и состояние включённости из манифестов jar</small>
+               </div>
+             </div>
            </div>
          </section>
          <div class="workspace-form-grid">
@@ -1714,11 +2281,11 @@ defineExpose({ openConsoleIfOverview, openSettings, stop, ensureLoaded })
              <label class="field field--wide"><span>Аргументы игры <small>по одному на строку</small></span><textarea :value="draft.game_arguments.join('\n')" rows="2" @change="setDraftArguments('game_arguments', $event)" placeholder="--width 1280" /></label>
           </div>
           <section class="instance-security-panel">
-             <div class="workspace-card-heading"><div><h3>Безопасность экземпляра</h3><span class="muted">Разрешения действуют для всей JVM. Игровая сеть выключена по умолчанию; включите её для сетевой игры.</span></div><span class="security-profile-badge" :class="`security-profile-badge--${draft.security_profile}`">{{ draft.security_profile }}</span></div>
+             <div class="workspace-card-heading"><div><h3>Безопасность экземпляра</h3><span class="muted">Разрешения действуют для всей JVM. Сеть игры включена по умолчанию — без неё не работают серверы; выключите её только для недоверенных сборок.</span></div><span class="security-profile-badge" :class="`security-profile-badge--${draft.security_profile}`">{{ draft.security_profile }}</span></div>
             <div class="workspace-form-grid">
               <div class="field"><span>Security profile</span><CustomSelect v-model="draft.security_profile" :options="securityProfileOptions" /></div>
             </div>
-             <p class="field-help">Strict использует OS-level sandbox через bubblewrap. Manual ограничивает окружение, но не заменяет OS-level sandbox. Разрешения JVM/mod, которые нельзя надёжно перехватить внутри одной JVM, отклоняются до запуска и доступны только в Off.</p>
+             <p class="field-help">Strict использует OS-level sandbox: bubblewrap на Linux, AppContainer и Job Object на Windows. На Windows нельзя отдельно запретить звук и скрыть окно игры, а подключение к серверу на этом же компьютере (localhost) блокируется системой. Manual ограничивает окружение, но не заменяет OS-level sandbox. Разрешения JVM/mod, которые нельзя надёжно перехватить внутри одной JVM, отклоняются до запуска и доступны только в Off.</p>
             <div class="security-permission-grid">
               <label v-for="permission in securityPermissionOptions" :key="permission.value" class="workspace-check security-permission" :class="{ 'security-permission--risk': permission.highRisk }">
                 <input v-model="draft.security_permissions" type="checkbox" :value="permission.value" />
@@ -1733,6 +2300,8 @@ defineExpose({ openConsoleIfOverview, openSettings, stop, ensureLoaded })
   </section>
   <section v-else class="workspace-shell workspace-empty-state"><span class="empty-orb empty-orb--large"><Icon name="instances" :size="28" /></span><h3>Выберите экземпляр</h3><p>Здесь появятся его ресурсы, миры, серверы и отдельные настройки.</p></section>
   <ModAuditDialog ref="modAuditDialog" @toast="(message: string) => emit('toast', message)" />
+  <ShaderAnalysisDialog v-if="shaderAnalysisTarget && instance" :instance="instance" :shader="shaderAnalysisTarget" @close="shaderAnalysisTarget = null" @toast="(message: string) => emit('toast', message)" />
+  <UsageStatisticsDialog v-if="usageDialogOpen && instance" :instance="instance" :metrics="metrics" :metric-history="metricHistory" :last-metrics="lastMetrics" :assets="details?.assets?.mods || []" :running="running" @close="usageDialogOpen = false" />
 
   <div v-if="lastCrash" class="crash-banner" role="alert">
     <div class="crash-banner-head">
@@ -1741,6 +2310,7 @@ defineExpose({ openConsoleIfOverview, openSettings, stop, ensureLoaded })
         <strong>{{ lastCrash.title }}</strong>
         <small v-if="lastCrash.exit_code !== null && lastCrash.exit_code !== 0">Код выхода: {{ lastCrash.exit_code }}</small>
       </div>
+      <button class="button button--small button--outline" type="button" :disabled="diagnoseBusy || running" @click="diagnoseInstance(lastCrash?.exit_code ?? 1)"><Icon name="shield" :size="13" />Починить…</button>
       <button class="icon-button" type="button" aria-label="Закрыть" @click="lastCrash = undefined"><Icon name="close" :size="14" /></button>
     </div>
     <ul class="crash-banner-hints">

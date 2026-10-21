@@ -1,4 +1,4 @@
-// Бюджеты вызовов/данных на стороне хоста и красный (без значений) аудит операций.
+// бюджеты вызовов/данных на стороне хоста и красный (без значений) аудит операций.
 use serde_json::{json, Map, Value};
 use std::collections::{HashMap, VecDeque};
 use std::fs;
@@ -11,8 +11,6 @@ pub(crate) const MAX_BYTES_PER_MINUTE: usize = 8 * 1024 * 1024;
 pub(crate) const MAX_PAYLOAD: usize = 4 * 1024 * 1024;
 const MAX_AUDIT_BYTES: u64 = 4 * 1024 * 1024;
 
-// \z вместо $: в Rust-regex «$» матчится перед конечным переводом строки,
-// а Python fullmatch его не допускает.
 const IDENTITY: &str = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}\z";
 const LISTENER: &str = r"^listener-[0-9]{1,16}\z";
 
@@ -53,7 +51,7 @@ impl PluginOperationGuard {
         let identity = (plugin_id.to_owned(), bucket.to_owned());
         let mut windows = self.lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         if !windows.map.contains_key(&identity) && windows.map.len() >= 256 {
-            // Активный бюджет не выселяем — иначе вызывающий код потеряет свой лимит.
+            // активный бюджет не выселяем — иначе вызывающий код потеряет свой лимит.
             let stale: Vec<(String, String)> = windows
                 .map
                 .iter()
@@ -117,7 +115,7 @@ impl PluginOperationGuard {
     ) -> Result<(), String> {
         static LISTENER_RE: LazyLock<regex::Regex> =
             LazyLock::new(|| regex::Regex::new(LISTENER).expect("валидный regex слушателя"));
-        // Намеренно не храним значения: URL, заголовки, тела, куки и токены
+        // намеренно не храним значения: URL, заголовки, тела, куки и токены
         // могут содержать учётные данные.
         let mut keys: Vec<String> = args
             .as_object()
@@ -156,7 +154,7 @@ impl PluginOperationGuard {
         encoded.push('\n');
         let encoded = encoded.into_bytes();
 
-        // Весь ввод-вывод аудита — под общим замком, как в Python.
+        // весь ввод-вывод аудита — под общим замком, как в Python.
         let _windows = self.lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         if fs::symlink_metadata(root).map(|meta| meta.is_symlink()).unwrap_or(false) {
             return Err("Audit directory cannot be a link".to_owned());
@@ -224,6 +222,23 @@ pub(crate) fn guard() -> &'static PluginOperationGuard {
     &GUARD
 }
 
+pub fn plugin_api_quota_usage(request: &Value) -> Result<Value, String> {
+    let plugin_id = request
+        .get("plugin_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_owned();
+    let config = super::config::ConfigStore::load()?;
+    let store = super::plugins::PluginStore::new(&config)?;
+    store.authorize_operation(&plugin_id, "runtime:observe")?;
+    let mut usage = store.quota_usage(&plugin_id)?;
+    if let Some(object) = usage.as_object_mut() {
+        object.insert("operations".to_owned(), guard().usage(&plugin_id, "rpc"));
+    }
+    Ok(usage)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -250,9 +265,9 @@ mod tests {
         }
         let error = guard.consume("counter", &json!({}), "rpc", true).unwrap_err();
         assert!(error.starts_with("Plugin rate/data limit"));
-        // Другой плагин не делит бюджет.
+        // другой плагин не делит бюджет.
         assert!(guard.consume("other", &json!({}), "rpc", true).is_ok());
-        // Не считаемые за вызов — только байтовый лимит.
+        // не считаемые за вызов — только байтовый лимит.
         assert!(guard.consume("counter", &json!({}), "rpc", false).is_ok());
         let usage = guard.usage("counter", "rpc");
         assert_eq!(usage["callLimit"], json!(MAX_CALLS));
@@ -263,7 +278,7 @@ mod tests {
     #[test]
     fn byte_budget_is_shared_across_buckets() {
         let guard = PluginOperationGuard::new();
-        // Полезная нагрузка ~3 МиБ (меньше MAX_PAYLOAD в 4 МиБ): пара вызовов
+        // полезная нагрузка ~3 МиБ (меньше MAX_PAYLOAD в 4 МиБ): пара вызовов
         // исчерпывает восьмимебайтное окно.
         let payload: String = "x".repeat(3 * 1024 * 1024);
         guard.consume("heavy", &json!({ "blob": payload }), "rpc", false).unwrap();
@@ -294,7 +309,7 @@ mod tests {
         assert_eq!(entry["plugin"], json!("demo"));
         assert_eq!(entry["operation"], json!("net.fetch"));
         assert_eq!(entry["argumentKeys"], json!(["event", "listener_id", "token", "url"]));
-        // Значения не попадают в аудит никогда.
+        // значения не попадают в аудит никогда.
         assert!(!log.contains("secret"));
         assert_eq!(entry["event"], json!("launcher.ready"));
         assert_eq!(entry["listenerId"], json!("listener-123"));
@@ -307,7 +322,7 @@ mod tests {
         assert!(!log.contains("custom.event"));
         assert!(!log.contains("bad-listener"));
 
-        // Ротация: файл больше лимита уезжает в previous.
+        // ротация: файл больше лимита уезжает в previous.
         let path = root.join("plugin-operations.jsonl");
         fs::write(&path, vec![b'x'; (MAX_AUDIT_BYTES + 1) as usize]).unwrap();
         guard.audit(&root, "demo", "op", &json!({}), "ok", 0.5).unwrap();

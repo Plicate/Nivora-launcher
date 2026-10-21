@@ -1,12 +1,4 @@
-// Операции над локальными данными без сети:
-//   jvm_presets_list — каталог JVM-пресетов;
-//   launch_history   — история запусков экземпляра (только чтение;
-//                      запись делает процесс запуска);
-//   cache_stats      — сводка каталога загрузок (размер/число файлов);
-//   cache_prune      — удаление устаревших метаданных кеша (*.json/*.cache).
-//
-// Корни — XDG-переменные либо домашний каталог; корень игры — из
-// settings.json, кеш — cache_home/downloads.
+// операции над локальными данными без сети:
 use serde_json::{json, Value};
 use std::fs;
 use std::path::Path;
@@ -125,7 +117,7 @@ pub(crate) fn cache_prune_from(cache_dir: &Path, max_age_hours: i64) -> Value {
 }
 
 fn request_age_hours(request: &Value) -> Result<i64, String> {
-    // Ключ опционален: по умолчанию 48; ошибка разбора падает наружу.
+    // ключ опционален: по умолчанию 48; ошибка разбора падает наружу.
     let default_value = json!(48);
     let raw = request.get("max_age_hours").unwrap_or(&default_value);
     if let Some(value) = raw.as_i64() {
@@ -147,15 +139,13 @@ fn epoch_seconds() -> f64 {
         .unwrap_or(0.0)
 }
 
-/// Округление МиБ до одного знака, «половина к чётному»:
-/// 262144 байта (ровно 0,25 МиБ) → 0.2, а не 0.3.
 fn round_mib_one_decimal(total_bytes: u64) -> f64 {
     let scaled = total_bytes as f64 * 10.0 / (1024.0 * 1024.0);
     let floor = scaled.floor();
     let rounded = match scaled - floor {
         difference if difference == 0.5 => {
             let lower = floor as i64;
-            // Соседи отличаются на 1 — чётный выбирается точно.
+            // соседи отличаются на 1 — чётный выбирается точно.
             if lower % 2 == 0 {
                 lower as f64
             } else {
@@ -168,8 +158,6 @@ fn round_mib_one_decimal(total_bytes: u64) -> f64 {
     rounded / 10.0
 }
 
-/// История запусков: файл не-ссылка, ≤256 КБ, JSON-массив;
-/// из него берутся только объекты (строки/числа отбрасываются).
 fn read_launch_history(instance_dir: &Path) -> Value {
     let path = instance_dir.join(LAUNCH_HISTORY_FILE);
     let Ok(meta) = fs::symlink_metadata(&path) else {
@@ -187,8 +175,6 @@ fn read_launch_history(instance_dir: &Path) -> Value {
     Value::Array(entries.into_iter().filter(Value::is_object).collect())
 }
 
-/// Пресеты продублированы в optimizer.py (optimization_analyze/apply);
-/// порядок значим; менять только вместе.
 fn jvm_presets() -> Value {
     let fps_flags = [
         "-XX:+UseG1GC",
@@ -263,8 +249,6 @@ fn jvm_presets() -> Value {
     ])
 }
 
-// ----------------------------------------------------------- Тесты ----
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -289,7 +273,7 @@ mod tests {
         let presets = jvm_presets();
         let ids: Vec<&str> = presets.as_array().unwrap().iter().map(|p| p["id"].as_str().unwrap()).collect();
         assert_eq!(ids, vec!["fps", "balanced", "heavy_modpack", "compatibility", "streaming", "none"]);
-        // Количество флагов и якорные значения, которые видит пользователь.
+        // количество флагов и якорные значения, которые видит пользователь.
         let counts: Vec<usize> = presets.as_array().unwrap().iter().map(|p| p["flags"].as_array().unwrap().len()).collect();
         assert_eq!(counts, vec![10, 9, 16, 2, 10, 0]);
         assert_eq!(presets[0]["flags"][5], json!("-XX:G1HeapRegionSize=32M"));
@@ -303,7 +287,7 @@ mod tests {
     fn launch_history_reads_only_object_entries() {
         let root = fixture_root("history");
         let game = root.join("game");
-        // Каталоги экземпляров всегда хранятся в безопасной форме имени
+        // каталоги экземпляров всегда хранятся в безопасной форме имени
         // («My World» → «My-World»), запрос же может приходить «человеческий».
         let instance = game.join("instances").join("My-World");
         fs::create_dir_all(&instance).unwrap();
@@ -320,12 +304,12 @@ mod tests {
         assert_eq!(response["history"].as_array().map(Vec::len), Some(2));
         assert_eq!(response["history"][0]["launch_id"], json!("a"));
 
-        // Неизвестный экземпляр — пустая история, а не ошибка.
+        // неизвестный экземпляр — пустая история, а не ошибка.
         assert_eq!(launch_history_from(&game, "нет такого")["history"], json!([]));
-        // Пустое имя — тоже (уровень обработчика).
+        // пустое имя — тоже (уровень обработчика).
         assert_eq!(launch_history(&json!({ "name": "  " })).unwrap()["history"], json!([]));
 
-        // Разрушенный JSON → пустая история, не ошибка.
+        // разрушенный JSON → пустая история, не ошибка.
         fs::write(instance.join(LAUNCH_HISTORY_FILE), "{not json").unwrap();
         assert_eq!(read_launch_history(&instance), json!([]));
     }
@@ -346,19 +330,17 @@ mod tests {
         assert_eq!(stats["file_count"], json!(4));
         assert_eq!(stats["total_bytes"], json!(1024 + 2048 + 2 + 2));
 
-        // Огромный возраст: cutoff глубоко в прошлом — ничего не удалено.
+        // огромный возраст: cutoff глубоко в прошлом — ничего не удалено.
         assert_eq!(cache_prune_from(&cache, 100_000)["deleted_files"], json!(0));
         assert!(stale.exists());
         assert!(fresh.exists());
 
-        // max_age_hours=0: cutoff = «сейчас»; mtime файлов строго раньше —
-        // метаданные удаляются (ровно как path.stat().st_mtime < cutoff).
         assert_eq!(cache_prune_from(&cache, 0)["deleted_files"], json!(2));
         assert!(!stale.exists() && !fresh.exists());
         // .jar не тронуты — чистка выбирает только .json/.cache.
         assert!(cache.join("a.jar").exists());
 
-        // Отсутствующий каталог кеша — нули без ошибок.
+        // отсутствующий каталог кеша — нули без ошибок.
         let empty = cache_stats_from(&root.join("no-such-cache"));
         assert_eq!(empty["cache"]["file_count"], json!(0));
         assert_eq!(empty["cache"]["total_bytes"], json!(0));
@@ -393,9 +375,6 @@ mod tests {
         assert!(request_age_hours(&json!({ "max_age_hours": "abc" })).is_err());
     }
 
-    /// Сверка с эталонной реализацией на общих fixture-каталогах:
-    /// scripts/parity_ops.sh подставляет пути через переменные окружения
-    /// и сравнивает ответы. Без них тест пропускается.
     #[test]
     fn live_parity_ops_fixture() {
         let Ok(presets_out) = std::env::var("NIVORA_PARITY_PRESETS_OUT") else {

@@ -4,7 +4,7 @@
 
 **A universal Minecraft launcher: Java, Bedrock and servers — in one window**
 
-[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-blue)]()
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-blue)]()
 [![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-green)]()
 [![Tauri 2](https://img.shields.io/badge/Tauri-2-orange)]()
 [![Version](https://img.shields.io/badge/version-1.0.0-purple)]()
@@ -12,7 +12,8 @@
 **[English](README.md)** | **[Русский](README.ru.md)**
 
 A modern Vue 3 interface, a fast Rust core, and an honest approach to
-licenses and your data. macOS is not supported — no pretending otherwise.
+licenses and your data. Bedrock is Windows/Linux only; everything else
+works on all three desktop platforms.
 
 </div>
 
@@ -28,12 +29,16 @@ embedded BedrockOnLinux runtime, on Windows through the official
 is always installed from official sources under your account’s license.
 
 - **Instances instead of a single install** — isolated folders, groups,
-  tags, icons, playtime, duplication, ZIP export.
+  tags, icons, playtime, duplication, ZIP export; instance shortcuts on
+  the desktop and in the app menu (`.lnk` / `.app` / `.desktop`) that
+  start the launcher and launch that exact instance, plus one-click
+  Markdown/CSV/text export of an instance's mod list.
 - **Catalogs** — mods, resource packs, shaders, data packs and modpacks
   from Modrinth, CurseForge, FTB and Technic; server plugins from
   Modrinth, Hangar, Spiget and GitHub Releases.
-- **Microsoft accounts** — device-code sign-in, Xbox Live/XSTS, skins and
-  capes, multiple accounts with aliases. Passwords are never stored.
+- **Accounts** — Microsoft device-code sign-in (Xbox Live/XSTS, skins and
+  capes) and ely.by login; multiple accounts with aliases. Passwords are
+  never stored: tokens live in the system credential store.
 - **In-game overlay** (`Shift+Tab`) — mods, session time, system metrics
   and video recording (`F7`) on top of the game.
 - **Workspace** — live console, snapshots, screenshot gallery, file
@@ -41,13 +46,24 @@ is always installed from official sources under your account’s license.
 - **Personalization** — a theme center in the spirit of Blender/Unity:
   colors, shapes, wallpaper, fonts, layout, animations; themes from a
   GitHub catalog.
+- **Its own file windows** — folder browsing and file picking happen in
+  launcher dialogs instead of the OS explorer and native pickers; the
+  right-click menu is the launcher's own, with real actions for instances,
+  accounts and modpacks.
+- **Native Rust core** — installs, version/loader/server-core metadata,
+  Bedrock, server management (start/stop/console), server networking
+  (public-IP diagnostics, UPnP port publishing, TCP traffic counters),
+  instance files & logs, themes, backups and update checks all run inside
+  the Tauri process through the `rust_engine`; the Python worker only
+  serves the remaining catalog and plugin operations. Progress of native
+  downloads streams to the ACTIVITY panel live.
 - **Self-update** — check for and install updates right from the launcher
   (Settings → Self-update); the feed is `latest.json` from GitHub
   Releases, packages are signed with a minisign key. On Linux
   self-update works for AppImage; deb/rpm are updated by reinstalling
   the package.
-- **More** — WebDAV data sync, HTTP/SOCKS5 proxy, LAN rooms, settings
-  profiles, plugin permission limits without code execution, CLI and
+- **More** — WebDAV data sync, HTTP/SOCKS5 proxy, settings profiles,
+  plugin permission limits without code execution, CLI and
   `doctor` diagnostics.
 
 The full feature list lives in [docs/FEATURES.ru.md](docs/FEATURES.ru.md)
@@ -69,9 +85,11 @@ The full feature list lives in [docs/FEATURES.ru.md](docs/FEATURES.ru.md)
 | **Debian/Ubuntu** | `.deb` package (`python3` is pulled in as a dependency). |
 | **Fedora/RHEL** | `.rpm` package. |
 | **Arch/CachyOS** | Build the package with `scripts/build_arch_package.sh`. |
+| **macOS 10.15+** | `.dmg` images for Apple Silicon and Intel. Not notarized: first launch after downloading — right-click → Open (or `xattr -dr com.apple.quarantine "Nivora Launcher.app"`). |
 
 Ready-made packages are published on the Releases page; the launcher
-checks for new versions on its own.
+checks for new versions on its own (on macOS updates are manual: the
+updater feed requires a Developer ID signature we don't have).
 
 > **Windows SmartScreen:** the installer is not signed with an EV
 > certificate, so Windows may warn “Windows protected your PC” on first
@@ -86,25 +104,51 @@ checks for new versions on its own.
 
 ## Building from source
 
+The source archives are not incremental: unpack them into a **clean
+directory** (`rm -rf nivora-launcher` first) — files removed in newer
+versions stay behind otherwise and break the TypeScript build.
+
 ```bash
 git clone <repo> nivora-launcher && cd nivora-launcher
+# same rule for a source archive:
+# rm -rf nivora-launcher && tar -xzf nivora-launcher-stage4.tar.gz
 
 # Windows (from WSL/a Linux cross environment, or from Windows)
 bash scripts/build_windows_exe.sh
 
 # Linux
-cd frontend && npm install && npm run tauri build   # .deb/.rpm/AppImage
+bash scripts/build_deb.sh            # или rpm/arch, см. scripts/build_all.sh
+
+# macOS
+bash scripts/build_macos_app.sh       # MACOS_ARCH=arm64|x86_64|both
+# → dist/macos/Nivora-Launcher_<версия>_<arch>.dmg (+ .app.zip, SHA256SUMS)
+
+# Всё сразу для текущей ОС
+bash scripts/build_all.sh             # проверяет артефакт каждой цели
 
 # Development
 cd frontend && npm install && npm run tauri dev
 ```
 
-The Python backend requires Python 3.10+. Pre-release checks:
+The Python backend requires Python 3.10+. A bare `npm run tauri build`
+without the backend step works for development (the launcher falls back
+to the system `python3`), but release packages always bundle the
+PyInstaller-built backend. Pre-release checks:
 
 ```bash
 cargo test --locked                                # Rust core
 python3 -m unittest discover -s tests -q           # Python side
 cd frontend && npm run build                       # vue-tsc + vite
+cd frontend && npm test                            # мост/реестр операций
+```
+
+A packaged app can smoke-test itself end-to-end (the same bridge the UI
+uses, parallel native/worker calls, a report and an exit code):
+
+```bash
+./nivora-launcher.exe --smoke-test        # Windows; отчёт: %LOCALAPPDATA%\nivora-launcher\smoke-test.json
+./Nivora\ Launcher.app/Contents/MacOS/nivora-launcher --smoke-test
+nivora-launcher --smoke-test              # Linux (отчёт: ~/.local/share/nivora-launcher/)
 ```
 
 ## Minecraft Bedrock
@@ -130,27 +174,65 @@ cd frontend && npm run build                       # vue-tsc + vite
 
 ```
 frontend/          Vue 3 + TypeScript + Tauri 2 (GUI)
-  src-tauri/       Rust core: Bedrock, overlay, downloads, catalogs, accounts
-nivora_launcher/   Python worker: lightweight operations and utilities
-scripts/           Package builds (exe/deb/rpm/arch), diagnostics
+  src-tauri/       Rust engine: bootstrap, settings, instance files/logs,
+                   groups, plugins, Bedrock, overlay, downloads, accounts,
+                   ely.by login, shader analysis, global search, world import,
+                   instance optimization, Modrinth catalog
+  cpp-turbo/       nivora-turbo — batch SHA-256 and jar-manifest scanning
+                   (C++, only system zlib)
+  go-modcat/       nivora-modcat — Modrinth catalog in Go: search, project
+                   cards and concurrent update checks
+  java/            ModScan.java — deep mod inspection: every manifest format
+                   plus the required Java version from class files
+nivora_launcher/   Python worker: modpack import/export, cloud sync,
+                   plugin infrastructure — background work only
+scripts/           Package builds (exe/deb/rpm/arch/app+dmg), diagnostics
 docs/              Subsystem documentation
 ```
 
-Everything critical to launching and performance lives in Rust; Python
-handles administrative functions. Both parts carry a build stamp — if
-they disagree, the launcher shows a warning instead of behaving
-unpredictably.
+Startup runs entirely on the Rust engine — `bootstrap`, settings and the
+Files/Logs tabs never spawn Python. The worker is started lazily, only
+for operations the engine does not handle natively yet (catalog lookups,
+modpack assembly, WebDAV cloud sync), so a long download no longer
+queues behind UI requests. Heavy hashing inside the worker (cloud
+manifests) is delegated to the `nivora-turbo` helper binary: a thread
+pool with hardware SHA where available, verified against reference
+vectors at build time and falling back to `hashlib` when absent.
+
+Why this split of languages: everything in-process belongs to Rust (no
+second runtime, no GC pauses, direct Tauri APIs). The other languages
+live where a helper process pays for itself: C++ (`nivora-turbo`) — batch
+file jobs (SHA-256, jar-manifest scanning) with no runtime attached;
+Go (`nivora-modcat`) — the network-heavy Modrinth catalog with concurrent
+requests; Java (`ModScan.java`) — the native habitat of jars: manifest
+parsing plus class files for an honest "required Java version". A missing
+helper never breaks the launcher — the engine falls back to its old path.
+
+Instance installs download everything at once: client jar, libraries,
+assets and the log config run as four parallel stages, each with its own
+connection pool (large files with a known hash arrive in segments), while
+a shared integrity journal keeps the stages from clobbering each other's
+records. Global search (Ctrl+K) also looks inside jars, so a mod is found
+even when its file name says nothing about its identity.
+
+Both parts carry a build stamp — if they disagree, the launcher shows a
+warning instead of behaving unpredictably.
 
 ## Data & privacy
 
 - Data directories: `nivora-launcher` under `%APPDATA%`/`%LOCALAPPDATA%`
-  (Windows) or the XDG directories (Linux). Data from the legacy
-  `trial-launcher` directory is migrated automatically on first launch.
+  (Windows) or the XDG directories (Linux **and macOS** — one layout for
+  both keeps the Rust core, the Python worker and the asset protocol in
+  sync; on macOS that means `~/.local/share`, `~/.config`, `~/.cache`).
+  Data from the legacy `trial-launcher` directory is migrated
+  automatically on first launch.
 - Credentials live in the system store (Credential Manager / keyring);
   Microsoft passwords are entered on Microsoft pages and never reach
   the launcher.
 - No telemetry. All requests go to official APIs (Mojang, Microsoft,
-  mod catalogs) and to your proxy/cloud if you configure one.
+  ely.by, mod catalogs) and to your proxy/cloud if you configure one.
+- The built-in file browser only reaches the home directory, the game
+  folder and the launcher's own data — nothing else leaves those roots.
 
 ## Hotkeys
 

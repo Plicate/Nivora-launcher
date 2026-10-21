@@ -1,7 +1,4 @@
-// Пресеты глобальных настроек: список, удаление, экспорт и импорт
-// JSON-файлов из config_home/settings-profiles. Машино-зависимые ключи
-// (game_dir, client_id, launcher_version) в пресет не попадают; состав
-// допустимых ключей — поля Settings.
+// пресеты глобальных настроек: список, удаление, экспорт и импорт
 use serde_json::{json, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -14,9 +11,7 @@ const PROFILE_DIR_NAME: &str = "settings-profiles";
 const MAX_PROFILE_JSON_BYTES: u64 = 1024 * 1024;
 const NAME_LIMIT: usize = 48;
 
-// Допустимые ключи пресета — в точности поля Settings. Список проверяется
-// паритет-скриптом на совпадение с dataclass-полями.
-const SETTINGS_FIELDS: [&str; 74] = [
+const SETTINGS_FIELDS: [&str; 77] = [
     "accent_color",
     "active_catalog_id",
     "active_launcher_profile_id",
@@ -25,6 +20,8 @@ const SETTINGS_FIELDS: [&str; 74] = [
     "animation_settings",
     "animations",
     "auto_refresh_metadata",
+    "auto_repair_enabled",
+    "auto_repair_muted",
     "backup_schedule",
     "catalog_api_url",
     "catalog_source",
@@ -45,6 +42,7 @@ const SETTINGS_FIELDS: [&str; 74] = [
     "density",
     "developer_mode",
     "download_retries",
+    "download_source",
     "download_timeout_seconds",
     "font_family",
     "game_dir",
@@ -101,8 +99,6 @@ fn epoch_seconds() -> f64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|value| value.as_secs_f64()).unwrap_or(0.0)
 }
 
-/// Имя профиля: недопустимые прогоны символов схлопываются в «-»,
-/// обрезка до 48 символов, крайние точки и дефисы снимаются.
 fn safe_profile_name(name: &str) -> Result<String, String> {
     let trimmed = name.trim();
     let mut cleaned = String::with_capacity(trimmed.len());
@@ -160,7 +156,7 @@ fn read_profile(path: &Path) -> Result<Value, String> {
     Ok(document)
 }
 
-/// Сводка профилей: повреждённые файлы молча пропускаются.
+/// сводка профилей: повреждённые файлы молча пропускаются.
 fn list_documents(config_home: &Path) -> Result<Vec<Value>, String> {
     let directory = profile_dir(config_home)?;
     let mut names: Vec<String> = fs::read_dir(&directory)
@@ -261,10 +257,6 @@ fn import_at(config_home: &Path, json_text: &str, raw_name: &str) -> Result<(), 
     Ok(())
 }
 
-/// Ключи, которые не переносятся между машинами (game_dir, client_id,
-/// launcher_version), отсекаются при сохранении профиля; импорт проверяет
-/// только состав допустимых полей.
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -349,7 +341,7 @@ mod tests {
 
     #[test]
     fn settings_fields_cover_dataclass_names() {
-        // Контракт: список полей уникален и включает машинно-зависимые
+        // контракт: список полей уникален и включает машинно-зависимые
         // ключи, которые сохранение профиля обязано отфильтровать.
         let mut seen = std::collections::HashSet::new();
         for field in SETTINGS_FIELDS {
@@ -358,6 +350,6 @@ mod tests {
         for key in ["game_dir", "client_id", "launcher_version"] {
             assert!(SETTINGS_FIELDS.contains(&key), "{key} должен быть в списке полей");
         }
-        assert_eq!(SETTINGS_FIELDS.len(), 74);
+        assert_eq!(SETTINGS_FIELDS.len(), 77);
     }
 }

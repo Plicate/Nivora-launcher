@@ -17,7 +17,6 @@ from .constants import (
 from .errors import LauncherError
 from .net import HttpClient
 
-
 class VersionRepository:
     def __init__(self, config: ConfigStore, http: HttpClient | None = None) -> None:
         self.config = config
@@ -100,7 +99,6 @@ class VersionRepository:
         base = str(library.get("url") or MINECRAFT_LIBRARY_BASE_URL).rstrip("/")
         return f"{base}/{path}"
 
-
 def merge_version_json(parent: dict[str, Any], child: dict[str, Any]) -> dict[str, Any]:
     """Merge Mojang's inheritance format without mutating either input."""
     result = copy.deepcopy(parent)
@@ -114,7 +112,6 @@ def merge_version_json(parent: dict[str, Any], child: dict[str, Any]) -> dict[st
         else:
             result[key] = copy.deepcopy(value)
     return result
-
 
 def _merge_named_list(parent: Any, child: Any) -> list[Any]:
     merged: list[Any] = copy.deepcopy(parent) if isinstance(parent, list) else []
@@ -130,7 +127,6 @@ def _merge_named_list(parent: Any, child: Any) -> list[Any]:
             merged.append(copy.deepcopy(item))
     return merged
 
-
 def _merge_arguments(parent: Any, child: dict[str, Any]) -> dict[str, Any]:
     result = copy.deepcopy(parent) if isinstance(parent, dict) else {}
     for key, value in child.items():
@@ -140,7 +136,6 @@ def _merge_arguments(parent: Any, child: dict[str, Any]) -> dict[str, Any]:
             result[key] = copy.deepcopy(value)
     return result
 
-
 def _deep_merge(parent: Any, child: Any) -> Any:
     if not isinstance(parent, dict) or not isinstance(child, dict):
         return copy.deepcopy(child)
@@ -148,7 +143,6 @@ def _deep_merge(parent: Any, child: Any) -> Any:
     for key, value in child.items():
         result[key] = _deep_merge(result[key], value) if key in result else copy.deepcopy(value)
     return result
-
 
 def maven_path(name: str, classifier: str | None = None) -> str:
     parts = name.split(":")
@@ -168,7 +162,6 @@ def maven_path(name: str, classifier: str | None = None) -> str:
         raise LauncherError(f"Небезопасный classifier Maven library: {classifier}")
     suffix = f"-{classifier}" if classifier else ""
     return f"{group.replace('.', '/')}/{artifact}/{version}/{artifact}-{version}{suffix}.jar"
-
 
 def safe_instance_name(value: str) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", value).strip(".-")

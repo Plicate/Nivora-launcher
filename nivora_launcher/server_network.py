@@ -1,8 +1,4 @@
-"""Opt-in publication of Java Minecraft servers with a public IPv4.
-
-No relay, VPN, firewall bypass, privileged commands, UDP or RCON forwarding.
-UPnP rules have a ten-minute lease and are renewed only while the server runs.
-"""
+"""opt-in publication of Java Minecraft servers with a public IPv4."""
 from __future__ import annotations
 
 import atexit
@@ -23,7 +19,6 @@ from .upnp import Gateway, UpnpError, discover_gateway, source_ip
 LEASE_SECONDS = 600
 RENEW_SECONDS = 240
 
-
 def port_number(value: Any) -> int:
     if isinstance(value, bool) or not re.fullmatch(r"[0-9]{1,5}", str(value)):
         raise LauncherError("Порт должен быть целым числом от 1 до 65535")
@@ -31,7 +26,6 @@ def port_number(value: Any) -> int:
     if not 1 <= port <= 65535:
         raise LauncherError("Порт должен быть от 1 до 65535")
     return port
-
 
 def public_ipv4(value: str) -> bool:
     try:
@@ -44,7 +38,6 @@ def public_ipv4(value: str) -> bool:
         )
     except ValueError:
         return False
-
 
 def nat_kind(wan: str, observed: str, local: str) -> str:
     if public_ipv4(local) and (not observed or local == observed):
@@ -63,7 +56,6 @@ def nat_kind(wan: str, observed: str, local: str) -> str:
         return "public"
     return "unknown"
 
-
 def properties_info(text: str, configured_port: int) -> dict[str, Any]:
     properties: dict[str, str] = {}
     for line in text.splitlines():
@@ -81,15 +73,13 @@ def properties_info(text: str, configured_port: int) -> dict[str, Any]:
         "properties_port": properties.get("server-port", str(configured_port)),
     }
 
-
 def observed_ipv4() -> str:
-    # A single fixed HTTPS IP-echo endpoint, no player/account data or tokens.
+    # a single fixed HTTPS IP-echo endpoint, no player/account data or tokens.
     raw = HttpClient(timeout=5, retries=1).request("https://api.ipify.org", max_bytes=64)
     value = raw.decode("ascii").strip()
     if not public_ipv4(value):
         raise LauncherError("Сервис определения IP не вернул публичный IPv4")
     return value
-
 
 def tcp_local(ip: str, port: int) -> bool:
     if not ip:
@@ -100,9 +90,8 @@ def tcp_local(ip: str, port: int) -> bool:
     except OSError:
         return False
 
-
 def firewall_help(port: int) -> list[dict[str, str]]:
-    # Display only. Never run these commands or disable a firewall.
+    # display only. Never run these commands or disable a firewall.
     return [
         {"platform": "Linux · UFW", "command": f"sudo ufw allow {port}/tcp", "undo": f"sudo ufw delete allow {port}/tcp"},
         {"platform": "Linux · firewalld", "command": f"sudo firewall-cmd --add-port={port}/tcp", "undo": f"sudo firewall-cmd --remove-port={port}/tcp"},
@@ -110,7 +99,6 @@ def firewall_help(port: int) -> list[dict[str, str]]:
          "command": f'New-NetFirewallRule -DisplayName "Nivora Launcher TCP {port}" -Direction Inbound -Action Allow -Protocol TCP -LocalPort {port}',
          "undo": f'Remove-NetFirewallRule -DisplayName "Nivora Launcher TCP {port}"'},
     ]
-
 
 @dataclass
 class Publication:
@@ -127,7 +115,6 @@ class Publication:
     closing: bool = False
     may_exist: bool = False
     uncertain_lease: bool = False
-
 
 class ServerPublisher:
     def __init__(self) -> None:
@@ -176,7 +163,7 @@ class ServerPublisher:
         existing = publication.gateway.mapping(publication.external_port)
         if existing is not None and not self._owns(existing, publication):
             raise UpnpError("Внешний порт уже занят. Выберите другой порт; чужие правила не заменяются")
-        # Keep a cleanup record even if the router times out after applying AddPortMapping.
+        # keep a cleanup record even if the router times out after applying AddPortMapping.
         publication.may_exist = True
         publication.gateway.add(publication.external_port, publication.internal_port, publication.description, LEASE_SECONDS)
         mapped = publication.gateway.mapping(publication.external_port)
@@ -263,7 +250,7 @@ class ServerPublisher:
                 existing = value.gateway.mapping(value.external_port)
                 if existing is not None:
                     if not self._owns(existing, value):
-                        # A replacement is no longer ours: leave it alone.
+                        # a replacement is no longer ours: leave it alone.
                         self._publications.pop(key, None)
                         raise UpnpError("Правило порта изменено вне лаунчера; чужое правило не удалено")
                     value.gateway.delete(value.external_port)
@@ -312,10 +299,8 @@ class ServerPublisher:
             except LauncherError:
                 pass  # A hard exit still has the bounded router lease as fallback.
 
-
 publisher = ServerPublisher()
 atexit.register(publisher.shutdown)
-
 
 def diagnose(root: Path, port: int, properties: str, running: bool, *, external_port: int | None = None) -> dict[str, Any]:
     port = port_number(port)

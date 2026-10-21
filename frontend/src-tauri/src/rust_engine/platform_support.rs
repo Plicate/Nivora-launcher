@@ -1,8 +1,34 @@
-// Тонкий слой различий платформ: права дескрипторов, reparse-точки, сигналы
+// тонкий слой различий платформ: права дескрипторов, reparse-точки, сигналы
 // процессам, открытие путей в системе.
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-/// Применяет POSIX-биты прав там, где они есть; Windows пользуется ACL профиля.
+pub(crate) fn simplify_path(path: PathBuf) -> PathBuf {
+    if cfg!(windows) {
+        if let Some(simple) = strip_verbatim_prefix(&path.to_string_lossy()) {
+            return PathBuf::from(simple);
+        }
+    }
+    path
+}
+
+/// `canonicalize` + [`simplify_path`].
+pub(crate) fn canonical_path(path: &Path) -> std::io::Result<PathBuf> {
+    std::fs::canonicalize(path).map(simplify_path)
+}
+
+pub(crate) fn strip_verbatim_prefix(text: &str) -> Option<String> {
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        return Some(format!(r"\\{rest}"));
+    }
+    let rest = text.strip_prefix(r"\\?\")?;
+    let bytes = rest.as_bytes();
+    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        return Some(rest.to_owned());
+    }
+    None
+}
+
+/// применяет POSIX-биты прав там, где они есть; Windows пользуется ACL профиля.
 #[cfg(unix)]
 pub(crate) fn set_private_fd(fd: i32, mode: u32) {
     unsafe {
@@ -53,13 +79,11 @@ pub(crate) fn process_exists(pid: i32) -> bool {
             CloseHandle(handle);
             return true;
         }
-        // Отказ в доступе всё равно означает, что PID существует.
+        // отказ в доступе всё равно означает, что PID существует.
         std::io::Error::last_os_error().raw_os_error() == Some(5)
     }
 }
 
-/// Платформенные флаги запуска дочерних процессов: отдельная сессия/группа,
-/// чтобы серверы и Java не получали сигналы лаунчера.
 pub(crate) fn prepare_process(command: &mut std::process::Command) {
     #[cfg(unix)]
     {
@@ -75,7 +99,7 @@ pub(crate) fn prepare_process(command: &mut std::process::Command) {
     }
 }
 
-/// Завершение дерева процессов: группа на unix, taskkill /T на Windows.
+/// завершение дерева процессов: группа на unix, taskkill /T на Windows.
 pub(crate) fn terminate_process_tree(pid: i32, force: bool) {
     #[cfg(unix)]
     {
@@ -89,7 +113,7 @@ pub(crate) fn terminate_process_tree(pid: i32, force: bool) {
     {
         let taskkill = which_taskkill();
         if let Some(taskkill) = taskkill {
-            let output = std::process::Command::new(taskkill)
+            let output = super::platform::command(taskkill)
                 .args(["/PID", &pid.to_string(), "/T", "/F"])
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
@@ -119,18 +143,18 @@ fn which_taskkill() -> Option<std::path::PathBuf> {
     system32.exists().then_some(system32)
 }
 
-/// Открытие пути средствами системы (файловый менеджер, браузер и т.п.).
+/// открытие пути средствами системы (файловый менеджер, браузер и т.п.).
 pub(crate) fn open_path(path: &Path) -> Result<(), String> {
     #[cfg(windows)]
     {
-        let _ = std::process::Command::new("explorer")
+        let _ = super::platform::command("explorer")
             .arg(path.as_os_str())
             .spawn();
         return Ok(());
     }
     #[cfg(target_os = "macos")]
     {
-        let _ = std::process::Command::new("open").arg(path).spawn();
+        let _ = super::platform::command("open").arg(path).spawn();
         return Ok(());
     }
     #[cfg(all(unix, not(target_os = "macos")))]
@@ -144,12 +168,12 @@ pub(crate) fn open_path(path: &Path) -> Result<(), String> {
         let Some(opener) = opener else {
             return Err("Не найден xdg-open. Установите пакет xdg-utils.".to_owned());
         };
-        let _ = std::process::Command::new(opener).arg(path).spawn();
+        let _ = super::platform::command(opener).arg(path).spawn();
         Ok(())
     }
 }
 
-/// Имя платформы в терминах sys.platform из Python.
+/// имя платформы в терминах sys.platform из Python.
 pub(crate) fn sys_platform() -> &'static str {
     #[cfg(windows)]
     { "win32" }
@@ -162,6 +186,15 @@ pub(crate) fn sys_platform() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn verbatim_prefix_is_stripped_for_drive_and_unc_paths() {
+        assert_eq!(strip_verbatim_prefix(r"\\?\C:\Users\Nick\game").as_deref(), Some(r"C:\Users\Nick\game"));
+        assert_eq!(strip_verbatim_prefix(r"\\?\UNC\server\share\x").as_deref(), Some(r"\\server\share\x"));
+        assert_eq!(strip_verbatim_prefix(r"\\?\Volume{abc}\x"), None);
+        assert_eq!(strip_verbatim_prefix(r"C:\plain"), None);
+        assert_eq!(strip_verbatim_prefix("/home/user"), None);
+    }
 
     #[test]
     fn process_existence_reflects_current_and_bogus_pids() {

@@ -28,10 +28,8 @@ from .errors import LauncherError
 from .platform_support import set_private_fd
 from .security import CELL_DIRECTORY, SERVICE_JSON_FILES
 
-
 class CloudStorageError(LauncherError):
     """A user-facing cloud storage error."""
-
 
 @dataclass(frozen=True)
 class CloudFile:
@@ -41,7 +39,6 @@ class CloudFile:
 
     def as_dict(self) -> dict[str, Any]:
         return {"key": self.key, "size": self.size, "modified_at": self.modified_at}
-
 
 _DAV = "{DAV:}"
 _MANIFEST_NAME = ".trial-launcher-manifest.json"
@@ -61,8 +58,6 @@ _SERVER_METADATA_NAMES = {
 _CONTROL_FILE_NAMES = frozenset(SERVICE_JSON_FILES) | {_MANIFEST_NAME}
 _EXCLUDED_FILE_NAMES = _CONTROL_FILE_NAMES | {"accounts.json", _MANIFEST_KEY_FILE}
 
-# Settings which can affect only the local UI or resource cache. In particular,
-# paths, credentials, OAuth endpoints and catalog definitions never come from DAV.
 _RESTORABLE_SETTINGS = frozenset(
     {
         "memory",
@@ -80,6 +75,8 @@ _RESTORABLE_SETTINGS = frozenset(
         "download_timeout_seconds",
         "download_retries",
         "confirm_destructive_actions",
+        "auto_repair_enabled",
+        "auto_repair_muted",
         "show_activity_panel",
         "show_toasts",
         "minimize_on_launch",
@@ -111,7 +108,6 @@ _RESTORABLE_SETTINGS = frozenset(
     }
 )
 
-
 class _SameOriginRedirectHandler(HTTPRedirectHandler):
     def redirect_request(self, request, fp, code, msg, headers, newurl):
         target = urljoin(request.full_url, newurl)
@@ -125,7 +121,6 @@ class _SameOriginRedirectHandler(HTTPRedirectHandler):
             raise CloudStorageError("WebDAV перенаправил запрос на небезопасный адрес")
         return super().redirect_request(request, fp, code, msg, headers, target)
 
-
 def _safe_key(value: str) -> str:
     key = str(value).replace("\\", "/").strip("/")
     path = PurePosixPath(key)
@@ -133,14 +128,12 @@ def _safe_key(value: str) -> str:
         raise CloudStorageError("Недопустимый путь файла в облачном хранилище")
     return "/".join(part for part in path.parts if part not in {"", "."})
 
-
 def _safe_remote_path(value: str) -> str:
     raw = str(value or "trial-launcher").strip().replace("\\", "/")
     parts = [part for part in raw.split("/") if part and part != "."]
     if any(part == ".." or "\x00" in part for part in parts):
         raise CloudStorageError("Путь облачной папки содержит недопустимые сегменты")
     return "/".join(parts)[:512]
-
 
 def _is_protected_local_path(config: ConfigStore, path: Path) -> bool:
     try:
@@ -157,7 +150,6 @@ def _is_protected_local_path(config: ConfigStore, path: Path) -> bool:
     except OSError:
         return True
 
-
 def _format_http_error(error: HTTPError) -> str:
     if error.code in {401, 403}:
         return "WebDAV отклонил авторизацию. Проверьте логин и пароль или токен."
@@ -166,7 +158,6 @@ def _format_http_error(error: HTTPError) -> str:
     if error.code == 405:
         return "WebDAV-сервис не поддерживает нужную операцию."
     return f"WebDAV вернул HTTP {error.code}."
-
 
 class WebDavStorage:
     def __init__(self, config: ConfigStore) -> None:
@@ -355,7 +346,6 @@ class WebDavStorage:
                     continue
         return sorted(values, key=lambda item: item.key.lower())
 
-
 def save_cloud_password(config: ConfigStore, password: str) -> None:
     value = str(password)
     if not value:
@@ -363,13 +353,11 @@ def save_cloud_password(config: ConfigStore, password: str) -> None:
         return
     _secret_set(config.settings.cloud_url, config.settings.cloud_username, value)
 
-
 def cloud_has_password(config: ConfigStore) -> bool:
     try:
         return bool(_secret_get(config.settings.cloud_url, config.settings.cloud_username, soft=True))
     except CloudStorageError:
         return False
-
 
 def cloud_settings_public(config: ConfigStore) -> dict[str, Any]:
     settings = config.settings
@@ -382,7 +370,6 @@ def cloud_settings_public(config: ConfigStore) -> dict[str, Any]:
         "include_accounts": settings.cloud_include_accounts,
         "last_sync": settings.cloud_last_sync,
     }
-
 
 def sync_sources(config: ConfigStore, include_accounts: bool) -> Iterable[tuple[str, Path]]:
     roots: list[tuple[str, Path]] = [("data", config.paths.data_home)]
@@ -414,12 +401,11 @@ def sync_sources(config: ConfigStore, include_accounts: bool) -> Iterable[tuple[
                 continue
             yield f"{prefix}/{relative.as_posix()}", path
 
-
 def _local_target(config: ConfigStore, key: str, include_accounts: bool) -> Path | None:
     safe = _safe_key(key)
     if safe == "config/settings.json":
         return config.paths.settings_file
-    # Account tokens are never restored from DAV, even when the upload opt-in is set.
+    # account tokens are never restored from DAV, even when the upload opt-in is set.
     if safe == "config/accounts.json":
         return None
     if safe.startswith("data/"):
@@ -442,7 +428,6 @@ def _local_target(config: ConfigStore, key: str, include_accounts: bool) -> Path
         return None if _is_protected_local_path(config, target) else target
     return None
 
-
 def _atomic_file_write(path: Path, content: bytes) -> None:
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
@@ -458,17 +443,14 @@ def _atomic_file_write(path: Path, content: bytes) -> None:
         if temp_path.exists():
             temp_path.unlink()
 
-
 def _secret_command() -> str:
     command = shutil.which("secret-tool")
     if not command:
         raise CloudStorageError("Для облачного пароля установите libsecret и secret-tool")
     return command
 
-
 def _secret_attributes(url: str, username: str) -> list[str]:
     return ["trial-launcher-webdav", "user", username, "url", url]
-
 
 def _secret_get(url: str, username: str, *, soft: bool = False) -> str:
     if not url or not username:
@@ -501,7 +483,6 @@ def _secret_get(url: str, username: str, *, soft: bool = False) -> str:
         raise CloudStorageError("Пароль WebDAV не найден в libsecret")
     return result.stdout.rstrip("\r\n")
 
-
 def _secret_set(url: str, username: str, password: str) -> None:
     if os.name == "nt":
         try:
@@ -522,7 +503,6 @@ def _secret_set(url: str, username: str, password: str) -> None:
         raise CloudStorageError("Не удалось сохранить пароль WebDAV в libsecret") from exc
     if result.returncode != 0:
         raise CloudStorageError("libsecret не сохранил пароль WebDAV")
-
 
 def _secret_clear(url: str, username: str) -> None:
     if not url or not username:
@@ -549,7 +529,6 @@ def _secret_clear(url: str, username: str) -> None:
     if result.returncode not in {0, 1}:
         raise CloudStorageError("libsecret не удалил пароль WebDAV")
 
-
 def _windows_keyring():
     try:
         import keyring
@@ -559,10 +538,8 @@ def _windows_keyring():
     except Exception as exc:
         raise CloudStorageError("Диспетчер учётных данных Windows недоступен") from exc
 
-
 def _webdav_keyring_username(url: str, username: str) -> str:
     return f"{url}\n{username}"
-
 
 def _file_sha256(path: Path) -> str:
     digest = hashlib.sha256()
@@ -571,10 +548,8 @@ def _file_sha256(path: Path) -> str:
             digest.update(block)
     return digest.hexdigest()
 
-
 def _bytes_sha256(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
-
 
 def _filtered_settings_bytes(config: ConfigStore) -> bytes:
     values = asdict(config.settings)
@@ -583,7 +558,6 @@ def _filtered_settings_bytes(config: ConfigStore) -> bytes:
     if len(content) > _MAX_SETTINGS_BYTES:
         raise CloudStorageError("Отфильтрованные настройки слишком большие для синхронизации")
     return content
-
 
 def _manifest_key(config: ConfigStore) -> bytes:
     path = config.paths.config_home / _MANIFEST_KEY_FILE
@@ -605,7 +579,6 @@ def _manifest_key(config: ConfigStore) -> bytes:
     except OSError as exc:
         raise CloudStorageError("Не удалось сохранить ключ проверки облачного манифеста") from exc
 
-
 def _manifest_payload(files: list[dict[str, Any]]) -> bytes:
     normalized = [
         {
@@ -618,10 +591,8 @@ def _manifest_payload(files: list[dict[str, Any]]) -> bytes:
     ]
     return json.dumps({"format": 2, "files": normalized}, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
-
 def _manifest_signature(config: ConfigStore, files: list[dict[str, Any]]) -> str:
     return hmac.new(_manifest_key(config), _manifest_payload(files), hashlib.sha256).hexdigest()
-
 
 def _load_manifest(storage: WebDavStorage, config: ConfigStore) -> tuple[dict[str, Any], str]:
     try:
@@ -661,7 +632,6 @@ def _load_manifest(storage: WebDavStorage, config: ConfigStore) -> tuple[dict[st
     payload_digest = hashlib.sha256(_manifest_payload(files)).hexdigest()
     return {"format": 2, "updated_at": float(raw.get("updated_at", 0) or 0), "files": files, "signature": raw["signature"]}, payload_digest
 
-
 def _restore_plan(config: ConfigStore, storage: WebDavStorage) -> tuple[dict[str, Any], str]:
     manifest, manifest_id = _load_manifest(storage, config)
     changes: list[dict[str, Any]] = []
@@ -698,14 +668,12 @@ def _restore_plan(config: ConfigStore, storage: WebDavStorage) -> tuple[dict[str
         "settings": settings_preview or {},
     }, manifest_id
 
-
 def _reject_symlink_target(path: Path) -> None:
     current = path
     while current != current.parent:
         if current.is_symlink():
             raise CloudStorageError(f"Локальный путь восстановления является ссылкой: {path}")
         current = current.parent
-
 
 def sync_cloud(config: ConfigStore) -> dict[str, Any]:
     storage = WebDavStorage(config)
@@ -725,12 +693,16 @@ def sync_cloud(config: ConfigStore) -> dict[str, Any]:
     planned_total = sum(path.stat().st_size for _, path in sources if path.exists()) + len(settings_content)
     if planned_total > _MAX_TOTAL_BYTES:
         raise CloudStorageError("Облачный бэкап превышает общий лимит размера")
+    # дайджесты для манифеста считаются одной пачкой до выгрузки: nivora-turbo
+    from . import turbo
+
+    batch = turbo.sha256_batch([path for _, path in sources if path.exists()])
     for key, path in sources:
         stat = path.stat()
         if stat.st_size > _MAX_FILE_BYTES:
             raise CloudStorageError(f"Файл слишком большой для синхронизации: {key}")
         storage.put_file(key, path)
-        digest = _file_sha256(path)
+        digest = batch[path][0] if batch and path in batch else _file_sha256(path)
         manifest.append({"key": key, "size": stat.st_size, "modified_at": stat.st_mtime, "sha256": digest})
         uploaded += 1
         total_bytes += stat.st_size
@@ -759,7 +731,6 @@ def sync_cloud(config: ConfigStore) -> dict[str, Any]:
     storage.put(_MANIFEST_NAME, manifest_content)
     config.set_value("cloud_last_sync", time.time())
     return {"uploaded": uploaded, "bytes": total_bytes}
-
 
 def restore_cloud(config: ConfigStore, *, confirmed: bool = False, manifest_id: str = "") -> dict[str, Any]:
     storage = WebDavStorage(config)
@@ -804,7 +775,6 @@ def restore_cloud(config: ConfigStore, *, confirmed: bool = False, manifest_id: 
     config.settings.cloud_last_sync = restored_at
     config.save_settings()
     return {"preview": False, "restored": restored, "bytes": total_bytes, "manifest_id": current_manifest_id, "skipped": plan["skipped"]}
-
 
 def delete_cloud_file(config: ConfigStore, key: str) -> None:
     if _safe_key(key) == _MANIFEST_NAME:

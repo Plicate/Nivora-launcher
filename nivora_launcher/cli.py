@@ -10,7 +10,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from . import __version__
-from .accounts import AccountStore, MicrosoftAuthenticator, OfflineDebugAccount
+from .accounts import AccountStore, ElyAuthenticator, MicrosoftAuthenticator, OfflineDebugAccount
 from .config import ConfigStore
 from .errors import LauncherError
 from .installer import MinecraftInstaller
@@ -23,7 +23,6 @@ from .mods import ModrinthProvider
 from .net import HttpClient
 from .runtime import java_version
 from .skins import SkinStore, apply_cape, apply_skin, clear_cape, profile
-
 
 class _DownloadLogger:
     def __init__(self) -> None:
@@ -47,7 +46,6 @@ class _DownloadLogger:
             return
         if event == "complete":
             print(f"[downloaded] {destination} ({current} bytes)", flush=True)
-
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="nivora-launcher", description="Nivora Launcher — универсальный лаунчер Minecraft")
@@ -182,7 +180,6 @@ def build_parser() -> argparse.ArgumentParser:
     shortcut.add_argument("--directory", default=None)
     return parser
 
-
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
@@ -203,13 +200,16 @@ def main(argv: list[str] | None = None) -> int:
         print("\nОперация отменена.", file=sys.stderr)
         return 130
 
-
 def _dispatch(args: argparse.Namespace) -> int:
     if args.command == "plugin":
         return _plugin_command(args)
 
     config = ConfigStore()
-    http = HttpClient(download_observer=_DownloadLogger())
+    http = HttpClient(
+        download_observer=_DownloadLogger(),
+        proxy=config.settings.http_proxy,
+        download_source=config.settings.download_source,
+    )
     accounts = AccountStore(config)
     repository = VersionRepository(config, http)
     installer = MinecraftInstaller(config, repository=repository, http=http)
@@ -264,6 +264,10 @@ def _dispatch(args: argparse.Namespace) -> int:
         account = MicrosoftAuthenticator(config, accounts, http).login_device_code()
         print(f"Выполнен вход: {account.username} ({account.uuid})")
         return 0
+    if args.command == "login" and args.login_command == "ely":
+        account = ElyAuthenticator(config, accounts, http).login(args.username, args.password)
+        print(f"Выполнен вход: {account.username} ({account.uuid})")
+        return 0
     if args.command == "account":
         return _account_command(args, config, accounts)
     if args.command == "instances":
@@ -282,7 +286,6 @@ def _dispatch(args: argparse.Namespace) -> int:
     if args.command == "doctor":
         return _doctor(config)
     raise LauncherError("Неизвестная команда")
-
 
 def _audit_command(args: argparse.Namespace, config: ConfigStore) -> int:
     from .mod_audit import AuditError, ModAuditStore
@@ -351,7 +354,6 @@ def _audit_command(args: argparse.Namespace, config: ConfigStore) -> int:
     print("Декомпилированные исходники уничтожены после проверки.")
     return 0
 
-
 def _plugin_command(args: argparse.Namespace) -> int:
     if args.plugin_command == "reload":
         from .plugin_reload import request_reload
@@ -385,7 +387,6 @@ def _plugin_command(args: argparse.Namespace) -> int:
         return 0
     raise LauncherError("Unknown plugin command")
 
-
 def _select_account(kind: str, config: ConfigStore, accounts: AccountStore):
     if kind == "offline":
         return OfflineDebugAccount(config, accounts).get()
@@ -396,7 +397,11 @@ def _select_account(kind: str, config: ConfigStore, accounts: AccountStore):
         account = accounts.get(account_id=kind)
         if not account:
             raise LauncherError(f"Аккаунт не найден: {kind}")
-        return MicrosoftAuthenticator(config, accounts).get_valid(kind) if account.kind == "microsoft" else account
+        if account.kind == "microsoft":
+            return MicrosoftAuthenticator(config, accounts).get_valid(kind)
+        if account.kind == "ely":
+            return ElyAuthenticator(config, accounts).get_valid(account.account_id)
+        return account
 
     configured_id = str(getattr(config.settings, "default_account_id", "auto") or "auto")
     selected = accounts.get(account_id=configured_id) if configured_id.lower() != "auto" else None
@@ -419,7 +424,6 @@ def _select_account(kind: str, config: ConfigStore, accounts: AccountStore):
     if microsoft:
         return MicrosoftAuthenticator(config, accounts).get_valid(microsoft.account_id)
     return OfflineDebugAccount(config, accounts).get()
-
 
 def _account_command(args: argparse.Namespace, config: ConfigStore, accounts: AccountStore) -> int:
     if args.account_command == "list":
@@ -452,7 +456,6 @@ def _account_command(args: argparse.Namespace, config: ConfigStore, accounts: Ac
         return 0
     raise LauncherError("Неизвестная команда account")
 
-
 def _instances_command(args: argparse.Namespace, instances: InstanceStore) -> int:
     if args.instances_command == "list":
         for value in instances.list():
@@ -476,7 +479,6 @@ def _instances_command(args: argparse.Namespace, instances: InstanceStore) -> in
         return 0
     raise LauncherError("Неизвестная команда instances")
 
-
 def _config_command(args: argparse.Namespace, config: ConfigStore) -> int:
     if args.config_command == "show":
         value = asdict(config.settings)
@@ -494,7 +496,6 @@ def _config_command(args: argparse.Namespace, config: ConfigStore) -> int:
         return 0
     raise LauncherError("Неизвестная команда config")
 
-
 def _mods_command(args: argparse.Namespace, config: ConfigStore, http: HttpClient) -> int:
     provider = ModrinthProvider(http)
     if args.mods_command == "search":
@@ -508,7 +509,6 @@ def _mods_command(args: argparse.Namespace, config: ConfigStore, http: HttpClien
         print(f"Установлен мод: {result.name} -> {result.path}")
         return 0
     raise LauncherError("Неизвестная команда mods")
-
 
 def _skins_command(args: argparse.Namespace, config: ConfigStore, accounts: AccountStore, http: HttpClient) -> int:
     store = SkinStore(config)
@@ -542,13 +542,11 @@ def _skins_command(args: argparse.Namespace, config: ConfigStore, accounts: Acco
         return 0
     raise LauncherError("Неизвестная команда skins")
 
-
 def _valid_microsoft_account(account_id: str, config: ConfigStore, accounts: AccountStore, http: HttpClient):
     account = accounts.get(account_id=account_id)
     if not account or account.kind != "microsoft":
         raise LauncherError("Нужен Microsoft-аккаунт")
     return MicrosoftAuthenticator(config, accounts, http).get_valid(account.account_id)
-
 
 def _doctor(config: ConfigStore) -> int:
     java = shutil.which("java")

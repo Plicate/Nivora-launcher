@@ -1,4 +1,4 @@
-// Подписи плагинов, доверие к издателям и отзыв. Корень доверия — только
+// подписи плагинов, доверие к издателям и отзыв. Корень доверия — только
 // ключи, явно закреплённые пользователем; встроенных ключей нет намеренно.
 use base64::Engine as _;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
@@ -39,7 +39,7 @@ fn reason_valid(value: &str) -> bool {
     value.chars().count() <= MAX_REASON_LENGTH && !value.contains('\0')
 }
 
-/// Путь пакета: непустой, относительный, нормализованный, без «.»/«..».
+/// путь пакета: непустой, относительный, нормализованный, без «.»/«..».
 fn package_path_valid(value: &str) -> Result<(), String> {
     if value.is_empty() || value.contains('\0') {
         return Err("Plugin package paths must be non-empty relative paths".to_owned());
@@ -92,7 +92,7 @@ fn decode_base64(value: &str, expected_length: usize, label: &str) -> Result<Vec
     Ok(decoded)
 }
 
-/// Публичный ключ — 32 байта или их canonical base64.
+/// публичный ключ — 32 байта или их canonical base64.
 pub(crate) fn coerce_public_key(value: &Value, label: &str) -> Result<Vec<u8>, String> {
     match value {
         Value::String(text) => decode_base64(text, 32, label),
@@ -102,8 +102,6 @@ pub(crate) fn coerce_public_key(value: &Value, label: &str) -> Result<Vec<u8>, S
         }
     }
 }
-
-// ---------------------- канонический JSON ----------------------
 
 fn sorted_deep(value: &Value, depth: usize, label: &str) -> Result<Value, String> {
     if depth > 128 {
@@ -144,7 +142,7 @@ pub(crate) fn canonical_json_bytes(value: &Value, label: &str) -> Result<Vec<u8>
     serde_json::to_vec(&sorted).map_err(|_| format!("{label} cannot be encoded as canonical JSON"))
 }
 
-/// Копия-нормализация: объект → канонизируемо → снова объект.
+/// копия-нормализация: объект → канонизируемо → снова объект.
 pub(crate) fn copy_json_object(value: &Value, label: &str) -> Result<Map<String, Value>, String> {
     let Some(fields) = value.as_object() else {
         return Err(format!("{label} must be a JSON object"));
@@ -159,10 +157,6 @@ pub(crate) fn copy_json_object(value: &Value, label: &str) -> Result<Map<String,
     }
 }
 
-// ---------------------- ed25519 ----------------------
-
-/// Минимальный разбор PKCS8 PEM Ed25519 (единственный формат, который
-/// создаёт и принимает Python cryptography без пароля).
 fn parse_ed25519_private_pem(pem: &[u8]) -> Result<[u8; 32], String> {
     let text = std::str::from_utf8(pem).map_err(|_| "private_key_pem must be an unencrypted Ed25519 PEM".to_owned())?;
     let mut base64_body = String::new();
@@ -210,8 +204,6 @@ fn verify_ed25519(public_key: &[u8], message: &[u8], signature: &[u8]) -> Result
         .verify(message, &signature)
         .map_err(|_| "Plugin signature is invalid".to_owned())
 }
-
-// ---------------------- манифест ----------------------
 
 fn normalize_file_bytes(files: &std::collections::BTreeMap<String, Vec<u8>>) -> Result<(), String> {
     if files.len() > MAX_PACKAGE_FILES {
@@ -388,11 +380,6 @@ pub(crate) fn verify_manifest(manifest: &Value, files: &std::collections::BTreeM
     result
 }
 
-// ---------------------- строгий JSON ----------------------
-
-/// json.loads(..., object_pairs_hook=...) из Python отвергает повторяющиеся
-/// ключи; serde молча берёт последний. Сканер ниже — защита от подтасовки
-/// в локальном хранилище доверия.
 fn scan_json_no_duplicate_keys(text: &str) -> Result<(), String> {
     let mut scanner = JsonScanner { bytes: text.as_bytes(), position: 0 };
     scanner.skip_whitespace();
@@ -494,7 +481,7 @@ impl<'a> JsonScanner<'a> {
                 }
                 other if other < 0x20 => return Err("control character in string".to_owned()),
                 other => {
-                    // Многобайтовый UTF-8 копируем целиком.
+                    // многобайтовый UTF-8 копируем целиком.
                     let width = utf8_width(other);
                     let start = self.position - 1;
                     self.position = start + width;
@@ -578,14 +565,12 @@ fn utf8_width(byte: u8) -> usize {
     }
 }
 
-/// Разбор JSON с запретом повторяющихся ключей (как object_pairs_hook).
+/// разбор JSON с запретом повторяющихся ключей (как object_pairs_hook).
 pub(crate) fn parse_strict_json(raw: &[u8], label: &str) -> Result<Value, String> {
     let text = std::str::from_utf8(raw).map_err(|_| format!("{label} contains invalid JSON"))?;
     scan_json_no_duplicate_keys(text).map_err(|_| format!("{label} contains invalid JSON"))?;
     serde_json::from_str(text).map_err(|_| format!("{label} contains invalid JSON"))
 }
-
-// ---------------------- хранилище доверия ----------------------
 
 fn initial_store_state() -> Value {
     json!({
@@ -1221,7 +1206,7 @@ fn load_store_state(path: &Path) -> Result<Value, String> {
     Ok(state)
 }
 
-/// Чтение с O_NOFOLLOW на unix: symlink не откроется даже при гонке.
+/// чтение с O_NOFOLLOW на unix: symlink не откроется даже при гонке.
 fn read_private_file(path: &Path, max_bytes: usize) -> Result<Option<Vec<u8>>, String> {
     #[cfg(unix)]
     {
@@ -1367,7 +1352,7 @@ mod tests {
         assert_eq!(verified["valid"], json!(true));
         assert_eq!(verified["error"], json!(null));
 
-        // Подмененный файл ломает хеш, но не подпись манифеста.
+        // подмененный файл ломает хеш, но не подпись манифеста.
         let mut tampered = files.clone();
         tampered.insert("main.js".to_owned(), b"console.log('evil')".to_vec());
         let broken = verify_manifest(&signed, &tampered);
@@ -1391,7 +1376,7 @@ mod tests {
         assert!(store.is_publisher_pinned("author", None).unwrap());
         assert!(!store.is_publisher_pinned("author", Some(&json!(json!("aGk=")))).is_ok_and(|value| value));
 
-        // Повторный pin с тем же ключом — идемпотентен.
+        // повторный pin с тем же ключом — идемпотентен.
         store.pin_publisher_key("author", &json!(public_key), true).unwrap();
         let status = store.publisher_status("author", None).unwrap();
         assert_eq!(status["revocation_authority"], json!(true));
@@ -1405,7 +1390,7 @@ mod tests {
         assert!(store.unrevoke_plugin("bad-plugin").unwrap());
         assert!(!store.is_plugin_revoked("bad-plugin").unwrap());
 
-        // Перезагрузка с диска сохраняет состояние.
+        // перезагрузка с диска сохраняет состояние.
         drop(store);
         let reopened = PluginTrustStore::new(&root).unwrap();
         assert!(reopened.unrevoke_plugin("persisted").is_ok());
@@ -1449,9 +1434,8 @@ mod tests {
         assert_eq!(imported["sequence"], json!(7));
         assert!(store.is_plugin_revoked("evil").unwrap());
 
-        // Повторная вставка той же последовательности отклоняется.
+        // повторная вставка той же последовательности отклоняется.
         assert!(store.import_revocations_json(&document.to_string()).is_err());
         let _ = fs::remove_dir_all(&root);
     }
 }
-

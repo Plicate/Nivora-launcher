@@ -23,7 +23,6 @@ from .errors import LauncherError
 from .platform_support import set_private_fd
 from .plugin_security import PluginTrustStore, verify_manifest
 
-
 PLUGIN_MANIFEST = "plugin.yml"
 PLUGIN_V2_MANIFEST = "plugin.json"
 PLUGIN_MAX_MANIFEST_BYTES = 64 * 1024
@@ -125,12 +124,10 @@ PLUGIN_RUNTIME_CAPABILITIES = {
     "lifecycle.processMetrics",
 }
 
-
 def discover_plugins(root: Path) -> list[dict[str, Any]]:
     trust_store = PluginTrustStore(root.parent / "plugin-trust")
     permission_state = _read_permission_state(root.parent / _PLUGIN_PERMISSION_FILE)
     return _discover_plugins(root, trust_store, permission_state)
-
 
 def _discover_plugins(
     root: Path,
@@ -178,7 +175,6 @@ def _discover_plugins(
             }
         )
     return result
-
 
 class PluginStore:
     def __init__(self, config: ConfigStore) -> None:
@@ -861,7 +857,6 @@ class PluginStore:
             raise LauncherError("config.yml плагина является символьной ссылкой")
         return path
 
-
 def parse_plugin_yml(text: str) -> dict[str, Any]:
     if len(text.encode("utf-8")) > PLUGIN_MAX_MANIFEST_BYTES:
         raise LauncherError("plugin.yml слишком большой")
@@ -905,13 +900,8 @@ def parse_plugin_yml(text: str) -> dict[str, Any]:
         stack.append((indent, child))
     return root
 
-
 def _static_json_manifest(root: Path) -> dict[str, Any] | None:
-    """plugin.json с api_version 1 — тот же статический контракт, что и plugin.yml.
-
-    YAML остаётся как legacy-формат старых плагинов, новые описываются JSON.
-    Возвращает None, если это не статический манифест (значит, это v2/v3).
-    """
+    """plugin.json с api_version 1 — тот же статический контракт, что и plugin.yml."""
     path = root / PLUGIN_V2_MANIFEST
     try:
         if path.is_symlink() or not path.is_file() or path.stat().st_size > PLUGIN_MAX_MANIFEST_BYTES:
@@ -922,7 +912,6 @@ def _static_json_manifest(root: Path) -> dict[str, Any] | None:
     if not isinstance(raw, dict) or str(raw.get("api_version", "1")).strip() != "1":
         return None
     return validate_manifest(raw)
-
 
 def validate_manifest(value: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(value, dict):
@@ -988,7 +977,6 @@ def validate_manifest(value: dict[str, Any]) -> dict[str, Any]:
         manifest["sidebar_tab"] = sidebar_tab
     return manifest
 
-
 _PLUGIN_V2_FIELDS = {
     "id", "name", "version", "api_version", "entrypoint", "author", "description", "icon", "category",
     "permissions", "network_hosts", "config", "ui", "i18n", "theme", "actions", "events", "commands",
@@ -1024,7 +1012,6 @@ _PLUGIN_V3_EVENTS = _PLUGIN_V2_EVENTS | {
     "network.proxy.failed",
     "files.changed",
 }
-
 
 def validate_v2_manifest(value: dict[str, Any]) -> dict[str, Any]:
     if type(value) is not dict:
@@ -1099,7 +1086,6 @@ def validate_v2_manifest(value: dict[str, Any]) -> dict[str, Any]:
         "network_hosts": validated["network_hosts"],
     })
     return result
-
 
 def validate_v3_manifest(value: dict[str, Any]) -> dict[str, Any]:
     if type(value) is not dict:
@@ -1183,7 +1169,6 @@ def validate_v3_manifest(value: dict[str, Any]) -> dict[str, Any]:
     })
     return result
 
-
 def validate_plugin_json_manifest(value: dict[str, Any]) -> dict[str, Any]:
     if type(value) is not dict:
         raise LauncherError("plugin.json must contain a JSON object")
@@ -1194,7 +1179,6 @@ def validate_plugin_json_manifest(value: dict[str, Any]) -> dict[str, Any]:
         return validate_v3_manifest(value)
     raise LauncherError("plugin.json api_version must be \"2\" or \"3\"")
 
-
 def _schema_text(value: Any, label: str, maximum: int, *, allow_empty: bool = False) -> str:
     if type(value) is not str or len(value) > maximum or (not allow_empty and not value.strip()) or "\x00" in value:
         raise LauncherError(f"{label} must be text of at most {maximum} characters")
@@ -1204,18 +1188,15 @@ def _schema_text(value: Any, label: str, maximum: int, *, allow_empty: bool = Fa
         raise LauncherError(f"{label} must be valid UTF-8") from exc
     return value
 
-
 def _schema_object(value: Any, label: str, allowed: set[str], required: set[str]) -> dict[str, Any]:
     if type(value) is not dict or not required.issubset(value) or set(value) - allowed:
         raise LauncherError(f"{label} has an invalid object shape")
     return value
 
-
 def _schema_array(value: Any, label: str, maximum: int = 256) -> list[Any]:
     if type(value) is not list or len(value) > maximum:
         raise LauncherError(f"{label} must be an array of at most {maximum} items")
     return value
-
 
 def _schema_identifier(value: Any, label: str) -> str:
     text = _schema_text(value, label, 80)
@@ -1223,22 +1204,18 @@ def _schema_identifier(value: Any, label: str) -> str:
         raise LauncherError(f"{label} is not a safe identifier")
     return text
 
-
 def _schema_optional_text(record: dict[str, Any], key: str, label: str, maximum: int) -> None:
     if key in record:
         _schema_text(record[key], f"{label}.{key}", maximum, allow_empty=True)
-
 
 def _schema_bool(record: dict[str, Any], key: str, label: str) -> None:
     if key in record and type(record[key]) is not bool:
         raise LauncherError(f"{label}.{key} must be a boolean")
 
-
 def _schema_number(record: dict[str, Any], key: str, label: str) -> None:
     value = record.get(key)
     if key in record and not _finite_number(value):
         raise LauncherError(f"{label}.{key} must be a finite number")
-
 
 def _finite_number(value: Any) -> bool:
     if type(value) not in (int, float):
@@ -1247,7 +1224,6 @@ def _finite_number(value: Any) -> bool:
         return math.isfinite(value)
     except OverflowError:
         return False
-
 
 def _validate_bounded_json(value: Any, label: str, max_bytes: int, *, max_depth: int = 12) -> None:
     def _walk(node: Any, depth: int) -> None:
@@ -1281,14 +1257,12 @@ def _validate_bounded_json(value: Any, label: str, max_bytes: int, *, max_depth:
     if len(encoded) > max_bytes:
         raise LauncherError(f"{label} exceeds its bounded JSON size limit")
 
-
 def _validate_v2_option(value: Any, label: str) -> None:
     option = _schema_object(value, label, {"value", "label", "description", "disabled"}, {"value", "label"})
     _schema_text(option["value"], f"{label}.value", 256, allow_empty=True)
     _schema_text(option["label"], f"{label}.label", 256)
     _schema_optional_text(option, "description", label, 1000)
     _schema_bool(option, "disabled", label)
-
 
 def _validate_v2_config(value: Any) -> None:
     if type(value) is not dict or len(value) > 256:
@@ -1330,7 +1304,6 @@ def _validate_v2_config(value: Any) -> None:
                     raise LauncherError(f"{label}.options contains duplicate values")
                 seen.add(option["value"])
 
-
 def _validate_v2_ui(value: Any) -> None:
     ui = _schema_object(value, "plugin.json.ui", {"views"}, {"views"})
     views = _schema_array(ui["views"], "plugin.json.ui.views", 128)
@@ -1354,7 +1327,6 @@ def _validate_v2_ui(value: Any) -> None:
         _schema_optional_text(view, "icon", "plugin.json.ui.views[]", 64)
         _schema_number(view, "order", "plugin.json.ui.views[]")
         _validate_v2_ui_node(view["root"], "plugin.json.ui.views[].root", 0, [0, 0])
-
 
 def _validate_v2_ui_node(value: Any, label: str, depth: int, count: list[int]) -> None:
     if len(count) < 2: count.append(0)
@@ -1500,7 +1472,6 @@ def _validate_v2_ui_node(value: Any, label: str, depth: int, count: list[int]) -
         for child in _ui_array(node["children"], f"{label}.children", 512):
             _validate_v2_ui_node(child, f"{label}.children[]", depth + 1, count)
 
-
 def _validate_v2_i18n(value: Any) -> None:
     i18n = _schema_object(value, "plugin.json.i18n", {"default_locale", "messages"}, {"default_locale", "messages"})
     _schema_text(i18n["default_locale"], "plugin.json.i18n.default_locale", 35)
@@ -1514,7 +1485,6 @@ def _validate_v2_i18n(value: Any) -> None:
         for key, text in raw_table.items():
             _schema_text(key, "plugin.json.i18n message key", 256)
             _schema_text(text, "plugin.json.i18n message", 4096, allow_empty=True)
-
 
 def _validate_v2_theme(value: Any) -> None:
     theme = _schema_object(value, "plugin.json.theme", {"name", "colors", "tokens"}, set())
@@ -1533,7 +1503,6 @@ def _validate_v2_theme(value: Any) -> None:
             elif not (allow_number and _finite_number(item)):
                 raise LauncherError(f"plugin.json.theme.{field}.{key} has an unsupported value")
 
-
 def _validate_v2_actions(value: Any) -> None:
     actions = _schema_array(value, "plugin.json.actions", 256)
     _validate_v2_named_records(
@@ -1542,7 +1511,6 @@ def _validate_v2_actions(value: Any) -> None:
         {"id", "label", "description", "icon", "confirmation"},
         {"id", "label"},
     )
-
 
 def _validate_v2_named_records(value: list[Any], label: str, allowed: set[str], required: set[str]) -> None:
     seen: set[str] = set()
@@ -1557,7 +1525,6 @@ def _validate_v2_named_records(value: list[Any], label: str, allowed: set[str], 
             _schema_text(record[field], f"{label}.{field}", 256)
         for field in allowed - required - {"id"}:
             _schema_optional_text(record, field, label, 1000)
-
 
 def _validate_v2_commands(value: Any) -> None:
     commands = _schema_array(value, "plugin.json.commands", 256)
@@ -1596,7 +1563,6 @@ def _validate_v2_commands(value: Any) -> None:
                     for choice in choices:
                         _schema_text(choice, "plugin.json command choice", 256)
 
-
 def _validate_v2_shortcuts(value: Any) -> None:
     shortcuts = _schema_array(value, "plugin.json.shortcuts", 256)
     _validate_v2_named_records(
@@ -1605,7 +1571,6 @@ def _validate_v2_shortcuts(value: Any) -> None:
         {"id", "label", "default_key", "description"},
         {"id", "label", "default_key"},
     )
-
 
 def _read_permission_state(path: Path) -> dict[str, Any]:
     try:
@@ -1641,7 +1606,6 @@ def _read_permission_state(path: Path) -> dict[str, Any]:
         raise LauncherError("Plugin permission grants contain invalid JSON") from exc
     return _validate_permission_state(state)
 
-
 def _validate_permission_state(value: Any) -> dict[str, Any]:
     if type(value) is not dict or set(value) != {"schema_version", "plugins"}:
         raise LauncherError("Plugin permission grants have an unsupported format")
@@ -1665,7 +1629,6 @@ def _validate_permission_state(value: Any) -> dict[str, Any]:
             raise LauncherError("Plugin permission grants contain an invalid local execution hash")
     return value
 
-
 def _write_permission_state(path: Path, value: dict[str, Any]) -> None:
     _validate_permission_state(value)
     if path.is_symlink():
@@ -1674,7 +1637,6 @@ def _write_permission_state(path: Path, value: dict[str, Any]) -> None:
         _atomic_json_write(path, value, private=True)
     except OSError as exc:
         raise LauncherError("Could not save plugin permission grants") from exc
-
 
 def _parse_v2_manifest_bytes(content: bytes) -> dict[str, Any]:
     if len(content) > PLUGIN_MAX_MANIFEST_BYTES:
@@ -1690,7 +1652,6 @@ def _parse_v2_manifest_bytes(content: bytes) -> dict[str, Any]:
     if type(value) is not dict:
         raise LauncherError("plugin.json must contain an object")
     return value
-
 
 def _read_v2_package(root: Path, *, expected_id: str | None = None) -> dict[str, Any]:
     if root.is_symlink() or not root.is_dir():
@@ -1736,7 +1697,6 @@ def _read_v2_package(root: Path, *, expected_id: str | None = None) -> dict[str,
         "fingerprint": verification.get("fingerprint"),
         "package_digest": hashlib.sha256(canonical).hexdigest(),
     }
-
 
 def _collect_v2_files(root: Path) -> tuple[dict[str, bytes], bytes]:
     manifest_path = root / PLUGIN_V2_MANIFEST
@@ -1801,7 +1761,6 @@ def _collect_v2_files(root: Path) -> tuple[dict[str, bytes], bytes]:
         raise LauncherError(f"Could not inspect plugin package files: {exc}") from exc
     return files, manifest_bytes
 
-
 def _read_regular_package_file(path: Path, size_limit: int) -> bytes:
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
@@ -1819,7 +1778,6 @@ def _read_regular_package_file(path: Path, size_limit: int) -> bytes:
         raise LauncherError("Plugin package file changed while it was being read")
     return content
 
-
 def _v2_package_path(value: str) -> str:
     if not value or "\\" in value or "\x00" in value or value.startswith("/") or re.match(r"[A-Za-z]:", value):
         raise LauncherError("Plugin package contains an unsafe path")
@@ -1828,13 +1786,11 @@ def _v2_package_path(value: str) -> str:
         raise LauncherError("Plugin package contains an unsafe path")
     return value
 
-
 def _reject_v2_runtime_paths(root: Path) -> None:
     for name in {*_PLUGIN_V2_DATA_DIRECTORIES, ".enabled"}:
         child = root / name
         if child.exists() or child.is_symlink():
             raise LauncherError(f"Plugin package uses a reserved runtime path: {name}")
-
 
 def _verify_unsigned_v2_integrity(manifest: dict[str, Any], file_bytes: dict[str, bytes]) -> None:
     integrity = manifest.get("integrity")
@@ -1850,7 +1806,6 @@ def _verify_unsigned_v2_integrity(manifest: dict[str, Any], file_bytes: dict[str
         if not hmac.compare_digest(digest, hashlib.sha256(content).hexdigest()):
             raise LauncherError(f"Plugin file hash mismatch: {path}")
 
-
 def _try_v2_manifest(root: Path) -> dict[str, Any] | None:
     path = root / PLUGIN_V2_MANIFEST
     try:
@@ -1860,7 +1815,6 @@ def _try_v2_manifest(root: Path) -> dict[str, Any] | None:
         return validate_plugin_json_manifest(_parse_v2_manifest_bytes(_read_regular_package_file(path, PLUGIN_MAX_MANIFEST_BYTES)))
     except (OSError, LauncherError):
         return None
-
 
 def _runtime_capabilities_for_manifest(manifest: dict[str, Any]) -> list[str]:
     capabilities = set(PLUGIN_RUNTIME_CAPABILITIES)
@@ -1878,7 +1832,6 @@ def _runtime_capabilities_for_manifest(manifest: dict[str, Any]) -> list[str]:
     if "network:traffic-intercept" in permissions:
         capabilities.add("network.trafficIntercept.experimental")
     return sorted(capabilities)
-
 
 def _v2_plugin_status(
     directory: Path,
@@ -1972,7 +1925,6 @@ def _v2_plugin_status(
         "execution_blocked_reason": _execution_block_reason(package_valid, enabled, revoked, signed, publisher_trusted, local_execution_allowed),
     }
 
-
 def _execution_block_reason(
     package_valid: bool,
     enabled: bool,
@@ -1993,7 +1945,6 @@ def _execution_block_reason(
         return "disabled"
     return None
 
-
 def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, item in pairs:
@@ -2002,15 +1953,12 @@ def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
         result[key] = item
     return result
 
-
 def _reject_json_constant(value: str) -> None:
     raise ValueError(f"non-finite JSON constant: {value}")
-
 
 def _enabled_state(directory: Path) -> bool:
     path = directory / ".enabled"
     return path.exists() and not path.is_symlink()
-
 
 def _safe_child(root: Path, relative_path: str) -> Path:
     raw = Path(str(relative_path).replace("\\", "/"))
@@ -2026,7 +1974,6 @@ def _safe_child(root: Path, relative_path: str) -> Path:
         raise LauncherError("Путь файла плагина выходит за пределы namespace")
     return target
 
-
 def _archive_member_path(root: Path, member_name: str) -> Path:
     raw = Path(str(member_name).replace("\\", "/"))
     if raw.is_absolute() or not raw.parts or any(part in {"", ".", ".."} for part in raw.parts):
@@ -2036,10 +1983,8 @@ def _archive_member_path(root: Path, member_name: str) -> Path:
         raise LauncherError("Архив плагина выходит за пределы staging-каталога")
     return candidate
 
-
 def _archive_member_is_symlink(member: zipfile.ZipInfo) -> bool:
     return ((member.external_attr >> 16) & 0o170000) == 0o120000
-
 
 def _assert_no_symlink_chain(path: Path, root: Path) -> None:
     current = path
@@ -2052,7 +1997,6 @@ def _assert_no_symlink_chain(path: Path, root: Path) -> None:
         if current == current.parent or not _within(current.resolve(), root):
             raise LauncherError("Путь файла плагина выходит за пределы namespace")
         current = current.parent
-
 
 def _sqlite_authorizer(*, read_only: bool):
     allowed_read = {
@@ -2092,14 +2036,12 @@ def _sqlite_authorizer(*, read_only: bool):
 
     return authorize
 
-
 def _within(path: Path, root: Path) -> bool:
     try:
         path.relative_to(root)
         return True
     except ValueError:
         return False
-
 
 def _next_is_list(lines: list[str], index: int) -> bool:
     for raw in lines[index:]:
@@ -2109,7 +2051,6 @@ def _next_is_list(lines: list[str], index: int) -> bool:
         return value.startswith("-")
     return False
 
-
 def _strip_yaml_comment(value: str) -> str:
     quote = ""
     for index, char in enumerate(value):
@@ -2118,7 +2059,6 @@ def _strip_yaml_comment(value: str) -> str:
         elif char == "#" and not quote and (index == 0 or value[index - 1].isspace()):
             return value[:index]
     return value
-
 
 def _yaml_scalar(value: str) -> Any:
     if value.startswith("!") or value.startswith("&") or value.startswith("*") or value in {"|", ">"}:
@@ -2151,11 +2091,9 @@ def _yaml_scalar(value: str) -> Any:
         return parsed
     return value
 
-
 def _validate_config_key(key: str) -> None:
     if not re.fullmatch(r"[A-Za-z0-9._-]{1,120}", str(key).strip()):
         raise LauncherError("Небезопасный ключ конфигурации плагина")
-
 
 def _dump_yaml(value: dict[str, Any]) -> str:
     lines: list[str] = []
@@ -2163,7 +2101,6 @@ def _dump_yaml(value: dict[str, Any]) -> str:
         _validate_config_key(str(key))
         _dump_yaml_value(lines, str(key), item, 0)
     return "\n".join(lines) + ("\n" if lines else "")
-
 
 def _dump_yaml_value(lines: list[str], key: str, value: Any, indent: int) -> None:
     prefix = " " * indent
@@ -2179,7 +2116,6 @@ def _dump_yaml_value(lines: list[str], key: str, value: Any, indent: int) -> Non
             lines.append(f"{' ' * (indent + 2)}- {_yaml_dump_scalar(item)}")
         return
     lines.append(f"{prefix}{key}: {_yaml_dump_scalar(value)}")
-
 
 def _yaml_dump_scalar(value: Any) -> str:
     if value is None:

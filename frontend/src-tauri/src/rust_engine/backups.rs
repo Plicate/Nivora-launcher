@@ -1,7 +1,4 @@
-// Резервные копии игровых миров: ZIP-архивы только игрового содержимого
-// (saves/ у клиента, world* у сервера) в game_dir/backups/<экземпляр>,
-// плюс расписание с переопределением на экземпляр. Облачные копии
-// (WebDAV) остаются за воркером: решает needs_worker в mod.rs.
+// резервные копии игровых миров: ZIP-архивы только игрового содержимого
 use serde_json::{json, Map, Value};
 use std::fs;
 use std::io::{Read, Write};
@@ -26,7 +23,7 @@ fn epoch_seconds() -> f64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|value| value.as_secs_f64()).unwrap_or(0.0)
 }
 
-/// Локальное время в формате %Y%m%d-%H%M%S (как time.strftime).
+/// локальное время в формате %Y%m%d-%H%M%S (как time.strftime).
 fn timestamp() -> String {
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or(Duration::ZERO);
     let seconds = now.as_secs() as i64;
@@ -49,8 +46,6 @@ fn local_datetime(seconds: i64) -> Option<(i64, u32, u32, u32, u32, u32)> {
     }
 }
 
-// На Windows у libc нет localtime_r: смещение зоны даёт Win32, а календарную
-// дату из дней — алгоритм Говарда Хиннанта (civil_from_days).
 #[cfg(windows)]
 fn local_datetime(seconds: i64) -> Option<(i64, u32, u32, u32, u32, u32)> {
     use windows_sys::Win32::System::SystemServices::TIME_ZONE_ID_DAYLIGHT;
@@ -59,7 +54,7 @@ fn local_datetime(seconds: i64) -> Option<(i64, u32, u32, u32, u32, u32)> {
     let bias_minutes: i64 = unsafe {
         let mut info: TIME_ZONE_INFORMATION = std::mem::zeroed();
         let status = GetTimeZoneInformation(&mut info);
-        // Bias = UTC − local; в дневном свете действует DaylightBias.
+        // bias = UTC − local; в дневном свете действует DaylightBias.
         let extra = if status == TIME_ZONE_ID_DAYLIGHT { info.DaylightBias } else { info.StandardBias };
         (info.Bias + extra) as i64
     };
@@ -102,7 +97,7 @@ fn settings(config_home: &Path) -> Value {
     read_bounded_json(&config_home.join("settings.json"), 1024 * 1024).unwrap_or(Value::Null)
 }
 
-/// Приведение bool как в настройках: true/1/yes/on и false/0/no/off.
+/// приведение bool как в настройках: true/1/yes/on и false/0/no/off.
 fn coerce_bool(value: Option<&Value>, fallback: bool) -> bool {
     match value {
         Some(Value::Bool(flag)) => *flag,
@@ -125,8 +120,6 @@ fn py_int(value: Option<&Value>) -> Option<i64> {
     }
 }
 
-/// Нормализация расписания: границы интервала и числа копий, выбор
-/// хранилища local/cloud.
 fn normalize_schedule(raw: &Value) -> Map<String, Value> {
     let object = raw.as_object().cloned().unwrap_or_default();
     let destination = object.get("destination").and_then(Value::as_str).unwrap_or("local").trim().to_lowercase();
@@ -146,8 +139,6 @@ fn normalize_schedule(raw: &Value) -> Map<String, Value> {
     result
 }
 
-/// Нормализация расписания экземпляра: базовые поля плюс метки
-/// последнего прогона.
 fn normalize_instance_schedule(raw: &Value) -> Map<String, Value> {
     let object = raw.as_object().cloned().unwrap_or_default();
     let mut result = normalize_schedule(&Value::Object(object.clone()));
@@ -206,8 +197,6 @@ fn roots() -> (PathBuf, PathBuf) {
     (roots.config_home, game)
 }
 
-/// Итоговое расписание: глобальные настройки по умолчанию, поверх —
-/// переопределение экземпляра, если оно включено.
 fn schedule_for(config_home: &Path, game_dir: &Path, raw_name: &str) -> Result<Value, String> {
     let instance = resolve_instance(game_dir, raw_name)?;
     let global = settings(config_home)
@@ -237,7 +226,7 @@ fn local_root(game_dir: &Path, name: &str) -> Result<PathBuf, String> {
     Ok(root)
 }
 
-/// Список локальных ZIP-копий: свежие первыми.
+/// список локальных ZIP-копий: свежие первыми.
 fn local_backups(game_dir: &Path, name: &str) -> Result<Vec<Value>, String> {
     let root = local_root(game_dir, name)?;
     let mut names: Vec<String> = fs::read_dir(&root)
@@ -302,8 +291,6 @@ fn worlds_root(instance: &Instance) -> PathBuf {
     }
 }
 
-/// Сборка ZIP: manifest.json + worlds/<мир>/<относительный путь>.
-/// Превышение лимитов роняет копию целиком, не оставляя половину.
 fn write_archive(archive_path: &Path, instance_name: &str, kind: &str, worlds: &[PathBuf]) -> Result<usize, String> {
     let temporary = archive_path.with_file_name(format!("{}.part", archive_path.file_name().and_then(|name| name.to_str()).unwrap_or("backup.zip")));
     let mut count = 0usize;
@@ -350,7 +337,7 @@ fn write_archive(archive_path: &Path, instance_name: &str, kind: &str, worlds: &
                 state.0 += 1;
                 state.1 += size;
             }
-            // Подкаталоги — после файлов текущего уровня (rglob обходит вглубь).
+            // подкаталоги — после файлов текущего уровня (rglob обходит вглубь).
             for entry in entries {
                 if entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false)
                     && !fs::symlink_metadata(entry.path()).map(|meta| meta.is_symlink()).unwrap_or(false)
@@ -578,8 +565,6 @@ pub fn world_backup_schedule_set(request: &Value) -> Result<Value, String> {
     Ok(json!({ "schedule": schedule_for(&config_home, &game_dir, name)? }))
 }
 
-/// Запись расписания: слияние текущего, сохранённого и новых значений
-/// (только допустимые ключи), флаг override сохраняется отдельно.
 fn apply_schedule_values(config_home: &Path, game_dir: &Path, raw_name: &str, values: &Value, override_flag: Option<bool>) -> Result<Value, String> {
     let instance = resolve_instance(game_dir, raw_name)?;
     let mut stored = read_stored_schedule(&instance.path);
@@ -610,8 +595,6 @@ fn apply_schedule_values(config_home: &Path, game_dir: &Path, raw_name: &str, va
     schedule_for(config_home, game_dir, raw_name)
 }
 
-/// Облачные копии обслуживает Python-воркер: у Rust нет WebDAV-клиента.
-/// Порог — настроенные cloud_url и cloud_username в settings.json.
 pub(crate) fn cloud_configured(config_home: &Path) -> bool {
     let settings = settings(config_home);
     let url = settings.get("cloud_url").and_then(Value::as_str).unwrap_or_default().trim();
@@ -678,7 +661,7 @@ mod tests {
         assert_eq!(schedule["override"], json!(true));
         assert_eq!(schedule["interval_hours"], json!(12));
 
-        // Глобальные настройки без override не видны в итоге.
+        // глобальные настройки без override не видны в итоге.
         let values = json!({ "interval_hours": 48, "weird_key": 1 });
         let updated = apply_schedule_values(&root, &game, "alpha", &values, Some(false)).expect("обновление");
         assert_eq!(updated["override"], json!(false));
@@ -689,7 +672,7 @@ mod tests {
         assert_eq!(stored_after["interval_hours"], json!(48));
         assert!(stored_after.get("weird_key").is_none(), "неизвестные ключи не пишутся");
 
-        // Включение override поднимает сохранённые 48 часов.
+        // включение override поднимает сохранённые 48 часов.
         let flipped = apply_schedule_values(&root, &game, "alpha", &json!({ "enabled": true }), Some(true)).expect("override");
         assert_eq!(flipped["override"], json!(true));
         assert_eq!(flipped["interval_hours"], json!(48));
@@ -708,8 +691,6 @@ mod tests {
         let files = write_archive(&archive, "beta", "client", &worlds).expect("архив");
         assert_eq!(files, 2);
 
-        // Портим мир и восстанавливаем: существующие миры уезжают в
-        // .pre-restore-* (в порядке следования в архиве).
         fs::write(instance.join("saves").join("survival").join("level.dat"), "испорчено").unwrap();
         let restored = restore_entries(&archive, &instance.join("saves"), ".pre-restore-test").expect("восстановление");
         assert_eq!(restored, vec!["creative".to_owned(), "survival".to_owned()]);
@@ -718,7 +699,7 @@ mod tests {
         assert!(instance.join("saves").join("survival.pre-restore-test").is_dir());
         assert!(instance.join("saves").join("creative.pre-restore-test").is_dir());
 
-        // Список видит копию; prune с keep=1 удаляет старейшую.
+        // список видит копию; prune с keep=1 удаляет старейшую.
         let listed = local_backups(&game, "beta").expect("список");
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0]["id"], json!("manual-copy"));

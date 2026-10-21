@@ -12,13 +12,11 @@ from .constants import FABRIC_META_URL, QUILT_META_URL
 from .errors import LauncherError
 from .net import HttpClient
 
-
 @dataclass
 class LoaderChoice:
     loader: str
     version: str
     installer_url: str = ""
-
 
 class LoaderRepository:
     def __init__(self, http: HttpClient | None = None) -> None:
@@ -119,7 +117,7 @@ class LoaderRepository:
         except ET.ParseError as exc:
             raise LauncherError("NeoForge metadata имеет некорректный XML") from exc
         values = [node.text for node in root.findall(".//version") if node.text]
-        # NeoForge's version scheme encodes the complete MC minor line:
+        # neoForge's version scheme encodes the complete MC minor line:
         # 1.20.1 -> 20.1.x, 1.21.1 -> 21.1.x, and 1.21 -> 21.0.x.
         parts = minecraft_version.split(".")
         if len(parts) < 2:

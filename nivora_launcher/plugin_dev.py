@@ -25,7 +25,6 @@ from .plugins import (
     validate_v2_manifest,
 )
 
-
 PLUGIN_MANIFEST = "plugin.json"
 _EXCLUDED_DIRECTORIES = frozenset({".git", "node_modules", ".venv", "__pycache__"})
 _SIGNATURE_KEYS = frozenset({"algorithm", "key_id", "public_key", "value"})
@@ -46,7 +45,6 @@ _FILESYSTEM_APIS = frozenset(
         "Bun",
     }
 )
-
 
 def init_plugin(directory: str | Path) -> Path:
     requested = Path(directory).expanduser()
@@ -117,11 +115,9 @@ def init_plugin(directory: str | Path) -> Path:
         raise LauncherError(f"Could not write plugin starter files: {exc}") from exc
     return root
 
-
 def lint_plugin(directory: str | Path) -> list[str]:
     _root, _manifest, _validated, files = _load_project(directory)
     return _lint_sources(files)
-
 
 def pack_plugin(
     directory: str | Path,
@@ -208,7 +204,6 @@ def pack_plugin(
         temporary.unlink(missing_ok=True)
     return output_path
 
-
 def verify_plugin(archive_path: str | Path) -> dict[str, Any]:
     path = Path(archive_path).expanduser()
     if path.is_symlink() or not path.is_file():
@@ -234,7 +229,6 @@ def verify_plugin(archive_path: str | Path) -> dict[str, Any]:
         "version": validated.get("version", manifest.get("version", "")),
         "signed": signed,
     }
-
 
 def generate_keypair(private_path: str | Path, public_path: str | Path) -> tuple[Path, Path]:
     private_file, public_file = _key_output_paths(private_path, public_path)
@@ -266,7 +260,6 @@ def generate_keypair(private_path: str | Path, public_path: str | Path) -> tuple
         raise LauncherError(f"Could not write Ed25519 key files: {exc}") from exc
     return private_file, public_file
 
-
 def _load_project(
     directory: str | Path,
 ) -> tuple[Path, dict[str, Any], dict[str, Any], dict[str, bytes]]:
@@ -290,7 +283,6 @@ def _load_project(
         raise LauncherError("The plugin entrypoint is missing or is not a regular file.")
     return root, manifest, validated, files
 
-
 def _project_root(directory: str | Path) -> Path:
     path = Path(directory).expanduser()
     if path.is_symlink():
@@ -301,7 +293,6 @@ def _project_root(directory: str | Path) -> Path:
         return path.resolve(strict=True)
     except OSError as exc:
         raise LauncherError(f"Could not resolve plugin directory: {exc}") from exc
-
 
 def _collect_project_files(root: Path) -> dict[str, bytes]:
     result: dict[str, bytes] = {}
@@ -368,7 +359,6 @@ def _collect_project_files(root: Path) -> dict[str, bytes]:
         raise LauncherError(f"Could not read plugin package files: {exc}") from exc
     return result
 
-
 def _validate_author_manifest(manifest: Any) -> dict[str, Any]:
     if not isinstance(manifest, dict):
         raise LauncherError("plugin.json must contain a JSON object.")
@@ -383,7 +373,6 @@ def _validate_author_manifest(manifest: Any) -> dict[str, Any]:
     if not isinstance(validated, dict):
         raise LauncherError("Plugin manifest validator returned an invalid result.")
     return validated
-
 
 def _lint_sources(files: dict[str, bytes]) -> list[str]:
     warnings: list[str] = []
@@ -415,7 +404,6 @@ def _lint_sources(files: dict[str, bytes]) -> list[str]:
                 "prefer the plugin files API. This check is advisory; QuickJS is the security boundary."
             )
     return warnings
-
 
 def _javascript_tokens(source: str) -> list[tuple[str, str, int]]:
     tokens: list[tuple[str, str, int]] = []
@@ -513,13 +501,11 @@ def _javascript_tokens(source: str) -> list[tuple[str, str, int]]:
         index += 1
     return tokens
 
-
 def _regex_can_start(tokens: list[tuple[str, str, int]]) -> bool:
     if not tokens:
         return True
     _kind, previous, _line = tokens[-1]
     return previous in {"=", "(", "[", "{", ",", ":", ";", "!", "?", "&", "|", "return", "case", "throw", "=>"}
-
 
 def _unsupported_import_line(tokens: list[tuple[str, str, int]]) -> int | None:
     for index, (kind, value, line) in enumerate(tokens):
@@ -546,7 +532,6 @@ def _unsupported_import_line(tokens: list[tuple[str, str, int]]) -> int | None:
                         return line
                 cursor += 1
     return None
-
 
 def _read_archive(content: bytes) -> tuple[dict[str, Any], dict[str, Any], dict[str, bytes]]:
     try:
@@ -603,7 +588,6 @@ def _read_archive(content: bytes) -> tuple[dict[str, Any], dict[str, Any], dict[
     except Exception as exc:
         raise LauncherError("Plugin archive is invalid or contains unreadable files.") from exc
 
-
 def _parse_manifest_bytes(content: bytes) -> dict[str, Any]:
     if len(content) > PLUGIN_MAX_MANIFEST_BYTES:
         raise LauncherError("plugin.json exceeds the manifest size limit.")
@@ -614,7 +598,6 @@ def _parse_manifest_bytes(content: bytes) -> dict[str, Any]:
     if not isinstance(manifest, dict):
         raise LauncherError("plugin.json must contain a JSON object.")
     return manifest
-
 
 def _validate_integrity(manifest: dict[str, Any], file_bytes: dict[str, bytes]) -> None:
     expected = _integrity_value(file_bytes)["files"]
@@ -631,7 +614,6 @@ def _validate_integrity(manifest: dict[str, Any], file_bytes: dict[str, bytes]) 
         if not hmac.compare_digest(supplied, digest):
             raise LauncherError(f"Plugin integrity check failed for {name}.")
 
-
 def _integrity_value(file_bytes: dict[str, bytes]) -> dict[str, dict[str, str]]:
     return {
         "files": {
@@ -639,7 +621,6 @@ def _integrity_value(file_bytes: dict[str, bytes]) -> dict[str, dict[str, str]]:
             for name, content in sorted(file_bytes.items())
         }
     }
-
 
 def _validate_signature(value: Any) -> None:
     if not isinstance(value, dict) or set(value) != _SIGNATURE_KEYS:
@@ -660,7 +641,6 @@ def _validate_signature(value: Any) -> None:
         if len(decoded) != expected_length:
             raise LauncherError(f"Plugin signature {field} has an invalid length.")
 
-
 def _plugin_security():
     try:
         from .plugin_security import sign_manifest, verify_manifest
@@ -671,7 +651,6 @@ def _plugin_security():
     except ImportError as exc:
         raise LauncherError("The shared plugin signing and verification functions are not available.") from exc
     return sign_manifest, verify_manifest
-
 
 def _verify_signature(verify_manifest, manifest: dict[str, Any], file_bytes: dict[str, bytes]) -> None:
     try:
@@ -687,7 +666,6 @@ def _verify_signature(verify_manifest, manifest: dict[str, Any], file_bytes: dic
             raise LauncherError(f"Plugin signature verification failed: {error}")
         raise LauncherError("Plugin signature verification failed.")
 
-
 def _read_private_key(path: str | Path) -> bytes:
     key_path = Path(path).expanduser()
     if key_path.is_symlink() or not key_path.is_file():
@@ -700,7 +678,6 @@ def _read_private_key(path: str | Path) -> bytes:
     if not content or len(content) > 1024 * 1024:
         raise LauncherError("Private key file is empty or too large.")
     return content
-
 
 def _key_output_paths(private_path: str | Path, public_path: str | Path) -> tuple[Path, Path]:
     paths = [Path(private_path).expanduser(), Path(public_path).expanduser()]
@@ -716,7 +693,6 @@ def _key_output_paths(private_path: str | Path, public_path: str | Path) -> tupl
     if normalized[0] == normalized[1]:
         raise LauncherError("Private and public key paths must be different.")
     return normalized[0], normalized[1]
-
 
 def _write_new_file(path: Path, content: bytes, mode: int) -> None:
     descriptor: int | None = None
@@ -737,7 +713,6 @@ def _write_new_file(path: Path, content: bytes, mode: int) -> None:
             path.unlink(missing_ok=True)
         raise
 
-
 def _plugin_id_from_directory(name: str) -> str:
     plugin_id = re.sub(r"[^a-z0-9._-]+", "-", name.lower()).strip("._-")
     if not plugin_id or not re.match(r"^[a-z]", plugin_id):
@@ -745,7 +720,6 @@ def _plugin_id_from_directory(name: str) -> str:
     if len(plugin_id) < 2:
         plugin_id = f"{plugin_id}-plugin"
     return plugin_id[:64]
-
 
 def _normalize_archive_path(name: str, *, is_directory: bool = False) -> str:
     if not isinstance(name, str) or not name or "\x00" in name or "\\" in name:
@@ -762,7 +736,6 @@ def _normalize_archive_path(name: str, *, is_directory: bool = False) -> str:
         raise LauncherError("Plugin package contains an excessively long path.")
     return normalized
 
-
 def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, value in pairs:
@@ -771,13 +744,11 @@ def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
         result[key] = value
     return result
 
-
 def _json_bytes(value: dict[str, Any]) -> bytes:
     try:
         return (json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
     except (TypeError, ValueError, RecursionError) as exc:
         raise LauncherError("Plugin manifest contains values that cannot be encoded as JSON.") from exc
-
 
 def _is_within(path: Path, root: Path) -> bool:
     try:

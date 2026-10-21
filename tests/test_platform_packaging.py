@@ -35,16 +35,21 @@ class PlatformPackagingTests(unittest.TestCase):
         project_root = Path(__file__).resolve().parents[1]
         windows_script = (project_root / "scripts/build_windows_exe.sh").read_text(encoding="utf-8")
         arch_script = (project_root / "scripts/build_arch_package.sh").read_text(encoding="utf-8")
-        backend_entry = (project_root / "scripts/backend_entry.py").read_text(encoding="utf-8")
+        backend_entry = (project_root / "nivora_launcher/backend_entrypoint.py").read_text(encoding="utf-8")
         windows_conf = (project_root / "frontend/src-tauri/tauri.windows.conf.json").read_text(encoding="utf-8")
 
         # Один прогон собирает всё: PyInstaller-бэкенд, фронтенд и tauri build,
         # а exe кладётся ровно туда, где его ждёт tauri.windows.conf.json.
         self.assertIn("-m PyInstaller", windows_script)
         self.assertIn("scripts/backend_entry.py", windows_script)
-        self.assertIn("resources/backend/nivora-launcher-backend.exe", windows_script)
+        # Бэкенд — onedir-сборка (меньше ложных срабатываний антивирусов,
+        # чем onefile), вкладывается zip-архивом и кладётся ресурсом app/.
+        self.assertIn("resources/backend/app", windows_script)
+        self.assertIn("nivora-launcher-backend.zip", windows_script)
         self.assertIn("npm run tauri -- build", windows_script)
-        self.assertIn("nivora-launcher-backend.exe", windows_conf)
+        self.assertIn("resources/backend/app", windows_conf)
+        self.assertIn("--onedir", windows_script)
+        self.assertIn("--noupx", windows_script)
         # PyInstaller не кросс-компилирует: на Linux скрипт сам ставит
         # Windows Python в изолированный wine-префикс (официальный установщик).
         self.assertIn("www.python.org", windows_script)
@@ -79,7 +84,8 @@ class PlatformPackagingTests(unittest.TestCase):
         lib_rs = (project_root / "frontend/src-tauri/src/lib.rs").read_text(encoding="utf-8")
         self.assertIn("current_exe", lib_rs)
         self.assertIn("include_bytes!", lib_rs)
-        self.assertIn("EMBEDDED_BACKEND_EXE", lib_rs)
+        self.assertIn("EMBEDDED_BACKEND_ARCHIVE", lib_rs)
+        self.assertIn("extract_backend_archive", lib_rs)
         self.assertIn("LOCALAPPDATA", lib_rs)
         recorder = (project_root / "nivora_launcher/recorder.py").read_text(encoding="utf-8")
         self.assertIn("CREATE_NO_WINDOW", recorder)

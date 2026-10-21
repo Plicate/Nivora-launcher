@@ -1,6 +1,4 @@
-// Опциональная публикация Java-серверов с белым IPv4. Без релея, VPN,
-// обхода firewall, привилегированных команд, UDP и проброса RCON. UPnP-правила
-// живут десять минут и продлеваются только пока сервер работает.
+// опциональная публикация Java-серверов с белым IPv4. Без релея, VPN,
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -43,7 +41,7 @@ pub(crate) fn port_number(value: &Value) -> Result<u16, String> {
     Ok(port as u16)
 }
 
-/// Публичный IPv4: как IPv4Address.is_global плюс явные исключения.
+/// публичный IPv4: как IPv4Address.is_global плюс явные исключения.
 pub(crate) fn public_ipv4(value: &str) -> bool {
     let Some(address) = parse_ipv4(value) else { return false };
     let octets = address.octets();
@@ -107,13 +105,13 @@ pub(crate) fn properties_info(text: &str, configured_port: u16) -> Value {
         "bind_all": bind_all,
         "online_mode": get("online-mode").to_lowercase() != "false",
         "whitelist": get("white-list").to_lowercase() == "true",
-        // Отсутствующий ключ даёт настроенный порт; пустое значение остаётся пустым.
+        // отсутствующий ключ даёт настроенный порт; пустое значение остаётся пустым.
         "properties_port": properties.get("server-port").cloned().unwrap_or(json!(configured_port.to_string())),
     })
 }
 
 pub(crate) fn observed_ipv4() -> Result<String, String> {
-    // Один фиксированный HTTPS-эхо-эндпоинт: ни данных игроков, ни токенов.
+    // один фиксированный HTTPS-эхо-эндпоинт: ни данных игроков, ни токенов.
     let client = HttpClient::new(5, 1, "", None)?;
     let raw = client.request("https://api.ipify.org", "GET", None, None, Some(64), None)?;
     let text = String::from_utf8_lossy(&raw).trim().to_owned();
@@ -133,7 +131,7 @@ pub(crate) fn tcp_local(ip: &str, port: u16) -> bool {
 }
 
 pub(crate) fn firewall_help(port: u16) -> Vec<Value> {
-    // Только для показа. Эти команды никогда не выполняются, firewall не отключается.
+    // только для показа. Эти команды никогда не выполняются, firewall не отключается.
     vec![
         json!({
             "platform": "Linux · UFW",
@@ -206,7 +204,7 @@ fn publication_key(root: &Path) -> String {
 fn publication_description(key: &str) -> String {
     let digest = Sha256::digest(key.as_bytes());
     let hex: String = digest.iter().take(8).map(|byte| format!("{byte:02x}")).collect();
-    // Префикс переименован из TrialLauncher: старые правила ограничены арендой
+    // префикс переименован из TrialLauncher: старые правила ограничены арендой
     // и исчезнут сами максимум через десять минут.
     format!("NivoraLauncher-{hex}")
 }
@@ -246,7 +244,7 @@ impl ServerPublisher {
         Self::state_locked(&map, root)
     }
 
-    /// Создание/продление правила. Вызывается при удержанном замке.
+    /// создание/продление правила. Вызывается при удержанном замке.
     fn map_publication(&self, publication: &mut Publication) -> Result<(), String> {
         let upnp = |error: UpnpError| error.message;
         if let Some(existing) = publication
@@ -258,7 +256,7 @@ impl ServerPublisher {
                 return Err("Внешний порт уже занят. Выберите другой порт; чужие правила не заменяются".to_owned());
             }
         }
-        // След чистки оставляем даже если роутер оборвётся после AddPortMapping.
+        // след чистки оставляем даже если роутер оборвётся после AddPortMapping.
         publication.may_exist = true;
         publication
             .gateway
@@ -399,7 +397,7 @@ impl ServerPublisher {
         }
     }
 
-    /// Закрытие правила при удержанном замке. map.pop делает только владелец правила.
+    /// закрытие правила при удержанном замке. map.pop делает только владелец правила.
     fn close_locked(&self, map: &mut HashMap<String, Publication>, key: &str) -> Result<(), String> {
         let Some(publication) = map.get_mut(key) else {
             return Ok(());
@@ -409,7 +407,7 @@ impl ServerPublisher {
         match existing {
             Ok(Some(mapping)) => {
                 if !publication.owns(&mapping) {
-                    // Правило уже не наше: не трогаем чужое.
+                    // правило уже не наше: не трогаем чужое.
                     map.remove(key);
                     return Err("Правило порта изменено вне лаунчера; чужое правило не удалено".to_owned());
                 }
@@ -451,7 +449,7 @@ impl ServerPublisher {
         let mut map = self.publications.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let keys: Vec<String> = map.keys().cloned().collect();
         for key in keys {
-            // Как в Python: действия и ошибки обрабатываются одной веткой.
+            // как в Python: действия и ошибки обрабатываются одной веткой.
             let mut failure: Option<String> = None;
             let mut do_close = false;
             let mut do_renew = false;
@@ -503,7 +501,7 @@ impl ServerPublisher {
     }
 
     fn maintain(&self) {
-        // Пятнадцатисекундный цикл с быстрым выходом при остановке.
+        // пятнадцатисекундный цикл с быстрым выходом при остановке.
         loop {
             if self.shutdown.load(Ordering::Relaxed) {
                 return;
@@ -525,7 +523,7 @@ impl ServerPublisher {
             map.values().map(|value| value.root.clone()).collect()
         };
         for root in roots {
-            // Жёсткий выход всё равно ограничен арендой на роутере.
+            // жёсткий выход всё равно ограничен арендой на роутере.
             let _ = self.close(&root);
         }
     }
@@ -631,6 +629,114 @@ pub(crate) fn diagnose(
     }))
 }
 
+fn server_context(request: &Value) -> Result<(std::path::PathBuf, u16, String), String> {
+    let name = request.get("name").and_then(Value::as_str).unwrap_or_default();
+    let (config, instances) = super::server::stores()?;
+    let info = super::server::server_instance(&instances, name)?;
+    let settings = super::server::server_config(&config, &instances, name)?;
+    let default_port = json!(25565);
+    let port = port_number(settings.get("port").unwrap_or(&default_port))?;
+    let core = settings
+        .get("core")
+        .and_then(Value::as_str)
+        .unwrap_or("custom")
+        .trim()
+        .to_lowercase();
+    Ok((info.path.clone(), port, core))
+}
+
+fn confirmed(request: &Value) -> Result<(), String> {
+    if request.get("confirmed") != Some(&Value::Bool(true)) {
+        return Err("Подтвердите публикацию игрового TCP-порта в интернете".to_owned());
+    }
+    Ok(())
+}
+
+pub fn server_network_status(request: &Value) -> Result<Value, String> {
+    let (root, _, _) = server_context(request)?;
+    Ok(json!({ "mapping": publisher().state(&root) }))
+}
+
+pub fn server_network_close(request: &Value) -> Result<Value, String> {
+    let (root, _, _) = server_context(request)?;
+    Ok(json!({ "mapping": publisher().close(&root)? }))
+}
+
+pub fn server_network_prepare(request: &Value) -> Result<Value, String> {
+    confirmed(request)?;
+    let (root, port, core) = server_context(request)?;
+    if core == "velocity" || core == "waterfall" {
+        return Err("Для прокси настройте listener в конфигурации ядра, не в server.properties".to_owned());
+    }
+    if super::server::server_is_running(&root) {
+        return Err("Остановите сервер перед изменением server.properties".to_owned());
+    }
+    let (config, _) = super::server::stores()?;
+    let instance_name = request.get("name").and_then(Value::as_str).unwrap_or_default();
+    let mut lock = super::process_guard::InstanceProcessLock::new(&config.paths.data_home, instance_name);
+    lock.acquire()?;
+    let outcome = super::server::apply_server_port(&root, port as i64, true);
+    drop(lock);
+    outcome?;
+    Ok(json!({ "prepared": true, "port": port }))
+}
+
+pub fn server_network_diagnose(request: &Value) -> Result<Value, String> {
+    let (root, port, core) = server_context(request)?;
+    let proxy_core = core == "velocity" || core == "waterfall";
+    let properties = if !proxy_core {
+        let path = root.join("server.properties");
+        match fs::symlink_metadata(&path) {
+            Ok(meta) if !meta.is_symlink() && meta.is_file() && meta.len() < 2 * 1024 * 1024 => {
+                String::from_utf8_lossy(&fs::read(&path).unwrap_or_default()).to_string()
+            }
+            _ => String::new(),
+        }
+    } else {
+        String::new()
+    };
+    let running = super::server::server_is_running(&root);
+    let external_port = request.get("external_port").cloned().unwrap_or(json!(port));
+    let mut result = diagnose(&root, &json!(port), &properties, running, Some(&external_port))?;
+    if proxy_core {
+        if let Some(warnings) = result.get_mut("warnings").and_then(Value::as_array_mut) {
+            warnings.push(json!(
+                "У прокси проверьте listener, аутентификацию и доступ к backend-серверам в конфигурации ядра"
+            ));
+        }
+    }
+    Ok(result)
+}
+
+pub fn server_network_open(request: &Value) -> Result<Value, String> {
+    confirmed(request)?;
+    let (root, port, core) = server_context(request)?;
+    let observed = request.get("observed_ip").and_then(Value::as_str).unwrap_or("").trim().to_owned();
+    if !observed.is_empty() && !public_ipv4(&observed) {
+        return Err("Некорректный внешний IPv4".to_owned());
+    }
+    let proxy_core = core == "velocity" || core == "waterfall";
+    let properties = if !proxy_core {
+        let path = root.join("server.properties");
+        match fs::symlink_metadata(&path) {
+            Ok(meta) if !meta.is_symlink() && meta.is_file() && meta.len() < 2 * 1024 * 1024 => {
+                String::from_utf8_lossy(&fs::read(&path).unwrap_or_default()).to_string()
+            }
+            _ => String::new(),
+        }
+    } else {
+        String::new()
+    };
+    let mut info = properties_info(&properties, port);
+    info["observed_ip"] = json!(observed);
+    let running_root = root.clone();
+    let running: std::sync::Arc<dyn Fn() -> bool + Send + Sync> =
+        std::sync::Arc::new(move || super::server::server_is_running(&running_root));
+    let external_port = request.get("external_port").cloned().unwrap_or(json!(port));
+    let mapping = publisher().open(&root, &json!(port), &external_port, running, true, &info, None)?;
+    Ok(json!({ "mapping": mapping }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -667,12 +773,12 @@ mod tests {
 
     #[test]
     fn nat_kinds_follow_wan_and_observed() {
-        // Белый локальный и совпадающий наблюдённый — прямое подключение.
+        // белый локальный и совпадающий наблюдённый — прямое подключение.
         assert_eq!(nat_kind("", "", "8.8.8.8"), "direct");
         assert_eq!(nat_kind("", "8.8.8.8", "8.8.8.8"), "direct");
-        // Локальный серый, а WAN белый и совпал с наблюдённым — проброс роутера.
+        // локальный серый, а WAN белый и совпал с наблюдённым — проброс роутера.
         assert_eq!(nat_kind("45.132.19.55", "45.132.19.55", "192.168.1.10"), "public");
-        // Наблюдённый не совпал с WAN — двойной NAT.
+        // наблюдённый не совпал с WAN — двойной NAT.
         assert_eq!(nat_kind("45.132.19.55", "46.1.2.3", "192.168.1.10"), "double_nat");
         // WAN в диапазоне CGNAT.
         assert_eq!(nat_kind("100.72.0.1", "", "192.168.1.10"), "cgnat");
@@ -716,7 +822,7 @@ mod tests {
         let state = publisher.state(Path::new("/tmp"));
         assert_eq!(state["active"], json!(false));
         assert_eq!(state["error"], json!(""));
-        // Остановка без публикаций безопасна.
+        // остановка без публикаций безопасна.
         publisher.shutdown();
     }
 

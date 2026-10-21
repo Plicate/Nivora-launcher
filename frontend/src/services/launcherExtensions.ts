@@ -78,7 +78,7 @@ export const permissionDescriptions: Record<PluginPermission, string> = {
   'network:fetch': 'Запросы к разрешённым доменам из манифеста.',
   'network:dns': 'DNS-резолв только разрешённых доменов из манифеста.',
   'network:ping': 'TCP latency и проверка порта только разрешённых доменов.',
-  'network:listen': 'Зарезервировано для встроенных LAN-комнат; runtime plugin API не предоставляет это разрешение.',
+  'network:listen': 'Зарезервированное разрешение: runtime plugin API его не предоставляет.',
   'launcher:servers': 'Изолированный список игровых серверов внутри namespace плагина.',
   'launcher:dialogs': 'Показывать диалоги и короткие уведомления лаунчера.',
   'network:game': 'Сетевые соединения текущего игрового процесса.',

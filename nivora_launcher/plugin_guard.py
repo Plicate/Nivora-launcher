@@ -33,7 +33,7 @@ class PluginOperationGuard:
         identity = (plugin_id, bucket)
         with self.lock:
             if identity not in self.windows and len(self.windows) >= 256:
-                # Never evict an active budget to let callers reset their limit.
+                # never evict an active budget to let callers reset their limit.
                 stale = [key for key, entries in self.windows.items() if not entries or now - entries[-1][0] >= 60]
                 for key in stale: self.windows.pop(key, None)
                 if len(self.windows) >= 256: raise LauncherError('Plugin budget registry is full')
@@ -53,7 +53,7 @@ class PluginOperationGuard:
                     'byteLimit': MAX_BYTES_PER_MINUTE, 'windowSeconds': 60, 'enforced': True}
 
     def audit(self, root: Path, plugin_id: str, operation: str, args: dict, outcome: str, elapsed_ms: float):
-        # Deliberately never store values: URLs, headers, bodies, cookies, tokens,
+        # deliberately never store values: URLs, headers, bodies, cookies, tokens,
         # chat content and file content can all contain credentials.
         keys = sorted(str(key)[:80] for key in args)[:64]
         entry = {'at': time.time(), 'plugin': plugin_id[:64], 'operation': operation[:128],

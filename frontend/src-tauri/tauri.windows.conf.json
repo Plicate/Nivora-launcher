@@ -2,7 +2,18 @@
   "$schema": "https://schema.tauri.app/config/2",
   "bundle": {
     "resources": {
-      "resources/backend/nivora-launcher-backend.exe": "backend/nivora-launcher-backend.exe"
+      "resources/backend/app": "backend"
+    },
+    "windows": {
+      "nsis": {
+        "template": "windows/installer.nsi",
+        "installMode": "currentUser",
+        "languages": [
+          "Russian",
+          "English"
+        ],
+        "displayLanguageSelector": false
+      }
     }
   }
 }

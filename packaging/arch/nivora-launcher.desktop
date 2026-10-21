@@ -4,5 +4,7 @@ Name=Nivora Launcher
 Comment=Universal Minecraft launcher
 TryExec=nivora-launcher
 Exec=nivora-launcher
+Icon=nivora-launcher
 Terminal=false
 Categories=Game;
+StartupWMClass=nivora-launcher

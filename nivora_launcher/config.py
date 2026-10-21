@@ -19,7 +19,7 @@ from .errors import LauncherError
 from .plugin_catalogs import DEFAULT_PLUGIN_CATALOGS, normalize_plugin_catalogs
 from .platform_support import set_private_fd
 
-
+DOWNLOAD_SOURCES = frozenset({"auto", "official", "mirror"})
 DEFAULT_KEYBOARD_SHORTCUTS = {
     "open_settings": "Ctrl+,",
     "refresh": "Ctrl+R",
@@ -56,7 +56,6 @@ DEFAULT_ANIMATION_SETTINGS = {
         "mods": "fade",
         "modpacks": "fade",
         "plugins": "fade",
-        "lan-rooms": "fade",
         "themes": "fade",
         "instance-settings": "fade",
         "settings": "fade",
@@ -67,15 +66,12 @@ DEFAULT_ANIMATION_SETTINGS = {
         "mods": 140,
         "modpacks": 140,
         "plugins": 140,
-        "lan-rooms": 140,
         "themes": 140,
         "instance-settings": 140,
         "settings": 140,
     },
 }
 
-# Оверлей Nivora (Shift+Tab) и запись игры (F7). Горячие клавиши действуют,
-# только пока запущен экземпляр: лаунчер регистрирует их на время сессии.
 DEFAULT_OVERLAY_SETTINGS = {
     "enabled": True,
     "hotkey_overlay": "Shift+Tab",
@@ -93,9 +89,9 @@ DEFAULT_OVERLAY_SETTINGS = {
     "compact": False,
     "show_clock": True,
     "show_system_metrics": True,
+    "metrics_gpu": True,
     "metrics_cpu": True,
     "metrics_ram": True,
-    "metrics_gpu": True,
     "metrics_disk": True,
     "metrics_temperatures": True,
     "system_metrics_display": "overlay",
@@ -109,11 +105,9 @@ DEFAULT_BACKUP_SCHEDULE = {
     "destination": "local",
 }
 
-
 def _xdg_home(name: str, fallback: Path) -> Path:
     value = os.environ.get(name)
     return Path(value).expanduser() if value else fallback
-
 
 @dataclass
 class Settings:
@@ -133,14 +127,18 @@ class Settings:
     auto_refresh_metadata: bool = True
     metadata_refresh_hours: int = 6
     download_timeout_seconds: int = 30
-    download_retries: int = 3
+    download_retries: int = 5
     confirm_destructive_actions: bool = True
+    # авто-починка после краша: окно с предложением и виды проблем, для
+    # которых пользователь нажал «Больше не показывать».
+    auto_repair_enabled: bool = True
+    auto_repair_muted: list[str] = field(default_factory=list)
     show_activity_panel: bool = True
     show_toasts: bool = True
     minimize_on_launch: bool = False
     close_to_tray: bool = False
-    # Заставка при простое лаунчера: красивый фон вместо статичного окна.
-    # Язык интерфейса: None = ещё не выбран (первый запуск спросит), дальше 'ru'|'en'.
+    # заставка при простое лаунчера: красивый фон вместо статичного окна.
+    # язык интерфейса: None = ещё не выбран (первый запуск спросит), дальше 'ru'|'en'.
     language: Optional[str] = None
     font_family: str = "system"
     keep_logs_days: int = 14
@@ -151,6 +149,9 @@ class Settings:
     launcher_profiles: list[dict[str, Any]] = field(default_factory=lambda: copy.deepcopy([DEFAULT_LAUNCHER_PROFILE]))
     active_launcher_profile_id: str = "default"
     http_proxy: str = ""
+    # источник файлов Minecraft/загрузчиков: auto (официальный, при сбое —
+    # зеркало BMCLAPI), official (только официальный), mirror (сначала зеркало).
+    download_source: str = "auto"
     offline_debug_limit_seconds: int = 0
     launcher_version: str = APP_VERSION
     theme: str = "dark"
@@ -170,13 +171,16 @@ class Settings:
     overlay_settings: dict[str, Any] = field(default_factory=lambda: copy.deepcopy(DEFAULT_OVERLAY_SETTINGS))
     backup_schedule: dict[str, Any] = field(default_factory=lambda: copy.deepcopy(DEFAULT_BACKUP_SCHEDULE))
     density: str = "comfortable"
+    # формат списка экземпляров: default — обычные карточки-строки,
+    # compact — плотный список в духе Prism Launcher.
+    instance_layout: str = "default"
     ui_scale: int = 100
     radius_tokens: dict[str, int] = field(default_factory=lambda: dict(DEFAULT_RADIUS_TOKENS))
     page_themes: dict[str, str] = field(
-        default_factory=lambda: {"instances": "inherit", "instance-settings": "inherit", "accounts": "inherit", "mods": "inherit", "modpacks": "inherit", "plugins": "inherit", "lan-rooms": "inherit", "themes": "inherit", "settings": "inherit"}
+        default_factory=lambda: {"instances": "inherit", "instance-settings": "inherit", "accounts": "inherit", "mods": "inherit", "modpacks": "inherit", "plugins": "inherit", "themes": "inherit", "settings": "inherit"}
     )
     page_layouts: dict[str, str] = field(
-        default_factory=lambda: {"instances": "balanced", "instance-settings": "balanced", "accounts": "balanced", "mods": "wide", "modpacks": "wide", "plugins": "wide", "lan-rooms": "balanced", "themes": "wide", "settings": "balanced"}
+        default_factory=lambda: {"instances": "balanced", "instance-settings": "balanced", "accounts": "balanced", "mods": "wide", "modpacks": "wide", "plugins": "wide", "themes": "wide", "settings": "balanced"}
     )
     widget_visibility: dict[str, bool] = field(
         default_factory=lambda: {"instances.workspace": True, "accounts.status": True, "mods.context": True}
@@ -197,12 +201,11 @@ class Settings:
     developer_mode: bool = False
     cloud_url: str = ""
     cloud_username: str = ""
-    # Дефолт пути на WebDAV сохранён старым: у настроенных пользователей синхронизация
+    # дефолт пути на WebDAV сохранён старым: у настроенных пользователей синхронизация
     # указывает в эту папку, смена дефолта «спрячет» от них уже загруженные бэкапы.
     cloud_remote_path: str = "trial-launcher"
     cloud_include_accounts: bool = False
     cloud_last_sync: float = 0.0
-
 
 DEFAULT_COLOR_TOKENS = {
     "accent": "#8b653f",
@@ -221,13 +224,12 @@ DEFAULT_COLOR_TOKENS = {
     "banner_shade": "#191a17",
 }
 
-# Скругления углов основных групп элементов интерфейса, в пикселях.
+# скругления углов основных групп элементов интерфейса, в пикселях.
 DEFAULT_RADIUS_TOKENS = {
     "card": 7,
     "button": 8,
     "control": 10,
 }
-
 
 _MEMORY_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*([kmgt]i?b?|b)?\s*$", re.IGNORECASE)
 _MEMORY_FACTORS = {
@@ -246,9 +248,7 @@ _MEMORY_FACTORS = {
     "tib": 1024 * 1024 * 1024,
 }
 
-
 DEFAULT_RESOURCE_CATALOGS = [dict(item) for item in DEFAULT_MODPACK_CATALOGS]
-
 
 def system_memory_kib() -> int:
     if os.name == "nt":
@@ -273,13 +273,11 @@ def system_memory_kib() -> int:
         pass
     return 0
 
-
 def recommended_memory_kib(total_kib: int | None = None) -> int:
     total = total_kib or system_memory_kib()
     if total <= 0:
         return 2 * 1024 * 1024
     return max(1024 * 1024, (total // 2 // 1024) * 1024)
-
 
 def parse_memory_kib(value: str, default_kib: int | None = None) -> int:
     raw = str(value).strip()
@@ -297,7 +295,6 @@ def parse_memory_kib(value: str, default_kib: int | None = None) -> int:
         raise LauncherError("Значение памяти JVM слишком маленькое")
     return kib
 
-
 def format_memory_kib(value: int) -> str:
     kib = max(1, int(value))
     if kib % (1024 * 1024) == 0:
@@ -306,7 +303,6 @@ def format_memory_kib(value: int) -> str:
         return f"{kib // 1024}MiB"
     return f"{kib}KiB"
 
-
 def java_memory_value(value: str) -> str:
     kib = parse_memory_kib(value)
     if kib % (1024 * 1024) == 0:
@@ -314,7 +310,6 @@ def java_memory_value(value: str) -> str:
     if kib % 1024 == 0:
         return f"{kib // 1024}M"
     return f"{kib}K"
-
 
 class Paths:
     def __init__(self) -> None:
@@ -353,7 +348,6 @@ class Paths:
             except OSError:
                 pass
 
-
 class ConfigStore:
     def __init__(self, paths: Paths | None = None) -> None:
         self.paths = paths or Paths()
@@ -381,9 +375,23 @@ class ConfigStore:
         if not settings.game_dir:
             settings.game_dir = str(self.data_home_game_dir())
         changed = False
+        # версия — свойство сборки, а не пользовательская настройка: после
+        # обновления в settings.json не должна оставаться старая.
+        if settings.launcher_version != APP_VERSION:
+            settings.launcher_version = APP_VERSION
+            changed = True
+        if settings.instance_layout not in {"default", "compact"}:
+            settings.instance_layout = "default"
+            changed = True
         normalized_game_dir = str(self._validated_game_dir(settings.game_dir))
         if settings.game_dir != normalized_game_dir:
             settings.game_dir = normalized_game_dir
+            changed = True
+        download_source = str(settings.download_source or "").strip().lower()
+        if download_source not in DOWNLOAD_SOURCES:
+            download_source = "auto"
+        if settings.download_source != download_source:
+            settings.download_source = download_source
             changed = True
         raw_cloud_url = str(settings.cloud_url or "").strip().rstrip("/")
         try:
@@ -584,6 +592,10 @@ class ConfigStore:
                 value = min(32, max(1, int(value)))
             except (TypeError, ValueError) as exc:
                 raise LauncherError("max_downloads должно быть числом от 1 до 32") from exc
+        if key == "download_source":
+            value = str(value).strip().lower()
+            if value not in DOWNLOAD_SOURCES:
+                raise LauncherError("Источник загрузок: auto, official или mirror")
         if key == "http_proxy" and value.strip():
             proxy = urlsplit(value.strip())
             if proxy.scheme not in {"http", "https", "socks5", "socks5h"} or not proxy.hostname:
@@ -614,6 +626,8 @@ class ConfigStore:
                 raise LauncherError("Акцентный цвет должен быть в формате #rrggbb")
         if key in {"font_family", "theme", "sidebar_position", "sidebar_mode", "sidebar_width_mode", "sidebar_visibility", "animations", "density", "login_source", "catalog_source", "data_source", "startup_view", "last_view", "default_version_filter", "default_loader", "default_account_id"}:
             value = str(value).strip().lower()
+        if key == "instance_layout":
+            value = "compact" if str(value).strip().lower() == "compact" else "default"
         if key == "graphics_mode":
             value = str(value).strip().lower()
             if value not in {"auto", "nvidia", "mesa", "software"}:
@@ -664,7 +678,9 @@ class ConfigStore:
                 value = {str(item_key): str(item_value) for item_key, item_value in value.items()}
         if key == "keyboard_shortcuts":
             value = _normalize_shortcuts(value)
-        # Язык интерфейса: null (не выбран), 'ru' или 'en'.
+        if key == "auto_repair_muted":
+            value = _normalize_muted_kinds(value)
+        # язык интерфейса: null (не выбран), 'ru' или 'en'.
         if key == "language":
             if value is None:
                 pass
@@ -786,7 +802,6 @@ class ConfigStore:
             raise LauncherError("Нельзя использовать корень системы или домашний каталог как папку игры")
         return path
 
-
 def _appearance_values(settings: Settings) -> dict[str, Any]:
     return {
         "theme": settings.theme,
@@ -811,7 +826,6 @@ def _appearance_values(settings: Settings) -> dict[str, Any]:
         "widget_visibility": settings.widget_visibility,
         "color_tokens": settings.color_tokens,
     }
-
 
 def _behavior_values(settings: Settings) -> dict[str, Any]:
     return {
@@ -839,11 +853,19 @@ def _behavior_values(settings: Settings) -> dict[str, Any]:
         "keyboard_shortcuts": settings.keyboard_shortcuts,
     }
 
-
 def _apply_behavior(settings: Settings, values: dict[str, Any]) -> None:
     for key, value in values.items():
         setattr(settings, key, value)
 
+def _normalize_muted_kinds(value: Any) -> list[str]:
+    if not isinstance(value, (list, tuple)):
+        raise LauncherError("auto_repair_muted должен быть списком")
+    result: list[str] = []
+    for item in value[:64]:
+        kind = str(item).strip().lower()[:64]
+        if re.fullmatch(r"[a-z_]+", kind) and kind not in result:
+            result.append(kind)
+    return result
 
 def _normalize_shortcuts(value: Any) -> dict[str, str]:
     raw = value if isinstance(value, dict) else {}
@@ -853,9 +875,8 @@ def _normalize_shortcuts(value: Any) -> dict[str, str]:
         result[key] = candidate
     return result
 
-
 def _normalize_behavior(settings: Settings) -> dict[str, Any]:
-    views = {"instances", "accounts", "mods", "modpacks", "plugins", "lan-rooms", "themes", "settings"}
+    views = {"instances", "accounts", "mods", "modpacks", "plugins", "themes", "settings"}
     filters = {"all", "release", "snapshot", "old_beta", "old_alpha"}
     loaders = {"vanilla", "fabric", "forge", "neoforge", "quilt"}
     startup_view = str(settings.startup_view).strip().lower()
@@ -881,7 +902,7 @@ def _normalize_behavior(settings: Settings) -> dict[str, Any]:
     try:
         retries = min(6, max(1, int(settings.download_retries)))
     except (TypeError, ValueError):
-        retries = 3
+        retries = 5
     try:
         keep_logs = min(365, max(0, int(settings.keep_logs_days)))
     except (TypeError, ValueError):
@@ -919,14 +940,12 @@ def _normalize_behavior(settings: Settings) -> dict[str, Any]:
         "keyboard_shortcuts": _normalize_shortcuts(settings.keyboard_shortcuts),
     }
 
-
 def _apply_appearance(settings: Settings, values: dict[str, Any]) -> None:
     for key, value in values.items():
         setattr(settings, key, value)
 
-
 def _normalize_appearance(settings: Settings) -> dict[str, Any]:
-    pages = {"instances", "instance-settings", "accounts", "mods", "modpacks", "plugins", "lan-rooms", "themes", "settings"}
+    pages = {"instances", "instance-settings", "accounts", "mods", "modpacks", "plugins", "themes", "settings"}
     valid_page_themes = {"inherit", "light", "dark", "glass"}
     valid_page_layouts = {"compact", "balanced", "wide"}
     raw_page_themes = settings.page_themes if isinstance(settings.page_themes, dict) else {}
@@ -1007,13 +1026,11 @@ def _normalize_appearance(settings: Settings) -> dict[str, Any]:
         "color_tokens": color_tokens,
     }
 
-
 def _safe_preset_id(value: str) -> str:
     """Sanitise a jvm_preset value."""
     allowed = {"none", "fps", "balanced", "heavy_modpack", "compatibility", "streaming"}
     cleaned = str(value).strip().lower()
     return cleaned if cleaned in allowed else "none"
-
 
 def _normalize_launcher_profiles(value: Any) -> list[dict[str, Any]]:
     raw_values = value if isinstance(value, list) else []
@@ -1061,16 +1078,14 @@ def _normalize_launcher_profiles(value: Any) -> list[dict[str, Any]]:
         result = [copy.deepcopy(DEFAULT_LAUNCHER_PROFILE)]
     return result
 
-
 def _normalize_active_profile_id(value: Any, profiles: list[dict[str, Any]]) -> str:
     candidate = str(value or "").strip().lower()
     return candidate if any(item["id"] == candidate for item in profiles) else profiles[0]["id"]
 
-
 def _normalize_animation_settings(value: Any) -> dict[str, Any]:
     raw = value if isinstance(value, dict) else {}
     styles = {"fade", "slide", "scale", "none"}
-    pages = {"instances", "instance-settings", "accounts", "mods", "modpacks", "plugins", "lan-rooms", "themes", "settings"}
+    pages = {"instances", "instance-settings", "accounts", "mods", "modpacks", "plugins", "themes", "settings"}
     page_styles_raw = raw.get("page_styles") if isinstance(raw.get("page_styles"), dict) else {}
     page_durations_raw = raw.get("page_durations_ms") if isinstance(raw.get("page_durations_ms"), dict) else {}
     fallback_style = str(raw.get("page_style", DEFAULT_ANIMATION_SETTINGS["page_style"])).strip().lower()
@@ -1091,7 +1106,6 @@ def _normalize_animation_settings(value: Any) -> dict[str, Any]:
             for page in pages
         },
     }
-
 
 def _normalize_overlay_settings(value: Any) -> dict[str, Any]:
     raw = value if isinstance(value, dict) else {}
@@ -1125,15 +1139,14 @@ def _normalize_overlay_settings(value: Any) -> dict[str, Any]:
         "compact": _coerce_bool(raw.get("compact", False), False),
         "show_clock": _coerce_bool(raw.get("show_clock", True), True),
         "show_system_metrics": _coerce_bool(raw.get("show_system_metrics", True), True),
+        "metrics_gpu": _coerce_bool(raw.get("metrics_gpu", True), True),
         "metrics_cpu": _coerce_bool(raw.get("metrics_cpu", True), True),
         "metrics_ram": _coerce_bool(raw.get("metrics_ram", True), True),
-        "metrics_gpu": _coerce_bool(raw.get("metrics_gpu", True), True),
         "metrics_disk": _coerce_bool(raw.get("metrics_disk", True), True),
         "metrics_temperatures": _coerce_bool(raw.get("metrics_temperatures", True), True),
         "system_metrics_display": metrics_display if metrics_display in {"overlay", "always"} else "overlay",
         "show_chat": _coerce_bool(raw.get("show_chat", True), True),
     }
-
 
 def _normalize_backup_schedule(value: Any) -> dict[str, Any]:
     raw = value if isinstance(value, dict) else {}
@@ -1153,20 +1166,17 @@ def _normalize_backup_schedule(value: Any) -> dict[str, Any]:
         "destination": destination if destination in {"local", "cloud"} else "local",
     }
 
-
 def _bounded_int(value: Any, minimum: int, maximum: int, fallback: int) -> int:
     try:
         return min(maximum, max(minimum, int(value)))
     except (TypeError, ValueError):
         return fallback
 
-
 def _safe_profile_text(value: Any) -> str:
     text = str(value or "").strip()
     if "\x00" in text or "\n" in text or "\r" in text:
         return ""
     return text[:512]
-
 
 def _profile_arguments(value: Any) -> list[str]:
     if not isinstance(value, list):
@@ -1178,7 +1188,6 @@ def _profile_arguments(value: Any) -> list[str]:
             result.append(text)
     return result
 
-
 def _appearance_source_values(settings: Settings) -> dict[str, Any]:
     return {
         "login_source": settings.login_source,
@@ -1189,10 +1198,8 @@ def _appearance_source_values(settings: Settings) -> dict[str, Any]:
         "data_api_url": settings.data_api_url,
     }
 
-
 def _source_values(settings: Settings) -> dict[str, Any]:
     return _appearance_source_values(settings)
-
 
 def _normalize_sources(settings: Settings) -> dict[str, str]:
     login_source = str(settings.login_source).strip().lower()
@@ -1217,7 +1224,6 @@ def _normalize_sources(settings: Settings) -> dict[str, str]:
         ),
     }
 
-
 def _normalize_color_tokens(value: Any) -> dict[str, str]:
     raw = value if isinstance(value, dict) else {}
     return {
@@ -1226,7 +1232,6 @@ def _normalize_color_tokens(value: Any) -> dict[str, str]:
         else fallback
         for key, fallback in DEFAULT_COLOR_TOKENS.items()
     }
-
 
 def _normalize_radius_tokens(value: Any) -> dict[str, int]:
     raw = value if isinstance(value, dict) else {}
@@ -1239,7 +1244,6 @@ def _normalize_radius_tokens(value: Any) -> dict[str, int]:
         result[key] = min(24, max(0, number))
     return result
 
-
 def _normalize_groups(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
@@ -1249,7 +1253,6 @@ def _normalize_groups(value: Any) -> list[str]:
         if name and name not in result:
             result.append(name)
     return sorted(result, key=str.casefold)[:100]
-
 
 def _normalize_pinned_groups(value: Any, groups: list[str] | None = None) -> list[str]:
     if not isinstance(value, list):
@@ -1263,7 +1266,6 @@ def _normalize_pinned_groups(value: Any, groups: list[str] | None = None) -> lis
         if len(result) == 3:
             break
     return result
-
 
 def _normalize_api_url(
     value: Any,
@@ -1290,7 +1292,6 @@ def _normalize_api_url(
     ):
         return fallback
     return raw.rstrip("/")
-
 
 def _normalize_resource_catalogs(
     value: Any,
@@ -1345,11 +1346,9 @@ def _normalize_resource_catalogs(
         result = [dict(DEFAULT_RESOURCE_CATALOGS[0])]
     return result[:20]
 
-
 def _normalize_active_catalog_id(value: Any, catalogs: list[dict[str, str]]) -> str:
     candidate = str(value or "").strip().lower()
     return candidate if any(item["id"] == candidate for item in catalogs) else catalogs[0]["id"]
-
 
 def _coerce_bool(value: Any, fallback: bool) -> bool:
     if isinstance(value, bool):
@@ -1372,7 +1371,6 @@ def _configured_client_id() -> str:
     if value.lower() in {item.lower() for item in LEGACY_MSA_CLIENT_IDS}:
         return ""
     return value if re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", value) else ""
-
 
 def _atomic_json_write(path: Path, value: Any, private: bool = False) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)

@@ -53,6 +53,25 @@ class ServerMemoryLimitTests(unittest.TestCase):
                         servers.save_config(info.name, {"memory": "7GiB"})
                     self.assertEqual(servers.config(info.name)["memory"], "6GiB")
 
+    def test_default_memory_survives_low_ram_machines(self) -> None:
+        # 4 ГБ ОЗУ → потолок ~3 ГБ. Дефолтные 4GiB обязаны ужаться молча:
+        # это значение мастера, а не осознанный выбор пользователя.
+        from nivora_launcher.server import _normalize_server_config
+
+        with patch("nivora_launcher.server.system_memory_kib", return_value=4 * GIB_IN_KIB):
+            normalized = _normalize_server_config({})
+            self.assertEqual(normalized["memory"], "3GiB")
+            normalized = _normalize_server_config({"memory": "4GiB"})
+            self.assertEqual(normalized["memory"], "3GiB")
+            # Тот же дефолт в другом написании: раньше «4G» считался явным
+            # значением и валил сохранение конфига на слабой машине.
+            for spelling in ("4G", "4096MiB", "4gib", "4.0GiB"):
+                normalized = _normalize_server_config({"memory": spelling})
+                self.assertEqual(normalized["memory"], "3GiB", spelling)
+            # явно заданное значение сверх потолка по-прежнему объяснимо ругается
+            with self.assertRaisesRegex(LauncherError, "75% физической памяти"):
+                _normalize_server_config({"memory": "6GiB"})
+
 
 if __name__ == "__main__":
     unittest.main()

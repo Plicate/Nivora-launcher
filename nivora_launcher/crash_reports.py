@@ -1,9 +1,4 @@
-"""Разбор лога упавшего экземпляра: короткий вердикт и конкретные советы.
-
-Паттерны сверяются с реальными сообщениями Fabric/Forge/NeoForge и ванильного
-сервера; ничего не выдумываем — если совпадений нет, честно пишем «неизвестная
-ошибка» и показываем выдержку лога.
-"""
+"""разбор лога упавшего экземпляра: короткий вердикт и конкретные советы."""
 from __future__ import annotations
 
 import re
@@ -17,7 +12,6 @@ _MISSING_GENERAL = re.compile(r"(?:Missing or unsupported mandatory dependencies
 _MOD_MENTION = re.compile(r"\bmod\s+'?([A-Za-z0-9_ .\-]{2,48})'?(\s+\S+)?\s+(?:requires|is incompatible|caused)", re.IGNORECASE)
 
 MAX_EXCERPT_LINES = 24
-
 
 def analyze_crash(
     lines: list[str],
@@ -109,7 +103,6 @@ def analyze_crash(
         "excerpt": _excerpt(lines),
     }
 
-
 def _excerpt(lines: list[str]) -> list[str]:
     if not lines:
         return []
@@ -120,7 +113,6 @@ def _excerpt(lines: list[str]) -> list[str]:
             window = lines[max(0, index - 4) : index + 8]
             return [*window, "…", *tail[-6:]] if window[-1] != lines[-1] else window
     return tail
-
 
 def _extract_mods(text: str) -> list[dict[str, str]]:
     found: list[dict[str, str]] = []
@@ -136,7 +128,6 @@ def _extract_mods(text: str) -> list[dict[str, str]]:
             seen.add(name.lower())
             found.append({"name": name, "reason": line.strip()[:300]})
     return found[:10]
-
 
 def _match_mod_file(mod: dict[str, str], instance_path: str | Path | None) -> bool:
     if not instance_path:
@@ -156,7 +147,6 @@ def _match_mod_file(mod: dict[str, str], instance_path: str | Path | None) -> bo
     except OSError:
         return True
     return False
-
 
 def read_hs_err_report(instance_path: str | Path, limit: int = 40) -> list[str]:
     """Хвост последнего hs_err_pid*.log в каталоге экземпляра."""

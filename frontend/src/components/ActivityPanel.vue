@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import Icon from './Icon.vue'
+import QrCode from './QrCode.vue'
 import { bridge } from '../services/bridge'
 import type { ActivityState } from '../types'
 
@@ -9,7 +10,7 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{ close: []; cancel: [] }>()
-// Внутри webview обычные <a target="_blank"> не открываются — только через бэкенд.
+// внутри webview обычные <a target="_blank"> не открываются — только через бэкенд.
 const openFailed = ref(false)
 const copyState = ref<'idle' | 'done' | 'failed'>('idle')
 async function openVerificationUri(): Promise<void> {
@@ -23,7 +24,7 @@ async function openVerificationUri(): Promise<void> {
   }
 }
 
-/// Быстрое копирование содержимого маркера работы: заголовок, статус и лог.
+/// быстрое копирование содержимого маркера работы: заголовок, статус и лог.
 async function copyActivitySummary(): Promise<void> {
   const text = [
     props.activity.title,
@@ -91,6 +92,10 @@ async function copyActivitySummary(): Promise<void> {
       <div v-if="activity.verification_code" class="verification-card">
         <span class="eyebrow">MICROSOFT DEVICE CODE</span>
         <strong>{{ activity.verification_code }}</strong>
+        <div class="verification-qr">
+          <QrCode :value="activity.verification_uri || 'https://microsoft.com/devicelogin'" :size="132" label="QR-код страницы входа Microsoft" />
+          <small class="muted">Отсканируйте другим устройством и введите код выше.</small>
+        </div>
         <button v-if="activity.verification_uri" class="button button--small button--outline" type="button" @click="openVerificationUri">
           {{ openFailed ? 'Открыть снова' : 'Открыть страницу входа' }}
         </button>

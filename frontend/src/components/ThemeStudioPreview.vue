@@ -22,9 +22,6 @@ const emit = defineEmits<{
   replay: []
 }>()
 
-// Идентификаторы совпадают с реальными страницами лаунчера — так анимация
-// и тема в предпросмотре повторяют настройки именно той страницы, которую
-// смотрим.
 const navItems = [
   { id: 'instances', label: 'Экземпляры', icon: 'instances' },
   { id: 'accounts', label: 'Аккаунты', icon: 'accounts' },
@@ -80,9 +77,6 @@ const visibleRows = computed(() => {
   return [...clientRows, serverRow]
 })
 
-// Тема активной страницы: глобальная, если переопределения нет. Разрешение
-// токенов — то же, что в App.vue: пользовательский цвет живёт поверх базовой
-// палитры выбранной темы страницы.
 const pageTheme = computed(() => {
   const override = props.appearance.page_themes[activeNav.value as keyof typeof props.appearance.page_themes]
   if (!override || override === 'inherit') return props.theme === 'light' ? 'light' : props.theme
@@ -105,8 +99,6 @@ const token = (key: string) => activeTokens.value[key] || props.tokens[key] || '
 
 const pageLayout = computed(() => props.appearance.page_layouts[activeNav.value as keyof typeof props.appearance.page_layouts] || 'balanced')
 
-// Смена страницы в предпросмотре проигрывает анимацию с текущими настройками
-// именно этой страницы: переопределение страницы, иначе глобальный стиль.
 const pageStyleOverrides = computed(() => props.appearance.animation_settings.page_styles)
 const animationStyleId = computed(() => pageStyleOverrides.value[activeNav.value as keyof typeof pageStyleOverrides.value] || props.appearance.animation_settings.page_style)
 const animationDurationMs = computed(() => pageStyleOverrides.value && pageStyleOverrides.value[activeNav.value as keyof typeof pageStyleOverrides.value]
@@ -141,8 +133,6 @@ const density = computed(() => {
   return 1
 })
 
-// Ширина сайдбара в предпросмотре пропорциональна реальной, но ужимается
-// в рамку 16:11 — прямые пиксели сюда не влезут.
 const sidebarWidthCss = computed(() => {
   if (horizontalSidebar.value || compactSidebar.value) return ''
   const mode = props.appearance.sidebar_width_mode
@@ -168,7 +158,7 @@ const radius = computed(() => ({
 
 const borderColor = (strength = 24) => `color-mix(in srgb, ${token('border')} ${strength}%, transparent)`
 
-// Glass-тема: панели полупрозрачны, обои под ними видно насквозь.
+// glass-тема: панели полупрозрачны, обои под ними видно насквозь.
 const panelColor = (key: 'panel' | 'panel_raised' | 'panel_soft', alpha: number) => pageTheme.value === 'glass' && props.wallpaperUrl
   ? `color-mix(in srgb, ${token(key)} ${alpha}%, transparent)`
   : token(key)
@@ -212,8 +202,6 @@ const sidebarStyle = computed(() => {
   return base
 })
 
-// Обои приходят уже размытыми (их печёт App.vue вместе с настройкой blur),
-// поэтому здесь только прозрачность — фильтр на каждый кадр не нужен.
 const wallpaperStyle = computed(() => ({
   backgroundImage: props.wallpaperUrl ? `url(${props.wallpaperUrl})` : 'none',
   opacity: `${Math.min(0.9, props.appearance.wallpaper_opacity / 100)}`,
@@ -223,7 +211,6 @@ const bannerStyle = computed(() => ({
   background: `linear-gradient(135deg, ${token('accent')}, color-mix(in srgb, ${token('accent_strong')} 70%, ${token('banner_shade')}))`,
 }))
 
-// --- Интерактивное редактирование: клик по элементу открывает его редактор ---
 function targetClass(id: string) {
   if (!props.interactive) return undefined
   return {
@@ -527,7 +514,7 @@ function replay() {
               @pointerleave="hover(null)"
             >
               <span class="studio-preview-dot" :style="{ background: token('success') }" />
-              <small>Синхронизировано · Nivora 1.0.0</small>
+              <small>Синхронизировано · Nivora 1.1</small>
             </footer>
           </div>
         </div>

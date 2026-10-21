@@ -12,19 +12,23 @@
 - Fabric и Quilt через официальные launcher profiles;
 - Forge и NeoForge через официальные installer JAR;
 - Microsoft device-code OAuth, Xbox Live, XSTS и Minecraft Services profile/ownership (нужен собственный Azure public-client ID);
+- вход через ely.by: логин и пароль один раз, дальше — validate/refresh токена перед каждым запуском (CLI: `nivora-launcher login ely <логин>`; GUI — кнопка в разделе «Аккаунты»);
 - бессрочный offline debug-аккаунт для локального тестирования;
 - поиск и установка модов, ресурспаков, шейдеров и датапаков с Modrinth;
 - сортировка каталогов и карточки подробностей; проверка обновлений ресурсов и серверных плагинов с выбором версии перед заменой;
 - каталоги серверных плагинов Modrinth, Hangar, Spigot и совместимых API с проверкой версий ядра и обязательных зависимостей;
-- отдельная страница LAN-комнат: пароль, список участников и TCP-прокси одного игрового порта для устройств, уже доступных друг другу по локальной сети; это не VPN и не соединяет разные сети;
 - поиск плагинов из публичных GitHub releases по теме `nivora-launcher-plugin`; архив проверяется и сохраняется выключенным, `entrypoint` не запускается;
 - включённые плагины могут добавлять ограниченную статичную sidebar-вкладку через manifest `sidebar_tab.label`; код плагина по-прежнему не исполняется;
 - отдельные instances, открытие папки игры, память JVM, логи и команда `doctor`;
-- Minecraft Bedrock на всех ОС: Linux — профили через встроенный BedrockOnLinux 2.2.9 (игра загружается из Microsoft Store под лицензией пользователя), Windows — ОФИЦИАЛЬНЫЙ «Minecraft for Windows» из Microsoft Store (winget-автоустановка с фолбэком на страницу Store, запуск по протоколу `minecraft://`, контент — прямо в `com.mojang` пакета); вся логика Bedrock работает в Rust-движке без Python-воркера;
+- Minecraft Bedrock на Windows и Linux: Linux — профили через встроенный BedrockOnLinux 2.2.9 (игра загружается из Microsoft Store под лицензией пользователя), Windows — ОФИЦИАЛЬНЫЙ «Minecraft for Windows» из Microsoft Store (winget-автоустановка с фолбэком на страницу Store, запуск по протоколу `minecraft://`, контент — прямо в `com.mojang` пакета); вся логика Bedrock работает в Rust-движке без Python-воркера;
 - клиентский workspace с главной панелью и метриками, быстрым запуском миров/серверов, live-консолью и архивами логов, снапшотами ресурсов, галереей скриншотов и файловым менеджером; текстовые файлы до 2 MiB можно редактировать после остановки игры, загрузка ограничена 32 MiB на файл, предпросмотр изображений — 8 MiB;
 - Tauri/Vue/TypeScript GUI с sidebar-страницами, выбором версии/loader/аккаунта, установкой, запуском, модами, скинами и activity-панелью;
+- встроенный проводник и выбор файлов: свои диалоги вместо проводника ОС и системных пикеров (границы — домашний каталог, папка игры и данные лаунчера), своё контекстное меню вместо системного по правому клику; поведение как у обычных проводников — история «назад/вперёд» с кнопками и боковыми кнопками мыши (Alt+←/→ тоже), адресная строка с ручным вводом пути (Ctrl+L, поддержка `~`), колонки с сортировкой (имя/размер/дата), боковая панель мест, обновление (F5), показ скрытых файлов, статусная строка со счётчиком элементов;
 - выбор реальных версий Fabric, Quilt, Forge и NeoForge для выбранной версии Minecraft;
 - управление экземплярами через CLI и GUI: список, дублирование, удаление, ZIP-экспорт и shortcut для desktop-систем;
+- ярлыки экземпляров уровня современных лаунчеров: кнопки «Создать ярлык» для рабочего стола и меню приложений (Windows `.lnk` через COM IShellLinkW, macOS `.app`-обёртка, Linux `.desktop`), иконка экземпляра с fallback, идемпотентное пересоздание, защита чужих файлов; двойной клик по ярлыку запускает лаунчер и сразу нужный экземпляр (`--launch-instance`), а при живом лаунчере цель передаётся ему; удаление экземпляра убирает его ярлыки;
+- экспорт списка модов экземпляра в Markdown/CSV/текст: имена, версии, ID загрузчиков и состояние включённости из манифестов jar (вкладка «Моды» → «Список .md» или Настройки экземпляра → «Ярлыки и списки»);
+- дымовой прогон упакованного приложения `--smoke-test`: те же операции через тот же мост, параллельные нативные/воркерные вызовы, отчёт JSON и код выхода (используется CI);
 - пользовательские профили экземпляров: название, описание, иконка, banner и накопленное время игры; группы доступны для клиентов и серверов с фильтрами, быстрым переносом и закреплением до трёх групп; удаляются только пустые группы;
 - локальные alias-имена аккаунтов, порядок аккаунтов и PNG-библиотека скинов;
 - установка skin/model, управление capes Microsoft и встроенная панель скинов внутри профиля аккаунта;
@@ -41,13 +45,14 @@
 - плановые бэкапы миров: глобальное расписание и переопределение на экземпляр (интервал, число копий, локально или на WebDAV), список бэкапов с восстановлением и удалением;
 - теги и заметки экземпляров: теги отображаются в списке, фильтрация по тегу одним кликом, заметки видны прямо в строке экземпляра;
 - краш-отчёты: анализатор лога после аварийного выхода игры и сервера называет вероятную причину, даёт советы и предлагает удалить конкретные моды, если лог указывает на них;
+- авто-починка: после краша или неудачного запуска клиента лаунчер разбирает лог, `crash-reports/` и папку `mods` и открывает окно с проблемой и способами починки (недостающие зависимости, несовместимые моды, моды для другого загрузчика, дубликаты, ошибки Mixin, битые jar и конфиги, память, Java, аргументы JVM, файлы версии, графика, недавно добавленные моды). Можно починить, отказаться или нажать «Больше не показывать»; включение и список проблем — в Настройки → Авто-починка. Моды не удаляются, а отключаются, конфиги переносятся в `.nivora-repair-backups/`;
 - дерево зависимостей модов: локальный разбор `fabric.mod.json`/`mods.toml`/manifest JAR показывает связи модов и помечает, что сломается при удалении выбранного мода;
 - экспорт экземпляра как modpack `.mrpack` (Modrinth-формат): ненулевые профили, каталогизированные моды и overrides;
 - системные метрики лаунчера в стиле Afterburner: CPU по ядрам, RAM, GPU, диски и температуры — в топбаре и в оверлее.
 
 ## Безопасность запуска
 
-В Linux новые экземпляры и серверы запускаются через bubblewrap strict profile. На Windows этот sandbox недоступен: `strict` завершается явной ошибкой, а профиль `manual` предупреждает, что изоляция ОС не предоставляется. Manual/off на Linux также дают меньше изоляции и требуют осознанного выбора в настройках.
+Новые экземпляры запускаются в strict profile: на Linux через bubblewrap, на Windows через AppContainer и Job Object (отдельный профиль контейнера на экземпляр, доступ только к папке экземпляра и Java, сеть — только с `network:game`). На Windows нельзя отдельно запретить звук и скрыть окно игры, `files:host-read` в strict не поддерживается, а подключение к localhost из контейнера блокирует система; подробности — в `docs/security.md`. Manual/off дают меньше изоляции и требуют осознанного выбора в настройках.
 
 Offline-аккаунт предназначен только для локального дебага и не имеет ограничения по времени. Он не даёт доступа к официальным online-серверам, Realms или обходу покупки Minecraft.
 
@@ -136,7 +141,7 @@ python3 -m nivora_launcher login microsoft
 
 Поток использует системный браузер и device code. Основной OAuth endpoint закреплён за Microsoft; совместимый endpoint можно изменить только в режиме разработчика. Секретные ключи и токены в frontend не встраиваются.
 
-## Minecraft Bedrock (Rust-движок, все ОС)
+## Minecraft Bedrock (Rust-движок)
 
 Вся логика Bedrock живёт в Rust-движке (`frontend/src-tauri/src/rust_engine/bedrock.rs`) и обслуживается нативно, без Python-воркера: статус среды, выбор и установка версий, вход в Microsoft Store, запуск игры, импорт/удаление контента и фоновые задания с отменой. Python остался только лёгким слоем путей для вкладки «Файлы» и метрик (`nivora_launcher/bedrock.py`).
 
@@ -157,7 +162,11 @@ python3 -m nivora_launcher install 1.20.1 --loader forge
 python3 -m nivora_launcher install 1.21.1 --loader neoforge
 ```
 
-Конкретную версию loader можно передать через `--loader-version`. Для Forge/NeoForge installer загружается только с официального Maven host, проверяется по доступному SHA-512/SHA-256 (legacy fallback: SHA-1), запускается внутри strict bubblewrap с сетью игры и записью только в instance, а результат проверяется в `instance/versions/`.
+Конкретную версию loader можно передать через `--loader-version`. Для Forge/NeoForge installer загружается только с официального Maven host, проверяется по доступному SHA-512/SHA-256 (legacy fallback: SHA-1), запускается внутри strict sandbox (bubblewrap на Linux, AppContainer на Windows) с сетью игры и записью только в instance, а результат проверяется в `instance/versions/`.
+
+**Восстановление версии.** Кнопка «Восстановить версию» на обзоре экземпляра (операция `instance_repair_version`) пересоздаёт только каталог версии и модлоадер — с той же версией loader, если её удаётся прочитать, — не трогая моды, конфиги, миры и настройки. Старый каталог на время переустановки уходит в бэкап и возвращается, если установка сорвалась. Импорт модпака не может перезаписать каталоги, которыми управляет лаунчер (`versions/`, `libraries/`, `natives/`, `bin/`): такие файлы пропускаются и перечисляются в `skipped_loader_files`. Экспорты MultiMC/Prism (`.minecraft/…`) раскладываются прямо в экземпляр.
+
+**Загрузки с зеркал.** Оборванная загрузка продолжается с места обрыва (HTTP Range): `.part` сохраняется между попытками, при `416` или отказе зеркала от Range файл качается заново. Повреждённые данные получают одну чистую повторную попытку, перед повтором DNS резолвится заново, `429` соблюдает `Retry-After`. По умолчанию 5 попыток (настройка «Повторные попытки», 1–6).
 
 ## Моды
 
@@ -235,10 +244,6 @@ python3 -m nivora_launcher open-folder
 В серверном workspace откройте **Управление → Сеть и белый IP**: подготовка `server.properties`, диагностика внешнего IPv4 / WAN / CGNAT, временный UPnP-проброс игрового TCP-порта, адрес для друзей и инструкции по ручному пробросу и firewall. Публикация требует подтверждения; чужие правила не заменяются. UPnP-правило продлевается только во время работы сервера, снимается при остановке и имеет конечную аренду до 10 минут. Без белого IPv4 UPnP не обходит NAT провайдера. Внешнюю доступность проверяйте с другого интернет-канала.
 
 Подробно: [Публикация сервера](docs/server-network.md).
-
-## LAN-комнаты
-
-Откройте отдельную страницу «LAN-комнаты» в боковом меню. Устройства должны находиться в одной локальной сети. В режиме «auto» комната слушает все интерфейсы (`0.0.0.0`), а участникам передаётся конкретный LAN IPv4 этого компьютера; если у машины несколько сетевых adapters, на странице комнаты показываются запасные адреса `host:порт`, которые можно ввести в Minecraft вручную. Хост передаёт друзьям LAN-адрес и порт комнаты; пароль передаётся отдельно. Страница помогает сверить состав участников, но не запускает Minecraft-сервер и не пересылает игровой трафик. Для игры сам сервер Minecraft должен быть доступен по показанному LAN-адресу и порту; при необходимости разрешите порты в локальном firewall.
 
 ## Игровой оверлей и запись
 
@@ -344,7 +349,7 @@ Nivora Launcher распространяется под GNU General Public Licen
 
 ### Plugin core extensions
 
-Declarative forms/tabs/accordion/tables/charts, guest-owned fragments and data bindings, enforced call/data quotas, redacted host audit, listener diagnostics and developer runtime reload are implemented. See [implementation status](docs/plugin-core-extension-status.md) for limits and examples. This update does not implement the proposed VPN sessions, new filesystem/process callbacks, OS executable/browser sessions or secret/OAuth/WebSocket/AI services; existing permission names do not establish implementation.
+Декларативные формы/вкладки/аккордеоны/таблицы/графики, фрагменты и привязки данных на стороне гостя, лимиты вызовов и данных, аудит хост-вызовов без значений аргументов, диагностика слушателей и перезагрузка рантайма в режиме разработчика — работают. Границы текущей реализации и примеры: [статус расширений ядра плагинов](docs/plugin-core-extension-status.md). VPN-сессии, новые файловые/процессные колбэки, запуск системных исполняемых файлов и браузерных сессий, хранилище секретов, OAuth и WebSocket-транспорт не реализованы; имена разрешений в манифесте сами по себе не делают функциональность доступной.
 
 ---
 
@@ -368,7 +373,6 @@ A Minecraft launcher with a modern Tauri/Vue interface and a diagnostics CLI. De
 - search and install of mods, resource packs, shaders and data packs from Modrinth;
 - catalog sorting and detail cards; resource and server-plugin update checks with version choice before replacing;
 - Modrinth, Hangar, Spigot and compatible-API server plugin catalogs with core version checks and required dependencies;
-- a separate LAN rooms page: password, participant list and a TCP proxy for the single game port for devices already reachable on the same LAN; this is not a VPN and does not join different networks;
 - plugin search over public GitHub releases with the topic `nivora-launcher-plugin`; the archive is verified and saved disabled, the `entrypoint` is never executed;
 - enabled plugins may add a limited static sidebar tab via the manifest's `sidebar_tab.label`; plugin code still never runs;
 - separate instances, opening the game folder, JVM memory, logs and the `doctor` command;
@@ -393,13 +397,14 @@ A Minecraft launcher with a modern Tauri/Vue interface and a diagnostics CLI. De
 - scheduled world backups: a global schedule and per-instance overrides (interval, copy count, local or WebDAV), a backup list with restore and delete;
 - instance tags and notes: tags show in the list, one-click filtering by tag, notes visible right in the instance row;
 - crash reports: after a game or server crash a log analyzer names the likely cause, gives advice and offers to remove specific mods when the log points at them;
+- auto-repair: after a client crash or failed launch the launcher inspects the log, `crash-reports/` and the `mods` folder and opens a window with the problem and ways to fix it (missing dependencies, incompatible mods, mods for another loader, duplicates, Mixin failures, broken jars and configs, memory, Java, JVM arguments, version files, graphics, recently added mods). You can repair, decline or choose “Don't show again”; the switch and the list of problems live in Settings → Auto-repair. Mods are disabled rather than deleted, configs are moved to `.nivora-repair-backups/`;
 - a mod dependency tree: local parsing of `fabric.mod.json`/`mods.toml`/JAR manifests shows mod relationships and marks what breaks when the selected mod is removed;
 - instance export as a `.mrpack` modpack (the Modrinth format): non-default profiles, cataloged mods and overrides;
 - Afterburner-style system metrics in the launcher: per-core CPU, RAM, GPU, disks and temperatures — in the top bar and in the overlay.
 
 ## Launch security
 
-On Linux, new instances and servers launch through the bubblewrap strict profile. On Windows this sandbox is unavailable: `strict` fails with an explicit error, and the `manual` profile warns that OS isolation is not provided. Manual/off on Linux also provide less isolation and require a deliberate choice in settings.
+New instances launch in the strict profile: on Linux through bubblewrap, on Windows through AppContainer and a Job Object (a separate container profile per instance, access only to the instance folder and Java, network only with `network:game`). On Windows audio cannot be forbidden separately and the game window cannot be hidden, `files:host-read` is not supported in strict, and the system blocks localhost connections from the container; details are in `docs/security.md`. Manual/off provide less isolation and require a deliberate choice in settings.
 
 The offline account is intended for local debugging only and has no time limit. It does not grant access to official online servers, Realms or any bypass of the Minecraft purchase.
 
@@ -509,7 +514,11 @@ python3 -m nivora_launcher install 1.20.1 --loader forge
 python3 -m nivora_launcher install 1.21.1 --loader neoforge
 ```
 
-A specific loader version is passed via `--loader-version`. For Forge/NeoForge the installer is downloaded only from the official Maven host, verified by the available SHA-512/SHA-256 (legacy fallback: SHA-1), run inside the strict bubblewrap with game network and writes limited to the instance, and the result is verified in `instance/versions/`.
+A specific loader version is passed via `--loader-version`. For Forge/NeoForge the installer is downloaded only from the official Maven host, verified by the available SHA-512/SHA-256 (legacy fallback: SHA-1), run inside the strict sandbox (bubblewrap on Linux, AppContainer on Windows) with game network and writes limited to the instance, and the result is verified in `instance/versions/`.
+
+**Version repair.** The "Repair version" button on the instance overview (`instance_repair_version` operation) recreates only the version directory and the mod loader — keeping the same loader version when it can be read — without touching mods, configs, worlds or settings. The old directory is moved to a backup during reinstall and restored if installation fails. Modpack import cannot overwrite launcher-managed directories (`versions/`, `libraries/`, `natives/`, `bin/`): such files are skipped and listed in `skipped_loader_files`. MultiMC/Prism exports (`.minecraft/…`) are unpacked straight into the instance.
+
+**Mirror downloads.** An interrupted download resumes from where it stopped (HTTP Range): the `.part` file survives between attempts, and on `416` or a mirror that ignores Range the file is downloaded again from scratch. Corrupted data gets one clean retry, DNS is resolved again before a retry, and `429` honours `Retry-After`. 5 attempts by default (the "Retries" setting, 1–6).
 
 ## Mods
 
@@ -580,10 +589,6 @@ In detail: [Launch, console and metrics](docs/server-runtime.md).
 In the server workspace open **Manage → Network and white IP**: `server.properties` preparation, external IPv4 / WAN / CGNAT diagnostics, a temporary UPnP forwarding of the game TCP port, an address for friends and manual forwarding and firewall instructions. Publishing requires confirmation; other people's rules are never replaced. The UPnP rule renews only while the server runs, is removed on stop and carries a finite lease of up to ten minutes. Without a white IPv4, UPnP does not bypass provider NAT. Verify external availability from a different internet connection.
 
 In detail: [Publishing a server](docs/server-network.md).
-
-## LAN rooms
-
-Open the separate "LAN rooms" page in the side menu. Devices must share one local network. In "auto" mode the room listens on all interfaces (`0.0.0.0`) and participants are given this computer's specific LAN IPv4; when the machine has several network adapters, the room page lists backup `host:port` addresses to enter in Minecraft manually. The host shares the LAN address and room port with friends; the password is shared separately. The page helps track the participant list but does not start a Minecraft server and does not forward game traffic. For play, the Minecraft server itself must be reachable at the shown LAN address and port; allow the ports in the local firewall if needed.
 
 ## Game overlay and recording
 
@@ -688,4 +693,4 @@ Nivora Launcher is distributed under the GNU General Public License version 3. T
 
 ### Plugin core extensions
 
-Declarative forms/tabs/accordion/tables/charts, guest-owned fragments and data bindings, enforced call/data quotas, redacted host audit, listener diagnostics and developer runtime reload are implemented. See [implementation status](docs/plugin-core-extension-status.md) for limits and examples. This update does not implement the proposed VPN sessions, new filesystem/process callbacks, OS executable/browser sessions or secret/OAuth/WebSocket/AI services; existing permission names do not establish implementation.
+Declarative forms/tabs/accordion/tables/charts, guest-owned fragments and data bindings, enforced call/data quotas, redacted host audit, listener diagnostics and developer runtime reload all work. Current limits and examples: [plugin core extension status](docs/plugin-core-extension-status.md). VPN sessions, new filesystem/process callbacks, OS executable launch and browser sessions, secret storage, OAuth and WebSocket transport are not implemented; permission names alone do not enable them.

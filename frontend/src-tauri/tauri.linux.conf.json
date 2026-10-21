@@ -3,15 +3,28 @@
   "bundle": {
     "resources": {
       "resources/backend/nivora-launcher-backend": "backend/nivora-launcher-backend",
+      "resources/backend/nivora-turbo": "backend/nivora-turbo",
+      "resources/backend/nivora-modcat": "backend/nivora-modcat",
+      "resources/backend/ModScan.java": "backend/ModScan.java",
       "resources/vendor/bedrock-on-linux-2.2.9.pyz": "vendor/bedrock-on-linux-2.2.9.pyz",
       "resources/vendor/LICENSE-BedrockOnLinux.txt": "vendor/LICENSE-BedrockOnLinux.txt"
     },
     "linux": {
       "deb": {
-        "depends": ["bubblewrap", "libsecret-tools", "gnome-keyring", "python3"]
+        "depends": [
+          "bubblewrap",
+          "libsecret-tools",
+          "gnome-keyring",
+          "python3"
+        ]
       },
       "rpm": {
-        "depends": ["bubblewrap", "libsecret", "gnome-keyring", "python3"]
+        "depends": [
+          "bubblewrap",
+          "libsecret",
+          "gnome-keyring",
+          "python3"
+        ]
       }
     }
   }

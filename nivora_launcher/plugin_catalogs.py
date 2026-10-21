@@ -18,7 +18,6 @@ from .net import HttpClient, file_hash, verify_file
 from .operations import OperationCancelled
 from .platform_support import set_private_fd
 
-
 DEFAULT_PLUGIN_CATALOGS = [
     {"id": "modrinth-plugins", "name": "Modrinth", "kind": "modrinth", "api_url": "https://api.modrinth.com/v2", "enabled": True},
     {"id": "spigot", "name": "Spigot", "kind": "spigot", "api_url": "https://api.spiget.org/v2", "enabled": True},
@@ -31,7 +30,6 @@ MAX_PLUGIN_DEPENDENCY_PROJECTS = 64
 MAX_PLUGIN_DEPENDENCY_DEPTH = 16
 MAX_PLUGIN_DEPENDENCIES_PER_PROJECT = 100
 UNVERIFIED_PLUGIN_DOWNLOAD_MESSAGE = "[unverified-download] Каталог не предоставил доверенный хеш плагина. Подтвердите скачивание явно."
-
 
 @dataclass
 class PluginCatalogResult:
@@ -76,7 +74,6 @@ class PluginCatalogResult:
             "dependencies": self.dependencies,
             "version_id": self.version_id,
         }
-
 
 class PluginCatalog:
     def __init__(self, http: HttpClient, catalog: dict[str, Any]) -> None:
@@ -614,7 +611,6 @@ class PluginCatalog:
             and (not catalog_id or entry.get("catalog_id") == catalog_id)
         )
 
-
 def normalize_plugin_catalogs(value: Any) -> list[dict[str, Any]]:
     raw = value if isinstance(value, list) else DEFAULT_PLUGIN_CATALOGS
     result: list[dict[str, Any]] = []
@@ -633,7 +629,6 @@ def normalize_plugin_catalogs(value: Any) -> list[dict[str, Any]]:
     if not result:
         return [dict(item) for item in DEFAULT_PLUGIN_CATALOGS]
     return result
-
 
 def _custom_result(kind: str, item: dict[str, Any]) -> PluginCatalogResult:
     return PluginCatalogResult(
@@ -658,7 +653,6 @@ def _custom_result(kind: str, item: dict[str, Any]) -> PluginCatalogResult:
         _downloads_known="downloads" in item and item.get("downloads") is not None,
     )
 
-
 def _modrinth_result(item: dict[str, Any], fallback_id: str = "") -> PluginCatalogResult:
     return PluginCatalogResult(
         source="modrinth",
@@ -681,7 +675,6 @@ def _modrinth_result(item: dict[str, Any], fallback_id: str = "") -> PluginCatal
         version_id=str(item.get("version_id") or ""),
         _downloads_known="downloads" in item and item.get("downloads") is not None,
     )
-
 
 def _spigot_result(item: dict[str, Any], fallback_id: str = "") -> PluginCatalogResult:
     author = item.get("author", "")
@@ -706,7 +699,6 @@ def _spigot_result(item: dict[str, Any], fallback_id: str = "") -> PluginCatalog
         version_id=str(item.get("version_id") or ""),
         _downloads_known="downloads" in item and item.get("downloads") is not None,
     )
-
 
 def _hangar_result(item: dict[str, Any], fallback_id: str = "") -> PluginCatalogResult:
     namespace = item.get("namespace")
@@ -737,10 +729,8 @@ def _hangar_result(item: dict[str, Any], fallback_id: str = "") -> PluginCatalog
         _downloads_known=("downloads" in stats and downloads is not None) or ("downloads" in item and item.get("downloads") is not None),
     )
 
-
 def _empty_result(source: str, project_id: str) -> PluginCatalogResult:
     return PluginCatalogResult(source, project_id, "Plugin", "", "", "", 0, _downloads_known=False)
-
 
 def _candidate_from_result(result: PluginCatalogResult, *, compatible: bool) -> dict[str, Any]:
     hashes = _valid_hashes({"sha1": result.sha1, "sha256": result.sha256, "sha512": result.sha512})
@@ -764,7 +754,6 @@ def _candidate_from_result(result: PluginCatalogResult, *, compatible: bool) -> 
         "trusted_hash": bool(any(hashes.values())),
         "compatible": compatible,
     }
-
 
 def _modrinth_candidate(
     project_id: str,
@@ -797,7 +786,6 @@ def _modrinth_candidate(
         "trusted_hash": bool(any(hashes.values())),
         "compatible": compatible,
     }
-
 
 def _hangar_candidate(
     base_url: str,
@@ -836,7 +824,6 @@ def _hangar_candidate(
         "compatible": compatible,
     }
 
-
 def _apply_candidate(result: PluginCatalogResult, candidate: dict[str, Any]) -> None:
     result.version = str(candidate.get("version", ""))
     result.version_id = str(candidate.get("version_id", ""))
@@ -850,13 +837,11 @@ def _apply_candidate(result: PluginCatalogResult, candidate: dict[str, Any]) -> 
     result.updated_at = str(result.updated_at or candidate.get("updated_at", ""))
     result.dependencies = _dependencies(candidate.get("dependencies"))
 
-
 def _validate_sort(sort: str) -> str:
     mode = str(sort or "relevance").strip().lower()
     if mode not in PLUGIN_SORT_MODES:
         raise LauncherError(f"Неизвестный порядок сортировки плагинов: {mode}")
     return mode
-
 
 def _provider_sort(kind: str, mode: str) -> str:
     if kind == "spigot":
@@ -864,7 +849,6 @@ def _provider_sort(kind: str, mode: str) -> str:
     if kind == "hangar":
         return {"downloads": "POPULARITY", "newest": "NEWEST", "updated": "UPDATED"}.get(mode, "")
     return ""
-
 
 def _sort_results(results: list[PluginCatalogResult], mode: str) -> list[PluginCatalogResult]:
     if mode == "relevance":
@@ -892,7 +876,6 @@ def _sort_results(results: list[PluginCatalogResult], mode: str) -> list[PluginC
     )
     return [item for _, (item, _) in indexed]
 
-
 def _spigot_compatible(item: dict[str, Any], core: str, version: str) -> bool:
     compatible_cores = {"bukkit", "spigot", "paper", "purpur", "folia", "leaf", "pufferfish", "patina"}
     if str(core).strip().lower() not in compatible_cores or not version:
@@ -903,7 +886,6 @@ def _spigot_compatible(item: dict[str, Any], core: str, version: str) -> bool:
     if isinstance(tested, str):
         tested = [part.strip() for part in tested.split(",") if part.strip()]
     return _versions_match(tested if isinstance(tested, list) else [], version)
-
 
 def _modrinth_plugin_version_compatible(item: dict[str, Any], core: str, version: str) -> bool:
     normalized_core = str(core).strip().lower()
@@ -917,7 +899,6 @@ def _modrinth_plugin_version_compatible(item: dict[str, Any], core: str, version
         and isinstance(loaders, list)
         and normalized_core in [str(value).strip().lower() for value in loaders]
     )
-
 
 def _hangar_compatible(item: dict[str, Any], core: str, version: str) -> bool:
     platform = _hangar_platform(core)
@@ -935,7 +916,6 @@ def _hangar_compatible(item: dict[str, Any], core: str, version: str) -> bool:
         supported = list(supported) if isinstance(supported, tuple) else []
     return _versions_match(supported, version)
 
-
 def _hangar_platform(core: str) -> str:
     normalized = str(core).strip().lower()
     if normalized in {"paper", "purpur", "folia", "leaf", "pufferfish", "patina"}:
@@ -946,7 +926,6 @@ def _hangar_platform(core: str) -> str:
         return "WATERFALL"
     return ""
 
-
 def _versions_match(values: list[Any], requested: str) -> bool:
     for value in values:
         candidate = str(value).strip()
@@ -954,11 +933,9 @@ def _versions_match(values: list[Any], requested: str) -> bool:
             return True
     return False
 
-
 def _validate_update_context(core: str, version: str) -> None:
     if not str(core).strip() or not str(version).strip():
         raise LauncherError("Проверка обновлений требует ядро сервера и версию Minecraft")
-
 
 def _is_update(installed: dict[str, Any], candidate: dict[str, Any] | None) -> bool:
     if not candidate:
@@ -978,7 +955,6 @@ def _is_update(installed: dict[str, Any], candidate: dict[str, Any] | None) -> b
     current_hash = str(installed.get("sha256", ""))
     latest_hash = str(candidate.get("sha256", ""))
     return bool(current_hash and latest_hash and current_hash.lower() != latest_hash.lower())
-
 
 def installed_plugin_metadata_index(target: Path) -> list[dict[str, Any]]:
     root = Path(target)
@@ -1050,7 +1026,6 @@ def installed_plugin_metadata_index(target: Path) -> list[dict[str, Any]]:
             continue
     return result
 
-
 def remove_installed_plugin(target: Path, file_name: str) -> bool:
     file_name = _safe_jar_file_name(file_name)
     entry = next(
@@ -1071,7 +1046,6 @@ def remove_installed_plugin(target: Path, file_name: str) -> bool:
         raise LauncherError("Не удалось удалить плагин, установленный из каталога") from exc
     return True
 
-
 def _plugin_directory(path: Path, *, create: bool = True) -> Path:
     directory = Path(path)
     if directory.is_symlink():
@@ -1082,13 +1056,11 @@ def _plugin_directory(path: Path, *, create: bool = True) -> Path:
         raise LauncherError("Каталог plugins недоступен")
     return directory
 
-
 def _safe_jar_file_name(value: str) -> str:
     name = _safe_file_name(str(value))
     if len(name) > 180 or not name.lower().endswith(".jar"):
         raise LauncherError("Файл серверного плагина должен иметь безопасное имя и расширение .jar")
     return name
-
 
 def _plugin_project_id(value: Any) -> str:
     project_id = "" if value is None or isinstance(value, bool) else str(value).strip()
@@ -1101,7 +1073,6 @@ def _plugin_project_id(value: Any) -> str:
         raise LauncherError("Некорректный project ID зависимости серверного плагина")
     return project_id
 
-
 def _plugin_version_id(value: Any) -> str:
     version_id = "" if value is None or isinstance(value, bool) else str(value).strip()
     if version_id and (
@@ -1111,10 +1082,8 @@ def _plugin_version_id(value: Any) -> str:
         raise LauncherError("Некорректный ID версии зависимости серверного плагина")
     return version_id
 
-
 def _candidate_has_trusted_hash(candidate: dict[str, Any]) -> bool:
     return any(str(candidate.get(name) or "").strip() for name in ("sha1", "sha256", "sha512"))
-
 
 def _unique_plugin_file(directory: Path, name: str, reserved_names: set[str] | None = None) -> Path:
     reserved_names = reserved_names or set()
@@ -1133,10 +1102,8 @@ def _unique_plugin_file(directory: Path, name: str, reserved_names: set[str] | N
             return next_candidate
         index += 1
 
-
 def _plugin_metadata_path(jar: Path) -> Path:
     return jar.with_name(f".{jar.name}.trial-plugin.json")
-
 
 def _write_plugin_metadata(jar: Path, value: dict[str, Any]) -> None:
     sidecar = _plugin_metadata_path(jar)
@@ -1160,7 +1127,6 @@ def _write_plugin_metadata(jar: Path, value: dict[str, Any]) -> None:
         if temporary.exists() or temporary.is_symlink():
             temporary.unlink()
 
-
 def _read_plugin_metadata(path: Path) -> Any:
     descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
     with os.fdopen(descriptor, "rb") as handle:
@@ -1171,7 +1137,6 @@ def _read_plugin_metadata(path: Path) -> Any:
     if len(encoded) > PLUGIN_METADATA_MAX_BYTES:
         return None
     return json.loads(encoded.decode("utf-8"))
-
 
 def _hash_regular_file(path: Path) -> tuple[str, int] | None:
     try:
@@ -1187,13 +1152,11 @@ def _hash_regular_file(path: Path) -> tuple[str, int] | None:
     except OSError:
         return None
 
-
 def _hangar_project_path(project_id: str) -> str:
     parts = str(project_id).strip().split("/")
     if not parts or len(parts) > 2 or any(not part or part in {".", ".."} for part in parts):
         raise LauncherError("Некорректный идентификатор Hangar-проекта")
     return "/".join(quote(part, safe="") for part in parts)
-
 
 def _provider_rows(value: Any, *keys: str) -> list[Any]:
     if isinstance(value, list):
@@ -1206,7 +1169,6 @@ def _provider_rows(value: Any, *keys: str) -> list[Any]:
             return rows
     return []
 
-
 def _latest_item(rows: list[dict[str, Any]], date_fields: tuple[str, ...]) -> dict[str, Any]:
     if not rows:
         return {}
@@ -1218,12 +1180,10 @@ def _latest_item(rows: list[dict[str, Any]], date_fields: tuple[str, ...]) -> di
             selected, selected_at = item, item_at
     return selected
 
-
 def _provider_hashes(item: dict[str, Any]) -> dict[str, str]:
     raw = item.get("hashes") if isinstance(item.get("hashes"), dict) else {}
     checksums = item.get("checksums") if isinstance(item.get("checksums"), dict) else {}
     return _valid_hashes({**checksums, **raw, **{key: item.get(key) for key in ("sha1", "sha256", "sha512")}})
-
 
 def _valid_hashes(value: Any) -> dict[str, str]:
     value = value if isinstance(value, dict) else {}
@@ -1233,7 +1193,6 @@ def _valid_hashes(value: Any) -> dict[str, str]:
         digest = str(value.get(algorithm, "")).strip().lower()
         result[algorithm] = digest if len(digest) == length and re.fullmatch(r"[0-9a-f]+", digest) else ""
     return result
-
 
 def _dependencies(value: Any) -> list[dict[str, Any]]:
     if isinstance(value, dict):
@@ -1255,7 +1214,6 @@ def _dependencies(value: Any) -> list[dict[str, Any]]:
             result.append({"id": str(item)[:200]})
     return result
 
-
 def _bounded_json(value: Any, depth: int = 0) -> Any:
     if depth >= 4:
         return None
@@ -1269,14 +1227,12 @@ def _bounded_json(value: Any, depth: int = 0) -> Any:
         return {str(key)[:80]: _bounded_json(item, depth + 1) for key, item in list(value.items())[:30]}
     return str(value)[:200]
 
-
 def _first(value: dict[str, Any], *keys: str) -> Any:
     for key in keys:
         result = value.get(key)
         if result is not None and result != "":
             return result
     return None
-
 
 def _date_value(value: Any) -> str:
     if value is None or isinstance(value, bool):
@@ -1305,7 +1261,6 @@ def _date_value(value: Any) -> str:
     except ValueError:
         return text[:64]
 
-
 def _date_timestamp(value: Any) -> float | None:
     normalized = _date_value(value)
     if not normalized:
@@ -1315,10 +1270,8 @@ def _date_timestamp(value: Any) -> float | None:
     except ValueError:
         return None
 
-
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
-
 
 def _int(value: Any) -> int:
     try:
@@ -1326,13 +1279,11 @@ def _int(value: Any) -> int:
     except (TypeError, ValueError, OverflowError):
         return 0
 
-
 def _optional_int(value: Any) -> int | None:
     try:
         return max(0, int(value)) if value is not None else None
     except (TypeError, ValueError, OverflowError):
         return None
-
 
 def _unique_file(directory: Path, name: str) -> Path:
     candidate = directory / name

@@ -1,16 +1,4 @@
-"""Observed TCP payload counters for sockets owned by one server process tree.
-
-Linux: /proc ownership + INET_DIAG/TCP_INFO — no root, no sniffing, no
-firewall changes and no host-wide interface counters.
-
-Windows: GetExtendedTcpTable (OWNER_PID) + per-connection TCP_ESTATS_DATA via
-iphlpapi — byte-accurate per socket, no admin rights, no drivers. Collection
-must be enabled per connection, so the first sample after a new connection
-may read zeros.
-
-Short-lived connections between samples can be missed on both platforms;
-totals are explicitly observed, not billing.
-"""
+"""observed TCP payload counters for sockets owned by one server process tree."""
 from __future__ import annotations
 
 import os
@@ -21,10 +9,8 @@ import time
 from pathlib import Path
 from typing import Any
 
-
 class TrafficUnavailable(OSError):
     pass
-
 
 def socket_inodes(pid: int, proc_root: Path = Path("/proc")) -> set[int]:
     pending = [pid]
@@ -62,7 +48,6 @@ def socket_inodes(pid: int, proc_root: Path = Path("/proc")) -> set[int]:
         raise TrafficUnavailable("Нет доступа к сокетам части дерева серверного процесса")
     return result
 
-
 def parse_diag_message(raw: bytes, inodes: set[int], port: int) -> tuple[str, int, int] | None:
     if len(raw) < 72:
         return None
@@ -81,12 +66,11 @@ def parse_diag_message(raw: bytes, inodes: set[int], port: int) -> tuple[str, in
                 raise TrafficUnavailable("Ядро не предоставляет TCP_INFO bytes_sent/bytes_received")
             received = struct.unpack_from("=Q", info, 128)[0]
             sent = struct.unpack_from("=Q", info, 200)[0]
-            # Cookie survives inode reuse and separates IPv4/IPv6 socket identities.
+            # cookie survives inode reuse and separates IPv4/IPv6 socket identities.
             key = f"{raw[0]}:{inode}:{raw[44:52].hex()}"
             return key, received, sent
         offset += (length + 3) & ~3
     raise TrafficUnavailable("TCP_INFO для сокета сервера недоступен")
-
 
 def tcp_counters(pid: int, port: int) -> dict[str, tuple[int, int]]:
     if platform.system() == "Windows":
@@ -143,7 +127,6 @@ def tcp_counters(pid: int, port: int) -> dict[str, tuple[int, int]]:
                             result[value[0]] = (value[1], value[2])
     return result
 
-
 class ServerTrafficTracker:
     def __init__(self, pid: int, port: int) -> None:
         self.pid, self.port = pid, port
@@ -188,22 +171,13 @@ class ServerTrafficTracker:
             self.next_sample = now + 5.0
         return dict(self.cached)
 
-
 def _traffic_source() -> str:
     return "windows-tcp-estats" if platform.system() == "Windows" else "linux-inet-diag-tcp-info"
-
-
-# ── Windows: per-connection byte counters через iphlpapi ────────────────────
-#
-# GetExtendedTcpTable отдаёт соединения с PID владельца, GetPerTcpConnectionEstats
-# с TcpConnectionEstatsData — накопленные DataBytesIn/Out по каждому соединению.
-# Оба вызова документированы и не требуют прав администратора.
 
 _TCP_ESTATS_DATA = 1  # TCP_ESTATS_TYPE.TcpConnectionEstatsData
 _MIB_TCP_STATE_ESTAB = 5
 _TCP_TABLE_OWNER_PID_ALL = 5
 _windows_estats_enabled: set[str] = set()
-
 
 def windows_pid_tree(pid: int) -> set[int]:
     """Дерево процессов через Toolhelp32-снимок (stdlib-ctypes, без psutil)."""
@@ -252,7 +226,6 @@ def windows_pid_tree(pid: int) -> set[int]:
         pending.extend(children.get(current, []))
     return tree
 
-
 def _parse_owner_pid_table(raw: bytes, pids: set[int], port: int) -> list[tuple[int, ...]]:
     """Чистый разбор MIB_TCPTABLE_OWNER_PID: строки сервера в состоянии ESTAB."""
     if len(raw) < 4:
@@ -271,13 +244,11 @@ def _parse_owner_pid_table(raw: bytes, pids: set[int], port: int) -> list[tuple[
         rows.append((state, local_addr, local_port, remote_addr, remote_port, owner))
     return rows
 
-
 def windows_row_key(row: tuple[int, ...]) -> str:
     _, local_addr, local_port, remote_addr, remote_port, owner = row
     local_ip = socket.inet_ntoa(struct.pack("<I", local_addr))
     remote_ip = socket.inet_ntoa(struct.pack("<I", remote_addr))
     return f"{owner}:{local_ip}:{socket.ntohs(local_port & 0xFFFF)}>{remote_ip}:{socket.ntohs(remote_port & 0xFFFF)}"
-
 
 def windows_tcp_counters(pid: int, port: int) -> dict[str, tuple[int, int]]:
     import ctypes

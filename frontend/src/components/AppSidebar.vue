@@ -42,7 +42,6 @@ const libraryItems: Array<{ view: ViewName; label: string; icon: string }> = [
 
 const toolItems: Array<{ view: ViewName; label: string; icon: string }> = [
   { view: 'plugins', label: 'Плагины', icon: 'plug' },
-  { view: 'lan-rooms', label: 'LAN-комнаты', icon: 'globe' },
   { view: 'themes', label: 'Студия тем', icon: 'palette' },
 ]
 
@@ -170,7 +169,7 @@ const groupFilters = computed(() => [
     <div class="sidebar-footer">
       <Icon class="sidebar-footer-icon" :name="cloudConfigured ? 'cloud' : 'hard-drive'" :size="14" />
       <span>{{ cloudConfigured ? 'Облако подключено' : 'Только локально' }}</span>
-      <small>1.0</small>
+      <small>1.1</small>
     </div>
     <div
       v-if="widthMode === 'manual' && (position === 'left' || position === 'right')"

@@ -42,7 +42,7 @@ async function syncMapping() {
     const result = await bridge.serverNetworkStatus(props.name)
     if (current === epoch) mapping.value = result.mapping
   } catch {
-    // Do not turn a disconnected backend into a claim that the port is closed.
+    // do not turn a disconnected backend into a claim that the port is closed.
   } finally {
     statusBusy.value = false
   }
@@ -191,7 +191,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   epoch += 1
   if (timer) clearInterval(timer)
-  // Navigation away is not a request to close a running server.
+  // navigation away is not a request to close a running server.
 })
 </script>
 

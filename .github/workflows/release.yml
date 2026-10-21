@@ -1,14 +1,20 @@
 name: Release
 
-# Релиз с самообновлением: пуш тега v* собирает подписанные пакеты
-# Windows (NSIS/MSI) и Linux (AppImage/deb/rpm), публикует их в GitHub
-# Release и генерирует latest.json — фид встроенного апдейтера лаунчера
-# (endpoints в tauri.conf.json указывают на этот файл).
+# Релиз: пуш тега v* собирает пакеты через те же платформенные скрипты,
+# что и локальная сборка (scripts/build_*), публикует артефакты в GitHub
+# Release. latest.json для встроенного апдейтера собирает
+# scripts/build_windows_exe.sh — только при заданном ключе
+# TAURI_SIGNING_PRIVATE_KEY (иначе апдейтер релиз не увидит, см. заголовок
+# скрипта).
 #
 # ОБЯЗАТЕЛЬНЫЕ СЕКРЕТЫ РЕПОЗИТОРИЯ (Settings → Secrets → Actions):
-#   TAURI_SIGNING_PRIVATE_KEY          — содержимое файла приватного ключа minisign
+#   TAURI_SIGNING_PRIVATE_KEY          — приватный ключ minisign (апдейтер)
 #   TAURI_SIGNING_PRIVATE_KEY_PASSWORD — пароль этого ключа
-# Без них сборка выйдет неподписанной и апдейтер её отвергнет.
+# Опционально:
+#   WINDOWS_CERT_FILE / WINDOWS_CERT_PASSWORD — Authenticode (osslsigncode)
+#   APPLE_CERTIFICATE / APPLE_CERTIFICATE_PASSWORD / APPLE_SIGNING_IDENTITY —
+#     подпись Developer ID; без них macOS-сборка подписывается ad-hoc и НЕ
+#     нотаризуется (Gatekeeper: ПКМ → Открыть, см. docs/BUILDING.md).
 
 on:
   push:
@@ -35,48 +41,55 @@ jobs:
         with:
           toolchain: 1.99.0
           build-warnings: allow
-      - name: Install backend and freezer dependencies
-        run: python -m pip install ".[windows]" pyinstaller
-      - name: Build bundled Python backend
-        run: >-
-          python -m PyInstaller --noconfirm --clean --onefile
-          --name nivora-launcher-backend --paths . --distpath dist/backend
-          --workpath build/pyinstaller-backend --specpath build/pyinstaller-backend
-          --collect-all keyring
-          --hidden-import keyring.backends.Windows
-          nivora_launcher/backend_entrypoint.py
-      - name: Smoke-test packaged CLI mode
-        shell: pwsh
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: false
+          install: git
+      - name: Expose MSYS2 UCRT64 g++ and python3 shim to Git Bash
+        shell: bash
         run: |
-          & dist/backend/nivora-launcher-backend.exe --cli --help | Out-Null
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Stage backend resource
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force frontend/src-tauri/resources/backend | Out-Null
-          Copy-Item dist/backend/nivora-launcher-backend.exe frontend/src-tauri/resources/backend/
-      - name: Install frontend dependencies
-        working-directory: frontend
-        run: npm ci --no-audit --no-fund
-      - name: Generate Tauri icons
-        working-directory: frontend
-        run: npm run tauri -- icon src/assets/uni.png --output src-tauri/icons
-      - name: Build signed Windows installers and publish
-        uses: tauri-apps/tauri-action@v0
+          echo "C:\msys64\ucrt64\bin" >> "$GITHUB_PATH"
+          py_dir="$(dirname "$(command -v python)")"
+          cp "$py_dir/python.exe" "$py_dir/python3.exe"
+      - name: "Build signed Windows installers (script: backend+helpers+NSIS)"
+        shell: bash
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          WINDOWS_CERT_FILE: ${{ secrets.WINDOWS_CERT_FILE }}
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: bash scripts/build_windows_exe.sh
+        timeout-minutes: 60
+      - name: Smoke-test packaged app (--smoke-test)
+        shell: bash
+        timeout-minutes: 10
+        run: |
+          rc=0
+          ./dist/windows/nivora-launcher.exe --smoke-test || rc=$?
+          echo "--- smoke-test.json ---"
+          cat "$LOCALAPPDATA/nivora-launcher/smoke-test.json" || true
+          exit $rc
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: "Nivora Launcher ${{ github.ref_name }}"
-          releaseBody: "См. CHANGELOG в репозитории. Обновление доступно прямо из лаунчера: Настройки → Самообновление."
-          releaseDraft: false
-          prerelease: false
-          args: --bundles nsis,msi --locked
+          name: release-windows
+          path: dist/windows/*
+          if-no-files-found: error
 
-  linux:
-    runs-on: ubuntu-latest
+  macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-latest
+          - arch: x86_64
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -91,43 +104,91 @@ jobs:
         with:
           toolchain: 1.99.0
           build-warnings: allow
-      - name: Install system dependencies (Tauri + AppImage)
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+      - name: Build unsigned (ad-hoc) DMG
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: MACOS_ARCH=${{ matrix.arch }} bash scripts/build_macos_app.sh
+        timeout-minutes: 60
+      - name: Smoke-test packaged app (--smoke-test)
+        timeout-minutes: 10
+        run: |
+          app="$(ls -1 frontend/src-tauri/target/*/release/bundle/macos/*.app | head -n 1)"
+          rc=0
+          "$app/Contents/MacOS/nivora-launcher" --smoke-test || rc=$?
+          echo "--- smoke-test.json ---"
+          cat "$HOME/.local/share/nivora-launcher/smoke-test.json" || true
+          exit $rc
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-macos-${{ matrix.arch }}
+          path: dist/macos/*
+          if-no-files-found: error
+
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+        with:
+          toolchain: 1.99.0
+          build-warnings: allow
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+      - name: Install Tauri and RPM build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libfuse2
-      - name: Install backend and freezer dependencies
-        run: python -m pip install . pyinstaller
-      - name: Build bundled Python backend
-        run: >-
-          python -m PyInstaller --noconfirm --clean --onefile
-          --name nivora-launcher-backend --paths . --distpath dist/backend
-          --workpath build/pyinstaller-backend --specpath build/pyinstaller-backend
-          nivora_launcher/backend_entrypoint.py
-      - name: Smoke-test packaged CLI mode
-        run: dist/backend/nivora-launcher-backend --cli --help > /dev/null
-      - name: Stage backend resource
+          sudo apt-get install -y build-essential curl file libayatana-appindicator3-dev libssl-dev libwebkit2gtk-4.1-dev librsvg2-dev libxdo-dev patchelf rpm xvfb
+      - name: Build deb and rpm (backend + helpers included)
+        run: bash scripts/build_all.sh deb rpm
+        timeout-minutes: 60
+      - name: Install deb and smoke-test packaged app (xvfb)
+        timeout-minutes: 10
         run: |
-          mkdir -p frontend/src-tauri/resources/backend
-          cp dist/backend/nivora-launcher-backend frontend/src-tauri/resources/backend/
-      - name: Install frontend dependencies
-        working-directory: frontend
-        run: npm ci --no-audit --no-fund
-      - name: Generate Tauri icons
-        working-directory: frontend
-        run: npm run tauri -- icon src/assets/uni.png --output src-tauri/icons
-      # Автообновление на Linux работает только через AppImage:
-      # deb/rpm публикуются для ручной установки, latest.json ссылается
-      # на AppImage.
-      - name: Build signed Linux packages and publish
-        uses: tauri-apps/tauri-action@v0
+          sudo dpkg -i dist/deb/*.deb || sudo apt-get install -f -y
+          rc=0
+          xvfb-run -a --server-args="-screen 0 1280x800x24" /usr/bin/nivora-launcher --smoke-test || rc=$?
+          echo "--- smoke-test.json ---"
+          cat "$HOME/.local/share/nivora-launcher/smoke-test.json" || true
+          exit $rc
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-linux
+          path: |
+            dist/deb/*.deb
+            dist/rpm/*.rpm
+          if-no-files-found: error
+
+  publish:
+    needs: [windows, macos, linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+      - name: Create GitHub release and upload assets
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        with:
-          tagName: ${{ github.ref_name }}
-          releaseName: "Nivora Launcher ${{ github.ref_name }}"
-          releaseBody: "См. CHANGELOG в репозитории. Обновление доступно прямо из лаунчера: Настройки → Самообновление."
-          releaseDraft: false
-          prerelease: false
-          args: --bundles appimage,deb,rpm --locked
+        run: |
+          ls -R release-assets
+          files=$(find release-assets -type f ! -name smoke-test.json)
+          gh release create "${{ github.ref_name }}" $files \
+            --title "Nivora Launcher ${{ github.ref_name }}" \
+            --notes "См. CHANGELOG в репозитории. Обновление доступно прямо из лаунчера: Настройки → Самообновление. macOS-сборки не нотаризованы: при первом запуске используйте ПКМ → Открыть (см. docs/BUILDING.md)." \
+            --draft false

@@ -1,9 +1,4 @@
-// Управление игровым оверлеем Nivora (как оверлей Steam).
-//
-// Главное окно лаунчера на время игровой сессии регистрирует глобальные
-// горячие клавиши (Shift+Tab — оверлей, F7 — запись) и создаёт отдельное
-// прозрачное окно поверх игры. Само окно оверлея рендерит GameOverlay.vue
-// и опрашивает overlay_state; здесь только «тумблеры» и жизненный цикл.
+// управление игровым оверлеем Nivora (как оверлей Steam).
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow'
 import { PhysicalPosition, PhysicalSize, currentMonitor, primaryMonitor } from '@tauri-apps/api/window'
 import { invoke } from '@tauri-apps/api/core'
@@ -20,36 +15,19 @@ let overlayWindowPromise: Promise<WebviewWindow> | null = null
 let overlayVisible = false
 let hotkeysBound = false
 let closeListener: UnlistenFn | null = null
-// Ошибки окна оверлея раньше глотались: «оверлей не открывается» без единого
+// ошибки окна оверлея раньше глотались: «оверлей не открывается» без единого
 // сообщения. Теперь последний сбой доступен UI для тоста/уведомления.
 let lastOverlayError = ''
-// Прозрачное поверх-всех окно хоть раз не создалось (NVIDIA/XWayland и др.)?
-// Тогда до конца сессии используем совместимую непрозрачную форму окна.
+// прозрачное поверх-всех окно хоть раз не создалось (NVIDIA/XWayland и др.)?
+// тогда до конца сессии используем совместимую непрозрачную форму окна.
 let overlayOpaqueFallback = false
 
 export function overlayLastError(): string {
   return lastOverlayError
 }
 
-// Окно намеренно НЕ делаем fullscreen: эксклюзивный полноэкранный режим
-// игры всё равно рисуется поверх topmost-окон, а transparent+fullscreen
-// на WebView2 местами даёт чёрный кадр. Вместо этого — бордерлесс-окно
-// размером в текущий монитор: тот же эффект, меньше сюрпризов.
-//
-// Геометрию задаём уже при создании (с запасом 1280×800): если API мониторов
-// недоступен (нет разрешения, драйвер, HDR-переход), окно всё равно
-// открывается приличного размера, а не «уменьшенное» 800×600 в углу.
-//
-// Wayland: клиенты не могут ни позиционировать себя, ни ставить себя поверх
-// других окон, а прозрачность в webkit2gtk работает не везде. Поэтому в
-// Wayland-сессии окно создаётся обычным, непрозрачным и по центру — это
-// честно работает; «поверх игры» на Wayland не даст ни один нормальный
-// клиент (оверлей Steam работает иначе — он внедряется в процесс игры).
 let waylandSession = false
 
-// Истинный тип сессии знает бэкенд (XDG_SESSION_TYPE): App.vue сообщает его
-// сюда после bootstrap. Никаких эвристик по User-Agent — они зачеркнули бы
-// и обычные X11-сборки на Linux.
 export function setOverlayWaylandMode(value: boolean): void {
   waylandSession = value
 }
@@ -58,12 +36,6 @@ export function overlayWaylandMode(): boolean {
   return waylandSession
 }
 
-// Прозрачность окна — решение, отдельное от хоткеев. Пакетный враппер может
-// форсировать GDK_BACKEND=x11 в Wayland-сессии: тогда глобальные клавиши и
-// «поверх всех» работают (waylandSession=false), но прозрачное окно
-// webkit2gtk на XWayland + NVIDIA перерисовывается только там, где движется
-// курсор («двинешь мышкой — пропадает»). App.vue включает этот флаг
-// превентивно для связки NVIDIA + Wayland-сессия с форсированным X11.
 let overlayOpaqueForced = false
 
 export function setOverlayOpaqueWindow(value: boolean): void {
@@ -74,24 +46,16 @@ export function overlayOpaqueWindowForced(): boolean {
   return overlayOpaqueForced
 }
 
-// Режим, в котором будет создано окно. Нативный Wayland и рискованные
-// окружения получают совместимый непрозрачный план сразу, а не после
-// неудачной попытки с прозрачным окном.
 function overlayWindowMode(): 'x11' | 'wayland' | 'fallback' {
   if (waylandSession) return 'wayland'
   return overlayOpaqueFallback || overlayOpaqueForced ? 'fallback' : 'x11'
 }
 
-// Включён ли аварийный непрозрачный режим окна (создание прозрачного не удалось).
+// включён ли аварийный непрозрачный режим окна (создание прозрачного не удалось).
 export function overlayUsingFallback(): boolean {
   return overlayOpaqueFallback
 }
 
-// Событие tauri:created может НЕ прийти вовсе (особенность WebKitGTK и/или
-// гонка: слушатель подключается позже, чем окно уже создано). Раньше промис
-// создания висел вечно — клик по кнопке «Оверлей» «ничего не делал» без
-// единого сообщения. Теперь параллельно опрашиваем само окно: первый же
-// успешный ответ IPC означает, что окно живо.
 async function waitForWindowIpc(overlay: WebviewWindow, timeoutMs: number): Promise<void> {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
@@ -106,9 +70,6 @@ async function waitForWindowIpc(overlay: WebviewWindow, timeoutMs: number): Prom
   throw new Error(`окно не ответило за ${Math.round(timeoutMs / 1000)} с (событие создания не пришло)`)
 }
 
-// Каждая попытка открыть оверлей дописывается в журнал на диске
-// (data_home/nivora-launcher/logs/overlay.log) — команда возвращает путь
-// и хвост, чтобы отчёт «Диагностика оверлея» показывал факты.
 export async function overlayAttemptLog(entry: string): Promise<{ path: string; tail: string } | null> {
   if (!inTauri()) return null
   try {
@@ -124,16 +85,14 @@ async function createOverlayWindow(): Promise<WebviewWindow> {
   const mode = overlayWindowMode()
   const geometry = await initialOverlayGeometry()
   const plan = overlayWindowPlan(mode, geometry)
-  // При превентивно-непрозрачном режиме пишем причину в журнал: без неё
+  // при превентивно-непрозрачном режиме пишем причину в журнал: без неё
   // строка «работает в совместимом режиме» в отчёте необъяснима.
   const reason = mode === 'fallback' && overlayOpaqueForced && !overlayOpaqueFallback
     ? ' · причина: NVIDIA + форсированный X11 в Wayland-сессии (прозрачное окно на XWayland перерисовывается только под курсором)'
     : ''
   void overlayAttemptLog(`создание окна: режим=${mode} ${plan.width}x${plan.height}@${plan.x ?? 'центр'},${plan.y ?? ''} transparent=${plan.transparent} alwaysOnTop=${plan.alwaysOnTop}${reason}`)
   return new Promise<WebviewWindow>((resolve, reject) => {
-    // Окно создаётся сразу видимым: у WebKitGTK связка «создать скрытым,
-    // потом показать» иногда оставляет пустой кадр или теряет событие
-    // показа — а «мигнуть» оверлеем не страшно.
+    // окно создаётся сразу видимым: у WebKitGTK связка «создать скрытым,
     const overlay = new WebviewWindow(OVERLAY_WINDOW_LABEL, {
       ...plan,
       title: 'Nivora Overlay',
@@ -159,11 +118,9 @@ async function createOverlayWindow(): Promise<WebviewWindow> {
       lastOverlayError = String((payload as { message?: string } | string) || '') || 'окно оверлея не создано'
       settle(new Error(`Не удалось создать окно оверлея: ${lastOverlayError}`))
     })
-    // Страховка от молчаливого зависания (см. waitForWindowIpc).
+    // страховка от молчаливого зависания (см. waitForWindowIpc).
     void waitForWindowIpc(overlay, 9000).then(() => settle(), (error: Error) => settle(error))
-    // На режимах с рамкой у окна есть крестик: после такого закрытия само
-    // окно уничтожено, и если не сбросить состояние, следующее нажатие
-    // горячей клавиши «прятало» уже несуществующее окно.
+    // на режимах с рамкой у окна есть крестик: после такого закрытия само
     overlay.onCloseRequested(() => {
       overlayVisible = false
       overlayWindowPromise = null
@@ -178,10 +135,7 @@ async function ensureOverlayWindow(): Promise<WebviewWindow> {
         return await createOverlayWindow()
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
-        // В нативном Wayland и при превентивно-непрозрачном режиме окно уже
-        // создаётся максимально совместимым — повторять нечем. Иначе одна
-        // попытка с непрозрачным окном всё же лучше, чем «никак»:
-        // прозрачность на XWayland/NVIDIA подводит.
+        // в нативном Wayland и при превентивно-непрозрачном режиме окно уже
         if (overlayWindowMode() !== 'x11') throw error
         lastOverlayError = `${message} → пробую совместимое непрозрачное окно`
         overlayOpaqueFallback = true
@@ -201,14 +155,12 @@ async function ensureOverlayWindow(): Promise<WebviewWindow> {
   return overlayWindowPromise
 }
 
-// Геометрия для создания окна: текущий монитор →primary → запасные 1280×800.
+// геометрия для создания окна: текущий монитор →primary → запасные 1280×800.
 async function initialOverlayGeometry(): Promise<{ width: number; height: number; x: number; y: number }> {
   try {
     const monitor = (await currentMonitor()) || (await primaryMonitor())
     if (monitor) {
       // size/position монитора — физические пиксели, а width/height/x/y при
-      // создании окна — логические. Без деления на scale HiDPI-экран
-      // получал окно в полтора-два раза больше самого монитора.
       const scale = monitor.scaleFactor && monitor.scaleFactor > 0 ? monitor.scaleFactor : 1
       return {
         width: Math.max(640, Math.round(monitor.size.width / scale)),
@@ -223,9 +175,6 @@ async function initialOverlayGeometry(): Promise<{ width: number; height: number
   return { width: 1280, height: 800, x: 0, y: 0 }
 }
 
-// Перед показом растягиваем окно на текущий монитор. Дешёвая операция,
-// зато оверлей не «застревает» в размере монитора, который был на момент
-// создания окна (перетащили игру на другой экран — размер подтянется).
 async function coverActiveMonitor(overlay: WebviewWindow): Promise<void> {
   try {
     const monitor = await currentMonitor()
@@ -241,21 +190,18 @@ export function overlayIsVisible(): boolean {
   return overlayVisible
 }
 
-// Окно оверлея — отдельный webview со своим JS-контекстом. Esc внутри него
-// приходит событием, а прячет окно главный контекст: только он знает,
-// «видим» ли оверлей сейчас.
 export async function initOverlayEventBridge(onTrayOpen?: () => void, onInAppClose?: () => void): Promise<void> {
   if (!inTauri() || closeListener) return
   try {
     closeListener = await listen('nivora-overlay-close', () => {
       void setOverlayVisible(false)
-      // Внутрилаунчерный оверлей (Wayland-костыль) закрывается тем же Esc.
+      // внутрилаунчерный оверлей (Wayland-костыль) закрывается тем же Esc.
       if (onInAppClose) onInAppClose()
     })
   } catch {
     closeListener = null
   }
-  // Пункт «Игровой оверлей» в меню трея: работает даже там, где глобальные
+  // пункт «Игровой оверлей» в меню трея: работает даже там, где глобальные
   // клавиши не поддерживаются (Wayland-сессии).
   try {
     await listen('nivora-overlay-open', () => {
@@ -267,8 +213,6 @@ export async function initOverlayEventBridge(onTrayOpen?: () => void, onInAppClo
   }
 }
 
-// Возвращает true, если окно действительно показалось/спряталось. Ошибки
-// больше не глотаем молча: текст доступен через overlayLastError().
 export async function setOverlayVisible(visible: boolean): Promise<boolean> {
   overlayVisible = visible
   if (!inTauri()) return visible
@@ -280,15 +224,13 @@ export async function setOverlayVisible(visible: boolean): Promise<boolean> {
       await overlay.show()
       let shown = await overlay.isVisible().catch(() => true)
       if (!shown) {
-        // Повтор после паузы: WebKitGTK иногда «догоняет» показ окна.
+        // повтор после паузы: WebKitGTK иногда «догоняет» показ окна.
         await new Promise((resolve) => setTimeout(resolve, 250))
         await overlay.show().catch(() => undefined)
         shown = await overlay.isVisible().catch(() => true)
       }
       if (!shown) throw new Error('окно оверлея не отобразилось')
-      // Дальше — только улучшения позиции и поведения. Любое из них может
-      // не поддерживаться окружением; сбой не должен «закрывать» окно,
-      // которое уже открыто и работает.
+      // дальше — только улучшения позиции и поведения. Любое из них может
       if (!wayland) {
         await coverActiveMonitor(overlay)
         await overlay.setAlwaysOnTop(true).catch(() => undefined)
@@ -316,10 +258,6 @@ export async function toggleOverlay(): Promise<boolean> {
   return overlayVisible
 }
 
-// Привязка/перепривязка горячих клавиш сериализуется: глубокий вачер
-// настроек вызывает bindGameHotkeys на каждое изменение, и параллельные
-// вызовы успевали зарегистрировать И старую, И новую комбинацию — оверлей
-// закрывался обеими.
 let hotkeyBindChain: Promise<unknown> = Promise.resolve()
 
 export async function bindGameHotkeys(
@@ -335,11 +273,6 @@ export async function bindGameHotkeys(
     [normalizeHotkey(settings.hotkey_recording, 'F7'), onRecordingToggle],
   ]
   // В Wayland-сессии глобальный перехват клавиш (XGrabKey) не работает:
-  // compositor не отдаёт события чужим клиентам. Оверлей Steam работает,
-  // потому что внедряется в процесс игры — для нас этот путь закрыт.
-  // Не дёргаем register впустую, а честно отдаём комбинации как
-  // «недоступные глобально»: их по-прежнему ловит окно лаунчера (см.
-  // handleGlobalKeydown в App.vue) и пункт в меню трея.
   if (waylandSession) return bindings.map(([combination]) => combination)
   const failed: string[] = []
   for (const [combination, handler] of bindings) {
@@ -390,9 +323,6 @@ export async function toggleRecording(instanceName: string): Promise<string> {
   return `Запись начата · ${started.encoder}`
 }
 
-// Человекочитаемое имя режима для самодиагностики: важно не только
-// «непрозрачный», но и почему — превентивно (NVIDIA + XWayland) или после
-// неудачной попытки создать прозрачное окно.
 function describeOverlayWindowMode(): string {
   const mode = overlayWindowMode()
   if (mode === 'x11') return 'обычный (прозрачный, поверх всех)'
@@ -401,9 +331,6 @@ function describeOverlayWindowMode(): string {
   return 'совместимый (непрозрачный) — прозрачное окно не создалось с первой попытки'
 }
 
-// Пошаговая самопроверка оверлея: превращает «он не открывается» в
-// конкретный отчёт, который можно прочитать и переслать. Каждый шаг
-// независим — сбой одного не мешает проверить остальные.
 export interface OverlaySelfTestStep {
   name: string
   ok: boolean

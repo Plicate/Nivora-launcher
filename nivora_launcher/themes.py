@@ -17,8 +17,6 @@ from .config import ConfigStore, _atomic_json_write
 from .errors import LauncherError
 from .net import HttpClient
 
-# GitHub-топик тем остался старым: под ним уже опубликованы темы, смена топика
-# оторвёт браузер тем от существующего каталога.
 THEME_GITHUB_TOPIC = "trial-launcher-theme"
 THEME_MAX_ARCHIVE_BYTES = 8 * 1024 * 1024
 THEME_MAX_JSON_BYTES = 64 * 1024
@@ -43,13 +41,11 @@ _ASSET_HOSTS = frozenset(
     }
 )
 
-
 def _text(value: Any, field: str, limit: int) -> str:
     result = str(value or "").strip()
     if not result or len(result) > limit:
         raise LauncherError(f"Некорректное поле темы: {field}")
     return result
-
 
 def normalize_theme(
     value: Any,
@@ -112,7 +108,6 @@ def normalize_theme(
         "featured": value.get("featured") is True,
     }
 
-
 def _strip_yaml_comment(line: str) -> str:
     quote = ""
     escaped = False
@@ -129,7 +124,6 @@ def _strip_yaml_comment(line: str) -> str:
         elif char == "#" and not quote and (index == 0 or line[index - 1].isspace()):
             return line[:index]
     return line
-
 
 def _yaml_scalar(raw: str) -> Any:
     value = raw.strip()
@@ -154,7 +148,6 @@ def _yaml_scalar(raw: str) -> Any:
             raise LauncherError("Список creators в theme.yml должен содержать строки")
         return result
     return value
-
 
 def parse_theme_yml(content: bytes) -> dict[str, Any]:
     if not content or len(content) > THEME_MAX_METADATA_BYTES:
@@ -197,7 +190,6 @@ def parse_theme_yml(content: bytes) -> dict[str, Any]:
         raise LauncherError("creators в theme.yml должен быть списком")
     return result
 
-
 def _theme_document(theme: dict[str, Any]) -> dict[str, Any]:
     return {
         key: theme[key]
@@ -218,10 +210,8 @@ def _theme_document(theme: dict[str, Any]) -> dict[str, Any]:
         )
     }
 
-
 def _theme_metadata(theme: dict[str, Any]) -> dict[str, Any]:
     return {key: theme[key] for key in ("author", "description", "version", "creators")}
-
 
 def _metadata_yaml(theme: dict[str, Any]) -> str:
     metadata = _theme_metadata(theme)
@@ -233,7 +223,6 @@ def _metadata_yaml(theme: dict[str, Any]) -> str:
     ]
     lines.extend(f"  - {json.dumps(creator, ensure_ascii=False)}" for creator in metadata["creators"])
     return "\n".join(lines) + "\n"
-
 
 def _read_archive(content: bytes) -> tuple[dict[str, Any], dict[str, Any]]:
     if not content or len(content) > THEME_MAX_ARCHIVE_BYTES:
@@ -274,7 +263,6 @@ def _read_archive(content: bytes) -> tuple[dict[str, Any], dict[str, Any]]:
     if not isinstance(theme, dict):
         raise LauncherError("theme.json должен содержать объект темы")
     return theme, parse_theme_yml(raw_yaml)
-
 
 class ThemeStore:
     def __init__(self, config: ConfigStore) -> None:
@@ -423,7 +411,6 @@ class ThemeStore:
             raise LauncherError("id темы не совпадает с каталогом")
         return theme
 
-
 def _write_private_text(path: Path, content: str) -> None:
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
     fd = os.open(path, flags, 0o600)
@@ -431,7 +418,6 @@ def _write_private_text(path: Path, content: str) -> None:
         handle.write(content)
         handle.flush()
         os.fsync(handle.fileno())
-
 
 def _validate_https_url(url: str, allowed_hosts: frozenset[str]) -> str:
     try:
@@ -443,7 +429,6 @@ def _validate_https_url(url: str, allowed_hosts: frozenset[str]) -> str:
     if parsed.scheme.lower() != "https" or host not in allowed_hosts or parsed.username or parsed.password or port not in {None, 443}:
         raise LauncherError("Разрешены только HTTPS-адреса GitHub")
     return host
-
 
 class GitHubThemeCatalog:
     def __init__(self, http: HttpClient, store: ThemeStore) -> None:
@@ -562,11 +547,9 @@ class GitHubThemeCatalog:
             raise LauncherError("GitHub вернул слишком большой или некорректный ответ")
         return bytes(content)
 
-
 def _validate_repository_name(owner: str, repo: str) -> None:
     if not _OWNER_RE.fullmatch(str(owner)) or not _REPO_RE.fullmatch(str(repo)) or repo in {".", ".."}:
         raise LauncherError("Некорректный адрес GitHub-репозитория")
-
 
 def _select_theme_asset(value: Any, repo: str, tag: str) -> dict[str, Any]:
     if not isinstance(value, list):
@@ -584,7 +567,6 @@ def _select_theme_asset(value: Any, repo: str, tag: str) -> dict[str, Any]:
     if len(candidates) != 1:
         raise LauncherError("В GitHub Release должен быть один ZIP темы с однозначным именем")
     return candidates[0]
-
 
 def _bounded_int(value: Any, minimum: int, maximum: int) -> int:
     if isinstance(value, bool):

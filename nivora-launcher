@@ -15,12 +15,42 @@ fi
 if [ -z "${WEBKIT_DISABLE_DMABUF_RENDERER:-}" ]; then
   export WEBKIT_DISABLE_DMABUF_RENDERER=1
 fi
-if [ "$#" -eq 0 ] || [ "${1:-}" = "--gui" ]; then
-  if [ -x "/usr/lib/nivora-launcher/nivora-launcher-gui" ]; then
-    exec "/usr/lib/nivora-launcher/nivora-launcher-gui"
+
+# Диагностика тихого «не запускается»: при старте из .desktop stderr не виден,
+# а ошибки линковки (например, нет libwebkit2gtk-4.1 после обновления) выглядели
+# как мгновенное закрытие. Пишем в лог и показываем диалог, если умеем.
+report_startup_failure() {
+  local message="$1" log_dir="${XDG_DATA_HOME:-$HOME/.local/share}/nivora-launcher/logs"
+  mkdir -p "$log_dir" 2>/dev/null || true
+  printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$message" >> "$log_dir/gui-start.log" 2>/dev/null || true
+  echo "Nivora Launcher: $message" >&2
+  if command -v zenity >/dev/null 2>&1; then
+    zenity --error --title "Nivora Launcher — ошибка запуска" --text "$message" >/dev/null 2>&1 || true
+  elif command -v kdialog >/dev/null 2>&1; then
+    kdialog --title "Nivora Launcher — ошибка запуска" --error "$message" >/dev/null 2>&1 || true
+  elif command -v notify-send >/dev/null 2>&1; then
+    notify-send -u critical "Nivora Launcher" "$message" >/dev/null 2>&1 || true
   fi
-  if [ -x "${SCRIPT_DIR}/nivora-launcher-gui" ]; then
-    exec "${SCRIPT_DIR}/nivora-launcher-gui"
+}
+
+GUI_BIN="/usr/lib/nivora-launcher/nivora-launcher-gui"
+[ -x "$GUI_BIN" ] || GUI_BIN="${SCRIPT_DIR}/nivora-launcher-gui"
+
+if [ "$#" -eq 0 ] || [ "${1:-}" = "--gui" ]; then
+  if [ -x "$GUI_BIN" ]; then
+    # Незагружающиеся библиотеки — самая частая причина «тихого» старта на
+    # Arch: webkit2gtk обновился, а зависимость не установилась. Проверяем
+    # до exec, иначе сообщение об ошибке теряется вместе с консолью.
+    if command -v ldd >/dev/null 2>&1; then
+      missing_libs="$(ldd "$GUI_BIN" 2>/dev/null | grep 'not found' | awk '{print $1}' | sort -u || true)"
+      if [ -n "${missing_libs:-}" ]; then
+        report_startup_failure "Не хватает системных библиотек: ${missing_libs//$'\n'/, }.
+Переустановите зависимости (Arch/CachyOS): sudo pacman -S webkit2gtk-4.1 gtk3 libayatana-appindicator
+Подробности: ${XDG_DATA_HOME:-$HOME/.local/share}/nivora-launcher/logs/gui-start.log"
+        exit 1
+      fi
+    fi
+    exec "$GUI_BIN"
   fi
 fi
 exec python3 -m nivora_launcher "$@"

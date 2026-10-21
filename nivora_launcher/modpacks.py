@@ -17,16 +17,14 @@ from .constants import FTB_MODPACK_API_URL, MODRINTH_API_URL, TECHNIC_API_URL
 from .errors import LauncherError
 from .net import HttpClient
 
-
 MAX_MODPACK_BYTES = 512 * 1024 * 1024
 MAX_MODPACK_ENTRIES = 20_000
 MAX_MODPACK_UNCOMPRESSED_BYTES = 2 * 1024 * 1024 * 1024
 MAX_MODPACK_INDEX_BYTES = 32 * 1024 * 1024
 MAX_MODPACK_MARKER_BYTES = 512 * 1024
 MODPACK_MARKER = ".trial-launcher-modpacks.json"
-# CurseForge-архивы хранят manifest.json со списком файлов как projectID/fileID:
-# сами моды в архиве НЕТ, их нужно до Resolv-ить и скачать. Без этого импорт
-# «притворялся успешным», ставя только overrides — а моды молча пропадали.
+# в CurseForge-архиве модов нет — только manifest.json с projectID/fileID;
+# моды резолвятся и качаются отдельно, иначе импорт ставит один overrides
 CURSEFORGE_MANIFEST_NAME = "manifest.json"
 CURSEFORGE_MANIFEST_MAX_BYTES = 8 * 1024 * 1024
 CURSEFORGE_RESOLVER_BASE = "https://api.cfwidget.com"
@@ -39,7 +37,6 @@ DEFAULT_MODPACK_CATALOGS = [
     {"id": "ftb", "name": "Feed The Beast", "kind": "ftb", "api_url": FTB_MODPACK_API_URL},
     {"id": "technic", "name": "Technic", "kind": "technic", "api_url": TECHNIC_API_URL},
 ]
-
 
 @dataclass
 class ModpackResult:
@@ -72,7 +69,6 @@ class ModpackResult:
             "project_type": "modpack",
         }
 
-
 class ModpackProvider:
     """Search and download modpacks from the supported public catalogs."""
 
@@ -84,10 +80,11 @@ class ModpackProvider:
         if self.kind not in {"modrinth", "ftb", "technic"}:
             raise LauncherError(f"Каталог {self.kind} не поддерживает модпаки")
 
-    def search(self, query: str, game_version: str = "", limit: int = 12) -> list[ModpackResult]:
+    def search(self, query: str, game_version: str = "", limit: int = 12, offset: int = 0) -> list[ModpackResult]:
         limit = max(1, min(30, int(limit)))
+        self.last_total: int | None = None
         if self.kind == "modrinth":
-            return self._search_modrinth(query, game_version, limit)
+            return self._search_modrinth(query, game_version, limit, max(0, min(10_000, int(offset or 0))))
         if self.kind == "ftb":
             return self._search_ftb(query, game_version, limit)
         return self._search_technic(query, game_version, limit)
@@ -238,15 +235,19 @@ class ModpackProvider:
                 pass
             return dependencies
 
-    def _search_modrinth(self, query: str, game_version: str, limit: int) -> list[ModpackResult]:
+    def _search_modrinth(self, query: str, game_version: str, limit: int, offset: int = 0) -> list[ModpackResult]:
         facets = [["project_type:modpack"]]
         if game_version:
             facets.append([f"versions:{game_version}"])
         params: dict[str, str] = {"limit": str(limit), "facets": json.dumps(facets, separators=(",", ":"))}
+        if offset:
+            params["offset"] = str(offset)
         if query.strip():
             params["query"] = query.strip()
         value = self.http.get_json(f"{self.base_url}/search?{urlencode(params)}")
         hits = value.get("hits", []) if isinstance(value, dict) else []
+        total = value.get("total_hits") if isinstance(value, dict) else None
+        self.last_total = int(total) if isinstance(total, int) and total >= 0 else None
         return [self._modrinth_result(item) for item in hits if isinstance(item, dict)]
 
     def _search_ftb(self, query: str, game_version: str, limit: int) -> list[ModpackResult]:
@@ -358,7 +359,6 @@ class ModpackProvider:
             _int(item.get("downloads")),
         )
 
-
 class ModpackImporter:
     def __init__(self, http: HttpClient) -> None:
         self.http = http
@@ -439,7 +439,7 @@ class ModpackImporter:
             raise LauncherError("Архив модпака слишком большой (максимум 512 MiB)")
         try:
             with zipfile.ZipFile(archive_path) as archive:
-                index, manifest, selected = self._archive_plan(archive)
+                index, manifest, selected = self._archive_plan(archive)[:3]
             dependencies: dict[str, Any]
             if manifest:
                 dependencies = _validate_curseforge_compatibility(
@@ -471,7 +471,7 @@ class ModpackImporter:
             raise LauncherError("Архив модпака слишком большой (максимум 512 MiB)")
         try:
             with zipfile.ZipFile(archive_path) as archive:
-                index, manifest, selected = self._archive_plan(archive)
+                index, manifest, selected = self._archive_plan(archive)[:3]
         except zipfile.BadZipFile as exc:
             raise LauncherError("Файл не является корректным ZIP-модпаком") from exc
         mods: list[dict[str, Any]] = []
@@ -589,6 +589,7 @@ class ModpackImporter:
                 "path": str(target),
                 "files": written,
                 "trusted_hash": bool(files.get("trusted_hash")),
+                "skipped_loader_files": list(files.get("skipped_loader_files") or []),
                 "marker": str(marker),
             }
         finally:
@@ -702,18 +703,21 @@ class ModpackImporter:
 
         selected: list[tuple[zipfile.ZipInfo, str]] = []
         destinations: set[str] = set()
+        skipped_loader: list[str] = []
         for info, name in zip(infos, names):
             relative = name.removeprefix(prefix)
             if not relative or info.is_dir() or relative in {index_name, manifest_name}:
                 continue
             destination = _archive_destination(relative)
             if not destination:
+                if _loader_managed_path(relative) and len(skipped_loader) < 100:
+                    skipped_loader.append(_strip_modpack_prefix(relative))
                 continue
             if destination in destinations:
                 raise LauncherError(f"Модпак содержит повторный путь: {destination}")
             destinations.add(destination)
             selected.append((info, destination))
-        return index, manifest, selected
+        return index, manifest, selected, skipped_loader
 
     @staticmethod
     def _modrinth_download_plan(index: dict[str, Any], confirm_unverified: bool) -> list[dict[str, Any]]:
@@ -729,6 +733,10 @@ class ModpackImporter:
                 raise LauncherError("Индекс модпака содержит некорректный файл")
             raw_path = str(entry.get("path", ""))
             if _is_server_override(raw_path):
+                continue
+            if _loader_managed_path(raw_path):
+                # лаунчер сам управляет versions/ и libraries/: удалённый
+                # файл оттуда мог бы перезаписать модлоадер.
                 continue
             relative = _archive_destination(raw_path)
             downloads = entry.get("downloads", [])
@@ -764,6 +772,16 @@ class ModpackImporter:
             destination = _ftb_manifest_destination(entry)
             url = _text(entry.get("url") or entry.get("download_url") or entry.get("downloadUrl"))
             if not destination or not url:
+                raw_path = "/".join(
+                    part
+                    for part in (
+                        _text(entry.get("path")).replace("\\", "/").strip("/"),
+                        _text(entry.get("name") or entry.get("file_name") or entry.get("filename")).replace("\\", "/").strip("/"),
+                    )
+                    if part
+                )
+                if _loader_managed_path(raw_path):
+                    continue
                 raise LauncherError("Манифест FTB содержит неполный файл")
             if destination in destinations:
                 raise LauncherError(f"Манифест FTB содержит повторный путь: {destination}")
@@ -790,7 +808,6 @@ class ModpackImporter:
             })
         return plan
 
-    # --- CurseForge: manifest.json ссылается на моды как projectID/fileID ---
     def _curseforge_download_plan(
         self,
         manifest: dict[str, Any],
@@ -798,19 +815,11 @@ class ModpackImporter:
         confirm_unverified: bool,
         resolve: bool = True,
     ) -> list[dict[str, Any]]:
-        """Build the download plan for a CurseForge manifest.
-
-        Files are resolved through the public cfwidget API; downloads are
-        accepted only from the official forgecdn.net CDN. CurseForge
-        manifests carry no publisher hashes, so every file is treated as an
-        unverified download that the user must confirm.
-        """
+        """build the download plan for a CurseForge manifest."""
         files = manifest.get("files")
         if not isinstance(files, list):
             return []
-        # CurseForge-манифесты никогда не содержат хешей: если вообще есть
-        # файлы для загрузки, согласие «загружать без хеша» нужно до любых
-        # сетевых обращений к каталогу.
+        # curseForge-манифесты никогда не содержат хешей: если вообще есть
         required_files = [
             entry
             for entry in files
@@ -831,9 +840,7 @@ class ModpackImporter:
                 raise LauncherError("manifest.json CurseForge содержит слишком много файлов")
             resolved = self._resolve_curseforge_file(project_id, file_id) if resolve else None
             if resolve and resolved is None:
-                # Необязательный файл можно пропустить; обязательный — нет:
-                # молча терять моды и «притворяться, что импортировали»,
-                # ровно то, что мы здесь чиним.
+                # необязательный файл можно пропустить; обязательный — нет:
                 if bool(entry.get("required") is False):
                     continue
                 raise LauncherError(
@@ -912,7 +919,7 @@ class ModpackImporter:
     ) -> dict[str, Any]:
         try:
             with zipfile.ZipFile(archive_path) as archive:
-                index, manifest, selected = self._archive_plan(archive)
+                index, manifest, selected, skipped_loader = self._archive_plan(archive)
                 downloads = self._modrinth_download_plan(index, confirm_unverified)
                 curseforge = self._curseforge_download_plan(manifest, confirm_unverified=confirm_unverified) if manifest else []
                 curseforge_downloads = [item for item in curseforge if item["url"]]
@@ -944,7 +951,10 @@ class ModpackImporter:
                 trusted_curseforge = True
                 if curseforge_downloads:
                     trusted_curseforge = self._stage_modrinth_files(curseforge_downloads, stage, staged_bytes)
-                return {"trusted_hash": bool(trusted_modrinth and trusted_curseforge)}
+                return {
+                    "trusted_hash": bool(trusted_modrinth and trusted_curseforge),
+                    "skipped_loader_files": skipped_loader,
+                }
         except zipfile.BadZipFile as exc:
             raise LauncherError("Файл не является корректным ZIP-модпаком") from exc
 
@@ -1078,7 +1088,6 @@ class ModpackImporter:
             if not keep_backup:
                 shutil.rmtree(backup_root, ignore_errors=True)
 
-
 def _rows(value: Any, *keys: str) -> list[dict[str, Any]]:
     if isinstance(value, list):
         return [item for item in value if isinstance(item, dict)]
@@ -1089,7 +1098,6 @@ def _rows(value: Any, *keys: str) -> list[dict[str, Any]]:
         if isinstance(rows, list):
             return [item for item in rows if isinstance(item, dict)]
     return []
-
 
 def _ftb_result(item: dict[str, Any]) -> ModpackResult:
     archive = _find_archive(item)
@@ -1107,7 +1115,6 @@ def _ftb_result(item: dict[str, Any]) -> ModpackResult:
         _game_versions(item),
     )
 
-
 def _technic_result(item: dict[str, Any]) -> ModpackResult:
     archive = _find_archive(item)
     return ModpackResult(
@@ -1124,13 +1131,11 @@ def _technic_result(item: dict[str, Any]) -> ModpackResult:
         _game_versions(item),
     )
 
-
 def _ftb_manifest_files(value: Any) -> list[dict[str, Any]]:
     rows = value.get("files") if isinstance(value, dict) else None
     if not isinstance(rows, list):
         return []
     return [dict(item) for item in rows if isinstance(item, dict)]
-
 
 def _ftb_manifest_destination(entry: dict[str, Any]) -> str:
     path = _text(entry.get("path")).replace("\\", "/").strip()
@@ -1142,7 +1147,6 @@ def _ftb_manifest_destination(entry: dict[str, Any]) -> str:
     if not name and path.endswith("/"):
         return ""
     return _archive_destination(path)
-
 
 def _find_archive(value: Any) -> dict[str, Any]:
     if isinstance(value, dict):
@@ -1164,7 +1168,6 @@ def _find_archive(value: Any) -> dict[str, Any]:
                     return found
     return {}
 
-
 def _pick_version(rows: list[dict[str, Any]], game_version: str, version: str) -> dict[str, Any]:
     if version:
         exact = next((row for row in rows if _text(row.get("id") or row.get("version_id") or row.get("version")) == version), None)
@@ -1176,7 +1179,6 @@ def _pick_version(rows: list[dict[str, Any]], game_version: str, version: str) -
             return compatible[0]
     return rows[0] if rows else {}
 
-
 def _game_versions(value: dict[str, Any]) -> list[str]:
     candidates = value.get("game_versions") or value.get("gameVersions") or value.get("minecraftVersions") or value.get("minecraft_versions") or value.get("minecraft")
     if isinstance(candidates, str):
@@ -1185,13 +1187,11 @@ def _game_versions(value: dict[str, Any]) -> list[str]:
         return [item for item in (_text(value) for value in candidates) if item]
     return []
 
-
 def _archive_name(value: str) -> str:
     normalized = value.replace("\\", "/").rstrip("/")
     if "\x00" in normalized or normalized.startswith("/") or any(part in {"", ".", ".."} for part in normalized.split("/")):
         raise LauncherError("Модпак содержит небезопасный путь")
     return normalized
-
 
 def _archive_prefix(names: Iterable[str]) -> str:
     values = list(names)
@@ -1203,27 +1203,51 @@ def _archive_prefix(names: Iterable[str]) -> str:
         return f"{prefix}/"
     return ""
 
+_LOADER_MANAGED_ROOTS = {"versions", "libraries", "natives", "bin"}
+# экспорты MultiMC/Prism кладут игру в .minecraft — как и overrides,
+# это префикс-обёртка, а не настоящий каталог экземпляра.
+_MODPACK_ROOT_PREFIXES = {"overrides", "client-overrides", ".minecraft", "minecraft"}
+_MODPACK_METADATA_FILES = {
+    "manifest.json",
+    "modrinth.index.json",
+    "modlist.html",
+    "minecraftinstance.json",
+    ".technicpack",
+    "mmc-pack.json",
+    "instance.cfg",
+}
+
+def _strip_modpack_prefix(value: str) -> str:
+    parts = _archive_name(value).split("/")
+    while parts and parts[0].casefold() in _MODPACK_ROOT_PREFIXES:
+        parts.pop(0)
+    return "/".join(parts)
+
+def _loader_managed_path(value: str) -> bool:
+    parts = _strip_modpack_prefix(value).split("/")
+    return bool(parts) and parts[0] in _LOADER_MANAGED_ROOTS
 
 def _archive_destination(value: str) -> str:
     normalized = _archive_name(value)
     parts = normalized.split("/")
     if any(part.casefold() == "server-overrides" for part in parts):
         return ""
-    while parts and parts[0].casefold() in {"overrides", "client-overrides"}:
+    while parts and parts[0].casefold() in _MODPACK_ROOT_PREFIXES:
         parts.pop(0)
     if not parts:
         return ""
     if any(part.startswith(".trial-launcher") for part in parts):
         raise LauncherError("Модпак не может заменять служебные файлы лаунчера")
-    if parts[0] in {"manifest.json", "modrinth.index.json", "modlist.html", "minecraftinstance.json", ".technicpack"}:
+    if parts[0] in _MODPACK_METADATA_FILES:
+        return ""
+    if parts[0] in _LOADER_MANAGED_ROOTS:
+        # каталоги versions/, libraries/, natives/ и bin/ создаёт лаунчер:
         return ""
     return "/".join(parts)
-
 
 def _is_server_override(value: str) -> bool:
     parts = _archive_name(value).split("/")
     return any(part.casefold() == "server-overrides" for part in parts)
-
 
 def _extract_zip_file(
     archive: zipfile.ZipFile,
@@ -1246,7 +1270,6 @@ def _extract_zip_file(
                 written += len(chunk)
     return written
 
-
 def _reject_symlink_parents(root: Path, path: Path) -> None:
     current = path
     root = root.resolve()
@@ -1259,11 +1282,9 @@ def _reject_symlink_parents(root: Path, path: Path) -> None:
             raise LauncherError(f"Путь модпака выходит за пределы экземпляра: {path}")
         current = current.parent
 
-
 def _is_symlink(info: zipfile.ZipInfo) -> bool:
     mode = (info.external_attr >> 16) & 0xFFFF
     return stat.S_ISLNK(mode)
-
 
 def _record_modpack(
     target: Path,
@@ -1329,14 +1350,12 @@ def _record_modpack(
             pass
         raise
 
-
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
-
 
 def _assert_modpack_not_installed(
     target: Path,
@@ -1377,7 +1396,6 @@ def _assert_modpack_not_installed(
         ):
             raise LauncherError("Этот модпак уже установлен в выбранный экземпляр")
 
-
 def _validate_archive_url(value: str) -> None:
     try:
         parsed = urlsplit(value)
@@ -1385,7 +1403,6 @@ def _validate_archive_url(value: str) -> None:
         raise LauncherError("URL архива модпака некорректен") from exc
     if parsed.scheme.lower() != "https" or not parsed.hostname or parsed.username or parsed.password:
         raise LauncherError("Архив модпака должен загружаться по HTTPS")
-
 
 def _validate_curseforge_download_url(value: str) -> None:
     """CurseForge files are downloaded only from the official CDN host."""
@@ -1399,13 +1416,11 @@ def _validate_curseforge_download_url(value: str) -> None:
     if not host.endswith("." + CURSEFORGE_DOWNLOAD_HOST_SUFFIX) and host != CURSEFORGE_DOWNLOAD_HOST_SUFFIX:
         raise LauncherError("Файл CurseForge можно загружать только с официального CDN (forgecdn.net)")
 
-
 def _safe_archive_name(value: str) -> str:
     name = Path(str(value).replace("\\", "/")).name
     if not name or name in {".", ".."} or name != str(value).replace("\\", "/"):
         return "modpack.zip"
     return name[:160]
-
 
 def _text(value: Any) -> str:
     if isinstance(value, str):
@@ -1415,7 +1430,6 @@ def _text(value: Any) -> str:
     if isinstance(value, list):
         return ", ".join(item for item in (_text(part) for part in value) if item)
     return str(value).strip() if value is not None else ""
-
 
 def _publisher_hashes(value: dict[str, Any]) -> dict[str, str | None]:
     lengths = {"sha1": 40, "sha256": 64, "sha512": 128}
@@ -1427,10 +1441,8 @@ def _publisher_hashes(value: dict[str, Any]) -> dict[str, str | None]:
         hashes[algorithm] = digest or None
     return hashes
 
-
 def _unverified_download_error(message: str) -> LauncherError:
     return LauncherError(f"[unverified-download] {message}. Подтвердите скачивание явно.")
-
 
 def _validate_curseforge_compatibility(
     manifest: dict[str, Any],
@@ -1490,7 +1502,6 @@ def _validate_curseforge_compatibility(
         "compatible": not mismatches,
         "issues": mismatches,
     }
-
 
 def _validate_mrpack_compatibility(
     index: dict[str, Any],
@@ -1558,13 +1569,11 @@ def _validate_mrpack_compatibility(
         "issues": mismatches,
     }
 
-
 def _int(value: Any) -> int:
     try:
         return max(0, int(value or 0))
     except (TypeError, ValueError):
         return 0
-
 
 def _optional_int(value: Any) -> int | None:
     try:

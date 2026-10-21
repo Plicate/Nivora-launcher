@@ -14,7 +14,6 @@ from .net import HttpClient
 from .operations import OperationCancelled
 from .platform_support import set_private_fd
 
-
 @dataclass
 class ModResult:
     source: str
@@ -25,7 +24,6 @@ class ModResult:
     path: Path | None = None
     version_id: str = ""
     dependencies: list[dict[str, str]] = field(default_factory=list)
-
 
 PROJECT_DIRECTORIES = {
     "mod": "mods",
@@ -40,7 +38,6 @@ MAX_MOD_DEPENDENCY_DEPTH = 16
 MAX_REQUIRED_DEPENDENCIES_PER_VERSION = 128
 MAX_PROJECT_METADATA_BYTES = 64 * 1024
 
-
 @dataclass
 class _ResolvedProject:
     project_id: str
@@ -52,7 +49,6 @@ class _ResolvedProject:
     publisher_hashes: dict[str, str | None] = field(default_factory=dict)
     size: int | None = None
     target: Path | None = None
-
 
 class ModrinthProvider:
     def __init__(
@@ -75,6 +71,7 @@ class ModrinthProvider:
         project_type: str = "mod",
         *,
         sort_by: str = "relevance",
+        offset: int = 0,
     ) -> list[dict[str, Any]]:
         self._validate_project_type(project_type)
         sort_by = str(sort_by).strip().lower()
@@ -95,10 +92,16 @@ class ModrinthProvider:
             "index": sort_by,
             "facets": json.dumps(facets, separators=(",", ":")),
         }
+        offset = max(0, min(10_000, int(offset or 0)))
+        if offset:
+            params["offset"] = str(offset)
         if query.strip():
             params["query"] = query.strip()
         value = self.http.get_json(f"{self.base_url}/search?{urlencode(params)}")
         hits = value.get("hits", []) if isinstance(value, dict) else []
+        # всего найдено — для постраничного каталога.
+        total = value.get("total_hits") if isinstance(value, dict) else None
+        self.last_total = int(total) if isinstance(total, int) and total >= 0 else None
         return [
             item
             for item in hits
@@ -707,7 +710,6 @@ class ModrinthProvider:
         if project_type not in PROJECT_DIRECTORIES:
             raise LauncherError(f"Неизвестный тип Modrinth-проекта: {project_type}")
 
-
 def _project_id(value: Any) -> str:
     project_id = str(value or "").strip()
     if (
@@ -719,7 +721,6 @@ def _project_id(value: Any) -> str:
         raise LauncherError("Некорректный project ID ресурса")
     return project_id
 
-
 def _validate_detail_project_type(value: dict[str, Any], project_id: str, expected: str) -> None:
     actual = str(value.get("project_type") or "").strip()
     if actual and actual != expected:
@@ -727,11 +728,9 @@ def _validate_detail_project_type(value: dict[str, Any], project_id: str, expect
             f"Modrinth-проект {project_id} имеет тип {actual}, ожидался {expected}"
         )
 
-
 def _matches_project_type(value: dict[str, Any], expected: str) -> bool:
     actual = str(value.get("project_type") or "").strip()
     return not actual or actual == expected
-
 
 def _version_is_compatible(
     version: dict[str, Any],
@@ -749,10 +748,8 @@ def _version_is_compatible(
             return False
     return True
 
-
 def _version_id(version: dict[str, Any]) -> str:
     return str(version.get("id") or version.get("version_id") or "").strip()
-
 
 def _primary_file(version: dict[str, Any], project_id: str) -> dict[str, Any]:
     files = version.get("files", [])
@@ -762,17 +759,14 @@ def _primary_file(version: dict[str, Any], project_id: str) -> dict[str, Any]:
         raise LauncherError(f"У Modrinth-проекта {project_id} нет файла для скачивания")
     return primary
 
-
 def _metadata_path(target: Path) -> Path:
     return target.with_name(f".{target.name}{PROJECT_METADATA_SUFFIX}")
-
 
 def _target_for_sidecar(sidecar: Path) -> Path | None:
     if not sidecar.name.startswith(".") or not sidecar.name.endswith(PROJECT_METADATA_SUFFIX):
         return None
     file_name = sidecar.name[1 : -len(PROJECT_METADATA_SUFFIX)]
     return sidecar.with_name(file_name) if file_name else None
-
 
 def _read_metadata(path: Path) -> dict[str, Any]:
     if path.is_symlink() or not path.is_file():
@@ -785,7 +779,6 @@ def _read_metadata(path: Path) -> dict[str, Any]:
         return {}
     return value if isinstance(value, dict) else {}
 
-
 def _write_private_json(path: Path, value: dict[str, Any]) -> None:
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
     fd = os.open(path, flags, 0o600)
@@ -793,14 +786,12 @@ def _write_private_json(path: Path, value: dict[str, Any]) -> None:
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
         json.dump(value, handle, ensure_ascii=False)
 
-
 def _safe_file_name(value: str) -> str:
     normalized = value.replace("\\", "/")
     name = Path(normalized).name
     if not name or name in {".", ".."} or "/" in normalized or name != value:
         raise LauncherError(f"Небезопасное имя файла мода: {value}")
     return name
-
 
 def _publisher_hashes(value: dict[str, Any]) -> dict[str, str | None]:
     lengths = {"sha1": 40, "sha256": 64, "sha512": 128}
@@ -812,7 +803,6 @@ def _publisher_hashes(value: dict[str, Any]) -> dict[str, str | None]:
         hashes[algorithm] = digest or None
     return hashes
 
-
 def _optional_size(value: Any) -> int | None:
     try:
         size = int(value)
@@ -820,14 +810,12 @@ def _optional_size(value: Any) -> int | None:
         return None
     return size if size > 0 else None
 
-
 def _within(path: Path, root: Path) -> bool:
     try:
         path.relative_to(root)
         return True
     except ValueError:
         return False
-
 
 def _within_resolved(path: Path, root: Path) -> bool:
     try:
