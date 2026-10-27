@@ -160,7 +160,7 @@ function formatDate(value: string): string {
   <section class="theme-page">
     <div class="section-intro theme-page-intro">
       <div>
-        <span class="eyebrow">Библиотека тем</span>
+        
         <h2>Готовые темы</h2>
         <p>Начните с готового набора настроек: примените тему из списка, сохраните свой вариант, добавьте тему из файла или установите опубликованную тему с GitHub.</p>
       </div>
@@ -172,11 +172,11 @@ function formatDate(value: string): string {
     </div>
 
     <section class="theme-hero panel">
-      <div class="theme-hero-copy"><span class="eyebrow">Безопасность</span><h3>Что меняют темы</h3><p>Темы меняют палитру, плотность и параметры сайдбара. Игровые файлы, настройки профилей и учётные записи остаются без изменений; архивы тем проверяются перед импортом.</p></div>
+      <div class="theme-hero-copy"><h3>Что меняют темы</h3><p>Темы меняют палитру, плотность и параметры сайдбара. Игровые файлы, настройки профилей и учётные записи остаются без изменений; архивы тем проверяются перед импортом.</p></div>
     </section>
 
     <section class="theme-library-section">
-      <div class="theme-section-heading"><div><span class="eyebrow">Библиотека</span><h3>Доступные темы</h3></div><span class="theme-count">{{ themes.length }}</span></div>
+      <div class="theme-section-heading"><div><h3>Доступные темы</h3></div><span class="theme-count">{{ themes.length }}</span></div>
       <div class="theme-grid">
         <article v-for="theme in themes" :key="`${theme.source}-${theme.id}`" class="theme-card panel" :class="{ 'theme-card--active': activeThemeId === theme.id }">
           <div class="theme-preview" :style="{ '--theme-bg': theme.background, '--theme-panel': theme.panel, '--theme-soft': theme.panel_soft, '--theme-accent': theme.accent, '--theme-strong': theme.accent_strong }"><div class="theme-preview-sidebar"><BrandLogo class="theme-preview-mark" :color="theme.accent" label="Nivora Launcher" /><i /><i /><i /></div><div class="theme-preview-main"><span class="theme-preview-top" /><div class="theme-preview-card"><span /><strong /><small /></div><div class="theme-preview-button" /></div></div>
@@ -200,7 +200,7 @@ function formatDate(value: string): string {
     </section>
 
     <section class="github-theme-panel panel">
-      <div class="theme-section-heading"><div><span class="eyebrow">Внешние темы</span><h3>Каталог GitHub</h3><p>Ищите темы в публичных репозиториях, отмеченных темой <code>nivora-launcher-theme</code>.</p></div><span class="theme-count"><Icon name="globe" :size="15" /></span></div>
+      <div class="theme-section-heading"><div><h3>Каталог GitHub</h3><p>Ищите темы в публичных репозиториях, отмеченных темой <code>nivora-launcher-theme</code>.</p></div><span class="theme-count"><Icon name="globe" :size="15" /></span></div>
       <div class="theme-github-search"><Icon name="search" :size="17" /><input v-model="githubQuery" maxlength="120" placeholder="Название или описание темы" @keyup.enter="searchGithub()" /><button class="button button--small button--accent" type="button" :disabled="githubBusy" @click="searchGithub()">{{ githubBusy ? 'Ищу…' : 'Найти' }}</button></div>
       <p v-if="githubError" class="inline-error">{{ githubError }}</p>
       <div v-if="githubResults.length" class="github-theme-grid">
@@ -223,9 +223,11 @@ function formatDate(value: string): string {
 
     <section class="panel theme-notes"><div class="theme-note"><span class="extension-icon"><Icon name="palette" :size="18" /></span><div><strong>Формат темы</strong><p>ZIP содержит theme.json с настройками и theme.yml с автором, описанием, версией и списком создателей.</p></div></div><div class="theme-note"><span class="extension-icon"><Icon name="check" :size="18" /></span><div><strong>Применение без перезапуска</strong><p>Акцент, цветовые токены, плотность и боковая панель применяются сразу.</p></div></div></section>
 
-    <div v-if="saveDialogOpen" class="modal-scrim" role="presentation" @click.self="saveDialogOpen = false">
+    <Teleport to="body">
+      <Transition name="modal">
+      <div v-if="saveDialogOpen" class="modal-scrim" role="presentation" @click.self="saveDialogOpen = false">
       <section ref="saveDialogElement" class="modal-card theme-save-dialog" role="dialog" tabindex="-1" aria-modal="true" aria-labelledby="theme-save-title" @keydown="handleSaveDialogKeydown">
-        <div class="panel-heading"><div><span class="eyebrow">Сохранение локально</span><h2 id="theme-save-title">Сохранить текущую тему</h2><p>В архив попадут текущие цвета, плотность и режим боковой панели.</p></div><button class="icon-button" type="button" aria-label="Закрыть" @click="saveDialogOpen = false"><Icon name="close" :size="17" /></button></div>
+        <div class="panel-heading"><div><h2 id="theme-save-title">Сохранить текущую тему</h2><p>В архив попадут текущие цвета, плотность и режим боковой панели.</p></div><button class="icon-button" type="button" aria-label="Закрыть" @click="saveDialogOpen = false"><Icon name="close" :size="17" /></button></div>
         <div class="theme-save-fields">
           <label class="field"><span>Название</span><input v-model="saveName" maxlength="80" placeholder="Например, Моя тема" /></label>
           <label class="field"><span>Автор</span><input v-model="saveAuthor" maxlength="120" placeholder="Имя автора" /></label>
@@ -234,7 +236,9 @@ function formatDate(value: string): string {
         </div>
         <div class="modal-actions"><button class="button button--quiet" type="button" @click="saveDialogOpen = false">Отмена</button><button class="button button--accent" type="button" :disabled="busy" @click="saveCurrentTheme"><Icon name="save" :size="14" />Сохранить локально</button></div>
       </section>
-    </div>
+      </div>
+      </Transition>
+    </Teleport>
   </section>
 </template>
 

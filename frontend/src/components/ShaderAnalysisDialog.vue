@@ -158,14 +158,13 @@ function formatSize(value?: number): string {
 
 <template>
   <Teleport to="body">
-    <Transition name="dialog">
       <div class="dialog-scrim" role="presentation" @click.self="emit('close')">
         <section class="dialog-card shader-analysis-card" role="dialog" tabindex="-1" aria-modal="true" aria-label="Анализ шейдера">
           <div class="dialog-icon"><Icon name="image" :size="18" /></div>
           <div class="dialog-copy shader-analysis-copy">
             <div class="dialog-heading">
               <div>
-                <span class="eyebrow">Шейдеры · тест на железе</span>
+                
                 <h2>{{ shader.name }}</h2>
               </div>
               <button class="icon-button" type="button" aria-label="Закрыть" @click="emit('close')"><Icon name="close" :size="16" /></button>
@@ -296,6 +295,5 @@ function formatSize(value?: number): string {
           </div>
         </section>
       </div>
-    </Transition>
   </Teleport>
 </template>

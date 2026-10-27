@@ -146,7 +146,7 @@ export const permissionDescriptions: Record<PluginPermission, string> = {
   'crypto:verify': 'Проверка цифровых подписей и attestations.',
 }
 
-export const THEME_SCHEMA_VERSION = 1 as const
+const THEME_SCHEMA_VERSION = 1 as const
 
 const themeModes: ThemeMode[] = ['system', 'light', 'dark', 'glass']
 const themeDensities: DensityMode[] = ['compact', 'comfortable', 'spacious']
@@ -172,7 +172,7 @@ function themeEnum<T extends string>(value: unknown, field: string, values: read
   return normalized
 }
 
-export function normalizeThemePreset(value: unknown, source: ThemeSource = 'shared'): LauncherThemePreset {
+function normalizeThemePreset(value: unknown, source: ThemeSource = 'shared'): LauncherThemePreset {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Пакет темы должен содержать объект')
   const raw = value as Record<string, unknown>
   if (Number(raw.schema_version ?? THEME_SCHEMA_VERSION) !== THEME_SCHEMA_VERSION) throw new Error('Неподдерживаемая версия схемы темы')
@@ -199,6 +199,39 @@ export function normalizeThemePreset(value: unknown, source: ThemeSource = 'shar
 
 const builtinThemeDefinitions = [
   {
+    id: 'nivora-dark',
+    schema_version: 1,
+    name: 'Nivora Dark',
+    author: 'Nivora Launcher',
+    source: 'builtin',
+    description: 'Основная тема лаунчера: глубокие нейтральные поверхности и спокойный синий акцент.',
+    mode: 'dark',
+    accent: '#3d8bfd',
+    accent_strong: '#6ea8fe',
+    background: '#0f1115',
+    panel: '#15181d',
+    panel_soft: '#20242c',
+    density: 'comfortable',
+    sidebar_mode: 'adaptive',
+    featured: true,
+  },
+  {
+    id: 'nivora-blue',
+    schema_version: 1,
+    name: 'Nivora Blue',
+    author: 'Nivora Launcher',
+    source: 'builtin',
+    description: 'Глубокий тёмно-синий: синеватые панели и спокойный голубой акцент.',
+    mode: 'dark',
+    accent: '#5b8dd9',
+    accent_strong: '#8fb3ea',
+    background: '#0b1220',
+    panel: '#111a2c',
+    panel_soft: '#1a2740',
+    density: 'comfortable',
+    sidebar_mode: 'adaptive',
+  },
+  {
     id: 'midnight-signal',
     schema_version: 1,
     name: 'Basalt & Brass',
@@ -213,7 +246,6 @@ const builtinThemeDefinitions = [
     panel_soft: '#30322c',
     density: 'comfortable',
     sidebar_mode: 'adaptive',
-    featured: true,
   },
   {
     id: 'aurora-mint',
@@ -237,13 +269,13 @@ const builtinThemeDefinitions = [
     name: 'Limestone',
     author: 'Nivora Launcher',
     source: 'builtin',
-    description: 'Тёплая светлая тема с каменными оттенками и спокойным зелёным акцентом.',
+    description: 'Светлая тема: белоснежные поверхности и прохладный синий акцент.',
     mode: 'light',
-    accent: '#65764b',
-    accent_strong: '#4e6037',
-    background: '#e9e8df',
-    panel: '#f2f1e9',
-    panel_soft: '#e2e1d7',
+    accent: '#2f6fdd',
+    accent_strong: '#1f56bd',
+    background: '#f4f6f9',
+    panel: '#ffffff',
+    panel_soft: '#e9edf3',
     density: 'comfortable',
     sidebar_mode: 'adaptive',
   },
@@ -266,17 +298,6 @@ const builtinThemeDefinitions = [
 ] as const
 
 export const launcherThemes: LauncherThemePreset[] = builtinThemeDefinitions.map((theme) => normalizeThemePreset(theme, 'builtin'))
-
-export const safeSyscalls: Array<{ name: string; description: string; permission: PluginPermission }> = [
-  { name: 'launcher.openExternal', description: 'Открывает подтверждённую http(s)-ссылку вне лаунчера.', permission: 'links:open' },
-  { name: 'network.fetch', description: 'Возвращает JSON только с разрешённого домена плагина.', permission: 'network:fetch' },
-  { name: 'network.resolve', description: 'Разрешает DNS только для доменов из allowlist.', permission: 'network:dns' },
-  { name: 'network.ping', description: 'Проверяет TCP-порт и latency без запуска shell-команд.', permission: 'network:ping' },
-  { name: 'launcher.servers', description: 'Хранит server list только в namespace текущего плагина.', permission: 'launcher:servers' },
-  { name: 'storage.namespace', description: 'Читает и пишет только пространство текущего плагина.', permission: 'storage:workspace' },
-  { name: 'ui.mount', description: 'Рисует безопасные декларативные фрагменты без выполнения HTML/JS.', permission: 'ui:compose' },
-  { name: 'launcher.subscribe', description: 'Подписывает плагин на белый список событий лаунчера.', permission: 'events:launcher' },
-]
 
 function assertPermission(manifest: PluginManifest, permission: PluginPermission) {
   if (!manifest.permissions.includes(permission)) throw new Error(`Плагину ${manifest.name} не выдано разрешение ${permission}`)
@@ -301,43 +322,4 @@ function sanitizeFragment(fragment: PluginUiFragment): PluginUiFragment {
     throw new Error('Неподдерживаемый UI-фрагмент плагина')
   }
   return Object.freeze({ ...fragment })
-}
-
-export function createSafePluginHost(manifest: PluginManifest, allowedHosts: string[] = []) {
-  const storagePrefix = `nivora-launcher:plugin:${manifest.id}:`
-  const hosts = new Set((allowedHosts.length ? allowedHosts : manifest.network_hosts || []).map((host) => host.toLowerCase().replace(/\.$/, '')))
-  return {
-    openExternal(value: string) {
-      assertPermission(manifest, 'links:open')
-      window.open(safeUrl(value).toString(), '_blank', 'noopener,noreferrer')
-    },
-    async fetchJson<T>(value: string, init?: RequestInit): Promise<T> {
-      assertPermission(manifest, 'network:fetch')
-      const url = safeNetworkUrl(value)
-      const host = url.hostname.toLowerCase().replace(/\.$/, '')
-      if (!hosts.has(host)) throw new Error('Домен не входит в allowlist плагина')
-      const response = await fetch(url, { ...init, headers: { Accept: 'application/json', ...(init?.headers || {}) } })
-      if (!response.ok) throw new Error(`Сервис вернул ${response.status}`)
-      return response.json() as Promise<T>
-    },
-    storage: {
-      get<T>(key: string): T | undefined {
-        assertPermission(manifest, 'storage:workspace')
-        const raw = localStorage.getItem(`${storagePrefix}${key}`)
-        return raw ? (JSON.parse(raw) as T) : undefined
-      },
-      set<T>(key: string, value: T) {
-        assertPermission(manifest, 'storage:workspace')
-        localStorage.setItem(`${storagePrefix}${key}`, JSON.stringify(value))
-      },
-      remove(key: string) {
-        assertPermission(manifest, 'storage:workspace')
-        localStorage.removeItem(`${storagePrefix}${key}`)
-      },
-    },
-    compose(fragment: PluginUiFragment): Readonly<PluginUiFragment> {
-      assertPermission(manifest, 'ui:compose')
-      return sanitizeFragment(fragment)
-    },
-  }
 }

@@ -4,8 +4,6 @@
 
 ---
 
-<!-- Русская версия / Russian version -->
-
 # Сторонние ресурсы
 
 - `papermc_logo.min.svg` — оригинальный логотип PaperMC с https://assets.papermc.io/brand/papermc_logo.min.svg. Отдельные правила использования находятся на https://docs.papermc.io/misc/assets/; они разрешают использовать марку для обозначения Paper-Server в селекторах. Марка не покрывается GPL-лицензией этого репозитория.

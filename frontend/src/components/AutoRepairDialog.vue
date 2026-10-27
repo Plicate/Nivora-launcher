@@ -81,7 +81,7 @@ async function applySelected() {
     const response = await bridge.autoRepairApply(value.instance_name, chosen)
     results.value = response.results
     emit('repaired', value.instance_name)
-    // вход Microsoft интерактивный (код устройства) — его запускает приложение.
+    // интерактивный вход Microsoft запускается отдельно в приложении
     const loginIds = new Set(chosen.filter((fix) => fix.action === 'login_microsoft').map((fix) => fix.id))
     if (response.results.some((item) => item.ok && loginIds.has(item.id))) emit('login')
     const failed = response.results.filter((item) => !item.ok).length
@@ -125,7 +125,7 @@ function relaunch() {
           <div class="dialog-copy">
             <div class="dialog-heading">
               <div>
-                <span class="eyebrow">Авто-починка</span>
+                
                 <h2 id="auto-repair-title">{{ phase === 'done' ? 'Результат починки' : heading }}</h2>
                 <small class="auto-repair-subtitle">{{ subtitle }}</small>
               </div>

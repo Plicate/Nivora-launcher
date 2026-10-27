@@ -1,15 +1,12 @@
-// экземпляры: инвентаризация game/instances, профиль с иконками и тегами,
 use base64::Engine;
 use regex::Regex;
 use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet};
-use std::fs::{self, File};
+use std::fs;
 use std::io::Write;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
-use zip::CompressionMethod;
-use zip::ZipWriter;
 
 use super::config::{default_settings_object, set_value_on, ConfigStore};
 use super::constants::{
@@ -26,15 +23,6 @@ pub(crate) const INSTANCE_METADATA_FILE: &str = ".nivora-launcher-instance.json"
 const LIVE_STATE_FILE: &str = ".nivora-launcher-live.json";
 const SERVER_CONFIG_FILE: &str = ".nivora-launcher-server.json";
 const INSTANCE_ASSETS_DIR: &str = ".nivora-launcher-assets";
-// каталог песочницы и техно-файлы установщика — не портируем и не экспортируем.
-const CELL_DIRECTORY: &str = ".trial-cell";
-const SERVICE_JSON_FILES: &[&str] = &[
-    ".nivora-launcher.json",
-    ".nivora-launcher-instance.json",
-    ".nivora-launcher-server.json",
-    ".nivora-launcher-live.json",
-    ".nivora-launcher-metrics.json",
-];
 const PROTECTED_SETTINGS_FORMAT: i64 = 1;
 const MAX_PROTECTED_SETTINGS_BYTES: u64 = 64 * 1024;
 
@@ -66,7 +54,7 @@ pub(crate) struct InstanceInfo {
 }
 
 impl InstanceInfo {
-    /// внешняя форма экземпляра — поля как _instance_public в gui_service.
+    /// публичное представление экземпляра
     pub(crate) fn public(&self) -> Value {
         json!({
             "name": self.name,
@@ -123,7 +111,7 @@ impl ExternalImportCandidate {
     }
 }
 
-/// поля профиля, которые меняет update_profile (kwargs из Python).
+/// поля профиля, которые можно изменить через update_profile
 #[derive(Default)]
 pub(crate) struct ProfileUpdate {
     pub(crate) display_name: String,
@@ -180,11 +168,8 @@ impl InstanceStore {
             .filter(|path| !is_symlink(path) && path.is_dir())
             .collect();
         paths.sort_by_key(|path| file_name_of(path).to_lowercase());
-        // Каждая папка читает несколько JSON и (для Java) каталог versions:
-        // на сотнях экземпляров последовательный обход заметен глазом, а
-        // inspect друг от друга не зависит — режем на полосы по нитям.
-        // Порядок сохраняем: результат собирается по индексам, не по
-        // порядку завершения нитей.
+        // проверка каталогов экземпляров нагружает диск, поэтому выполняем её параллельно
+        // результат сохраняет исходный порядок независимо от потоков
         let workers = std::thread::available_parallelism()
             .map(|value| value.get())
             .unwrap_or(1)
@@ -220,8 +205,10 @@ impl InstanceStore {
         if instance_running(&value.path) {
             return Err("Нельзя удалить запущенный экземпляр".to_owned());
         }
-        // bedrock-профиль чистит свой стор (bedrock.py); здесь только дерево
-        // экземпляра и защищённые настройки.
+        // профиль Bedrock очищает собственные данные
+        if value.game_edition == "bedrock" {
+            super::bedrock::delete_profile(&value)?;
+        }
         remove_tree(&value.path)?;
         self.clear_protected_settings(&value.name);
         Ok(())
@@ -240,8 +227,7 @@ impl InstanceStore {
         assert_no_symlinks(&source.path)?;
         copy_tree(&source.path, &target)?;
         super::platform::restrict_dir(&target);
-        // java и профиль безопасности лежат вне экземпляра — переносим
-        // вручную, иначе копия молча откатится на глобальную Java.
+        // копируем путь к Java и профиль безопасности, так как они хранятся вне экземпляра
         let defaults = instance_security_defaults();
         if let Ok(values) = self.load_protected_settings(&source.name, &defaults) {
             let _ = self.save_protected_settings(&file_name_of(&target), &values);
@@ -249,78 +235,8 @@ impl InstanceStore {
         Ok(self.inspect(&target))
     }
 
-    pub(crate) fn export_zip(&self, name: &str, destination: &Path) -> Result<PathBuf, String> {
-        let value = self.get(name)?;
-        if value.game_edition == "bedrock" {
-            return Err("Архивирование профиля Bedrock пока не поддерживается".to_owned());
-        }
-        let destination = resolved_path(destination);
-        let instance_root = value.path.canonicalize().unwrap_or_else(|_| value.path.clone());
-        if within(&destination, &instance_root) {
-            return Err("ZIP-архив нельзя создавать внутри экспортируемого экземпляра".to_owned());
-        }
-        if let Some(parent) = destination.parent() {
-            fs::create_dir_all(parent).map_err(|error| format!("{error}"))?;
-        }
-        assert_no_symlinks(&value.path)?;
-        let parent = destination.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
-        let temporary = parent.join(format!(".{}.{}.part", file_name_of(&destination), unique_suffix()));
-        let result = write_export_archive(&value.path, &temporary);
-        match result {
-            Ok(()) => {
-                super::platform::restrict_file(&temporary);
-                fs::rename(&temporary, &destination).map_err(|error| {
-                    let _ = fs::remove_file(&temporary);
-                    format!("{error}")
-                })?;
-            }
-            Err(error) => {
-                let _ = fs::remove_file(&temporary);
-                return Err(error);
-            }
-        }
-        Ok(destination)
-    }
-
-    /// ярлык запуска — .desktop (Windows-вариант с .cmd остаётся за сборкой).
-    pub(crate) fn create_shortcut(&self, name: &str, destination: Option<&Path>) -> Result<PathBuf, String> {
-        let value = self.get(name)?;
-        if value.game_edition == "bedrock" {
-            return Err("Запускайте Bedrock из Nivora, чтобы проверить версию рантайма и лицензию".to_owned());
-        }
-        let target_dir = match destination {
-            Some(path) => expand_home(path),
-            None => home_dir().join("Desktop"),
-        };
-        fs::create_dir_all(&target_dir).map_err(|error| format!("{error}"))?;
-        let shortcut = target_dir.join(format!("Nivora Launcher - {}.desktop", value.name));
-        let launch_version = if !value.minecraft_version.is_empty() {
-            value.minecraft_version.clone()
-        } else if !value.version_id.is_empty() {
-            value.version_id.clone()
-        } else {
-            value.name.clone()
-        };
-        let mut arguments = launcher_cli_command();
-        arguments.push("launch".to_owned());
-        arguments.push(launch_version);
-        let mut command_parts: Vec<String> = Vec::new();
-        for argument in &arguments {
-            command_parts.push(desktop_exec_argument(argument)?);
-        }
-        let mut command = command_parts.join(" ");
-        if value.loader != "vanilla" {
-            command += &format!(" --loader {}", desktop_exec_argument(&value.loader)?);
-        }
-        command += &format!(" --instance {} --account auto", desktop_exec_argument(&value.name)?);
-        let content = format!(
-            "[Desktop Entry]\nType=Application\nName=Nivora Launcher - {}\nExec={command}\nTerminal=false\nCategories=Game;\n",
-            value.name
-        );
-        fs::write(&shortcut, content).map_err(|error| format!("{error}"))?;
-        super::platform::set_mode(&shortcut, 0o755);
-        Ok(shortcut)
-    }
+    /// ярлыки создает нативный модуль shortcuts.rs (instance_shortcut_create):
+    /// единый реестр, иконки и --launch-instance на всех платформах
 
     pub(crate) fn update_profile(&self, name: &str, values: &ProfileUpdate) -> Result<InstanceInfo, String> {
         let value = self.get(name)?;
@@ -463,7 +379,7 @@ impl InstanceStore {
         let mut seen: HashSet<PathBuf> = HashSet::new();
         let mut values: Vec<ExternalImportCandidate> = Vec::new();
         for candidate in discover_external_instance_candidates(&home_dir()) {
-            // resolve() здесь нестрогий: достаточно canonicalize существующего.
+            // resolve() здесь нестрогий: достаточно canonicalize существующего
             let Some(resolved) = expand_home(&candidate.source_path).canonicalize().ok() else {
                 continue;
             };
@@ -537,8 +453,7 @@ impl InstanceStore {
         self.inspect_with(path, true)
     }
 
-    /// `include_banner`: список экземпляров не читает баннеры (до 8 МиБ
-    /// base64 на каждый), они нужны только на странице экземпляра.
+    /// баннеры читаются только для страницы экземпляра, чтобы не загружать их в списке
     fn inspect_with(&self, path: &Path, include_banner: bool) -> InstanceInfo {
         let metadata = read_profile(path);
         let mut info = profile_public(path, &metadata, epoch_seconds(), include_banner);
@@ -619,7 +534,7 @@ impl InstanceStore {
 }
 
 fn instance_security_defaults() -> Value {
-    // копия INSTANCE_SECURITY_DEFAULTS из instance_workspace.py.
+    // настройки безопасности по умолчанию для нового экземпляра
     json!({
         "java_path": "",
         "security_profile": "strict",
@@ -634,6 +549,10 @@ fn read_profile(path: &Path) -> Map<String, Value> {
         .unwrap_or_default()
 }
 
+pub(crate) fn profile_metadata(path: &Path) -> Map<String, Value> {
+    read_profile(path)
+}
+
 fn profile_public(path: &Path, metadata: &Map<String, Value>, now: f64, include_banner: bool) -> InstanceInfo {
     let name = file_name_of(path);
     let running_seconds = live_play_seconds(path, now);
@@ -641,7 +560,7 @@ fn profile_public(path: &Path, metadata: &Map<String, Value>, now: f64, include_
     let display_name = take_chars(py_str(metadata.get("display_name").unwrap_or(&Value::Null)).trim(), 80);
     let icon_file = py_str(metadata.get("icon_file").unwrap_or(&Value::Null)).trim().to_owned();
     let banner_file = py_str(metadata.get("banner_file").unwrap_or(&Value::Null)).trim().to_owned();
-    // конфиг сервера влияет на kind и подсказывает ядро/порт.
+    // конфигурация сервера влияет на тип экземпляра и помогает определить ядро и порт
     let server_config = read_bounded_json(&path.join(SERVER_CONFIG_FILE), MAX_SERVER_CONFIG_JSON_BYTES)
         .filter(|value| value.is_object())
         .unwrap_or_else(|| json!({}));
@@ -714,7 +633,7 @@ fn profile_public(path: &Path, metadata: &Map<String, Value>, now: f64, include_
     }
 }
 
-/// версия и загрузчик из самого свежего versions/<id>/<id>.json.
+/// версия и загрузчик из самого свежего versions/<id>/<id>.json
 fn latest_version(path: &Path) -> Option<(String, String, String)> {
     let versions = path.join("versions");
     if is_symlink(&versions) || !versions.is_dir() {
@@ -745,7 +664,7 @@ fn latest_version(path: &Path) -> Option<(String, String, String)> {
             candidates.push((modified, metadata_path, value));
         }
     }
-    // python max() оставляет первый максимум — reduce с строгим сравнением.
+    // при равенстве сохраняем первый максимальный результат
     let (_, metadata_path, value) = candidates
         .into_iter()
         .reduce(|best, item| if item.0 > best.0 { item } else { best })?;
@@ -784,8 +703,8 @@ fn latest_version(path: &Path) -> Option<(String, String, String)> {
     Some((version_id, minecraft_version, loader))
 }
 
-/// версия загрузчика: сначала libraries из профиля версии, потом разбор id.
-fn loader_version_of(path: &Path, version_id: &str, minecraft_version: &str, loader: &str) -> String {
+/// версия загрузчика: сначала libraries из профиля версии, потом разбор id
+pub(crate) fn loader_version_of(path: &Path, version_id: &str, minecraft_version: &str, loader: &str) -> String {
     if !matches!(loader, "fabric" | "forge" | "neoforge" | "quilt") {
         return String::new();
     }
@@ -834,8 +753,7 @@ fn loader_version_of(path: &Path, version_id: &str, minecraft_version: &str, loa
     if matches!(loader, "fabric" | "quilt") {
         let prefix = format!("{loader}-loader-");
         if lowered.starts_with(&prefix) {
-            // смещение нашли в lowercase-строке: для не-ASCII id байты могут
-            // разъехаться, поэтому срезаем через get() без паники.
+            // `get()` защищает срез от несовпадения байтового смещения в Unicode
             if let Some(rest) = version_id.get(prefix.len()..) {
                 let mut version = rest.to_owned();
                 let suffix = format!("-{minecraft_version}");
@@ -890,10 +808,7 @@ fn valid_image(content: &[u8], suffix: &str) -> bool {
     }
 }
 
-/// Кеш data-URL картинок профиля: список экземпляров читает и кодирует
-/// иконки при каждом bootstrap, а base64 больших PNG — самая дорогая часть
-/// чтения профиля. Ключ — путь, валидность — mtime+размер: смена иконки
-/// инвалидирует запись автоматически.
+/// кэширует URL иконок по пути, времени изменения и размеру файла
 struct CachedImage {
     modified_ns: u128,
     len: u64,
@@ -901,7 +816,7 @@ struct CachedImage {
 }
 
 static IMAGE_URL_CACHE: Mutex<Option<HashMap<PathBuf, CachedImage>>> = Mutex::new(None);
-/// верхняя граница кеша, чтобы сотни больших иконок не съели память.
+/// верхняя граница кеша, чтобы сотни больших иконок не съели память
 const IMAGE_URL_CACHE_MAX_BYTES: usize = 64 * 1024 * 1024;
 
 fn image_data_url(path: &Path, limit: u64) -> String {
@@ -1071,6 +986,46 @@ pub(crate) fn duplicate_instance(request: &Value) -> Result<Value, String> {
     let config = ConfigStore::load()?;
     let value = InstanceStore::new(&config)?.duplicate(source, target)?;
     Ok(json!({ "instance": value.public() }))
+}
+
+/// импортирует найденный экземпляр из Prism или MultiMC и сообщает об изменении рабочей области
+pub(crate) fn external_instance_import(request: &Value) -> Result<Value, String> {
+    let source_path = request.get("source_path").and_then(Value::as_str).unwrap_or_default();
+    let target_name = request.get("target_name").and_then(Value::as_str).unwrap_or_default().trim().to_owned();
+    let target = if target_name.is_empty() { None } else { Some(target_name.as_str()) };
+    let config = ConfigStore::load()?;
+    let store = InstanceStore::new(&config)?;
+    let value = store.import_external_instance(source_path, target)?;
+    super::events::emit_status_event("workspace-changed", "Экземпляр импортирован.");
+    let instances: Vec<Value> = store.list().iter().map(|info| info.public()).collect();
+    Ok(json!({ "instance": value.public(), "instances": instances }))
+}
+
+/// обновляет профиль экземпляра, включая иконки, баннер, заметки и метки
+pub(crate) fn update_instance_profile(request: &Value) -> Result<Value, String> {
+    let name = request.get("name").and_then(Value::as_str).unwrap_or_default();
+    let text_field = |key: &str| request.get(key).and_then(Value::as_str).unwrap_or_default().to_owned();
+    let update = ProfileUpdate {
+        display_name: text_field("display_name"),
+        description: text_field("description"),
+        group: text_field("group"),
+        icon_file_name: text_field("icon_file_name"),
+        icon_data: text_field("icon_data"),
+        banner_file_name: text_field("banner_file_name"),
+        banner_data: text_field("banner_data"),
+        clear_icon: request.get("clear_icon").and_then(Value::as_bool).unwrap_or(false),
+        clear_banner: request.get("clear_banner").and_then(Value::as_bool).unwrap_or(false),
+        notes: request.get("notes").and_then(Value::as_str).map(str::to_owned),
+        tags: request
+            .get("tags")
+            .and_then(Value::as_array)
+            .map(|items| items.iter().filter_map(|value| value.as_str().map(str::to_owned)).collect()),
+    };
+    let config = ConfigStore::load()?;
+    let store = InstanceStore::new(&config)?;
+    let profile = store.update_profile(name, &update)?;
+    super::events::emit_status_event("workspace-changed", "Профиль экземпляра обновлён.");
+    Ok(json!({ "instance": profile.public(), "groups": store.groups() }))
 }
 
 fn discover_external_instance_candidates(home: &Path) -> Vec<ExternalImportCandidate> {
@@ -1494,136 +1449,57 @@ fn read_key_value_file(path: &Path, limit: u64) -> HashMap<String, String> {
     values
 }
 
-fn write_export_archive(instance_path: &Path, temporary: &Path) -> Result<(), String> {
-    let file = File::create(temporary).map_err(|error| format!("{error}"))?;
-    let mut writer = ZipWriter::new(file);
-    let options = zip::write::SimpleFileOptions::default()
-        .compression_method(CompressionMethod::Deflated)
-        .compression_level(Some(6));
-    let instance_name = file_name_of(instance_path);
-    let mut files: Vec<PathBuf> = Vec::new();
-    collect_archive_files(instance_path, &mut files);
-    for path in files {
-        let relative = path.strip_prefix(instance_path).map_err(|error| format!("{error}"))?;
-        // внутри архива путь начинается с имени каталога экземпляра.
-        let mut archive_path = instance_name.clone();
-        for component in relative.components() {
-            archive_path.push('/');
-            archive_path.push_str(&component.as_os_str().to_string_lossy());
-        }
-        writer
-            .start_file(archive_path, options)
-            .map_err(|error| format!("{error}"))?;
-        let mut source = File::open(&path).map_err(|error| format!("{error}"))?;
-        std::io::copy(&mut source, &mut writer).map_err(|error| format!("{error}"))?;
-    }
-    writer.finish().map_err(|error| format!("{error}"))?;
-    Ok(())
-}
-
-fn collect_archive_files(directory: &Path, output: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(directory) else {
-        return;
-    };
-    let mut children: Vec<PathBuf> = entries.filter_map(|entry| entry.ok()).map(|entry| entry.path()).collect();
-    children.sort_by_key(|path| file_name_of(path).to_lowercase());
-    for child in children {
-        if is_symlink(&child) {
-            continue;
-        }
-        if child.is_dir() {
-            collect_archive_files(&child, output);
-        } else if child.is_file() {
-            let name = file_name_of(&child);
-            let inside_cell = child
-                .strip_prefix(directory)
-                .map(|relative| {
-                    relative.components().any(|component| component.as_os_str() == CELL_DIRECTORY)
-                })
-                .unwrap_or(false);
-            if inside_cell || SERVICE_JSON_FILES.contains(&name.as_str()) || name.starts_with(".trial-loader-installer-") {
-                continue;
-            }
-            output.push(child);
-        }
-    }
-}
-
-fn remove_tree(path: &Path) -> Result<(), String> {
-    let Ok(meta) = fs::symlink_metadata(path) else {
-        return Ok(());
-    };
-    if meta.is_symlink() || meta.is_file() {
-        fs::remove_file(path).map_err(|error| format!("{error}"))?;
-        return Ok(());
-    }
-    if meta.is_dir() {
-        if let Ok(entries) = fs::read_dir(path) {
-            for child in entries.filter_map(|entry| entry.ok()) {
-                remove_tree(&child.path())?;
-            }
-        }
-        fs::remove_dir(path).map_err(|error| format!("{error}"))?;
-    }
-    Ok(())
-}
-
-fn copy_tree(source: &Path, target: &Path) -> Result<(), String> {
-    fs::create_dir_all(target).map_err(|error| format!("{error}"))?;
-    let entries = fs::read_dir(source).map_err(|error| format!("{error}"))?;
-    for entry in entries.filter_map(|entry| entry.ok()) {
-        let path = entry.path();
-        if is_symlink(&path) {
-            continue;
-        }
-        let destination = target.join(entry.file_name());
-        if path.is_dir() {
-            copy_tree(&path, &destination)?;
-        } else if path.is_file() {
-            fs::copy(&path, &destination).map_err(|error| format!("{error}"))?;
-        }
-    }
-    Ok(())
-}
-
+/// рекурсивная проверка "в дереве нет символьных ссылок": копирование и
+/// архивирование экземпляра не должны следовать по ссылкам за его пределы
 fn assert_no_symlinks(root: &Path) -> Result<(), String> {
-    let mut pending = vec![root.to_path_buf()];
-    while let Some(directory) = pending.pop() {
-        let entries = match fs::read_dir(&directory) {
-            Ok(entries) => entries,
-            Err(error) => return Err(format!("{error}")),
-        };
+    if is_symlink(root) {
+        return Err(format!("Каталог экземпляра является символьной ссылкой: {}", root.display()));
+    }
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(directory) = stack.pop() {
+        let entries = fs::read_dir(&directory).map_err(|error| format!("Не удалось прочитать {}: {error}", directory.display()))?;
         for entry in entries.filter_map(|entry| entry.ok()) {
             let path = entry.path();
             if is_symlink(&path) {
-                return Err(format!("Экземпляр содержит небезопасную символьную ссылку: {}", file_name_of(&path)));
+                return Err(format!(
+                    "Экземпляр содержит символьную ссылку: {}",
+                    path.strip_prefix(root).unwrap_or(&path).display()
+                ));
             }
             if path.is_dir() {
-                pending.push(path);
+                stack.push(path);
             }
         }
     }
     Ok(())
 }
 
-fn desktop_exec_argument(value: &str) -> Result<String, String> {
-    if value.contains('\0') || value.contains('\n') || value.contains('\r') {
-        return Err("Аргумент ярлыка содержит недопустимые символы".to_owned());
+/// копирует дерево, предварительно проверенное `assert_no_symlinks`
+fn copy_tree(source: &Path, destination: &Path) -> Result<(), String> {
+    fs::create_dir_all(destination).map_err(|error| format!("Не удалось создать {}: {error}", destination.display()))?;
+    let entries = fs::read_dir(source).map_err(|error| format!("Не удалось прочитать {}: {error}", source.display()))?;
+    for entry in entries.filter_map(|entry| entry.ok()) {
+        let path = entry.path();
+        let target = destination.join(entry.file_name());
+        if path.is_dir() {
+            copy_tree(&path, &target)?;
+            continue;
+        }
+        if path.is_file() {
+            fs::copy(&path, &target).map_err(|error| {
+                format!("Не удалось скопировать {}: {error}", path.display())
+            })?;
+        }
     }
-    let escaped = value
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('`', "\\`")
-        .replace('$', "\\$")
-        .replace('%', "%%");
-    Ok(format!("\"{escaped}\""))
+    Ok(())
 }
 
-fn launcher_cli_command() -> Vec<String> {
-    // упакованный бэкенд запускает CLI как <exe> --cli (scripts/backend_entry.py).
-    match std::env::current_exe() {
-        Ok(executable) => vec![executable.to_string_lossy().to_string(), "--cli".to_owned()],
-        Err(_) => vec!["nivora-launcher-backend".to_owned()],
+/// удаляет дерево экземпляра; отсутствие каталога не считается ошибкой
+fn remove_tree(path: &Path) -> Result<(), String> {
+    match fs::remove_dir_all(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("{error}")),
     }
 }
 
@@ -1632,18 +1508,6 @@ fn epoch_seconds() -> f64 {
         .duration_since(UNIX_EPOCH)
         .map(|value| value.as_secs_f64())
         .unwrap_or(0.0)
-}
-
-fn unique_suffix() -> String {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|value| value.as_nanos() as u64)
-        .unwrap_or(0);
-    let mut mixed = nanos ^ (u64::from(std::process::id()) << 32);
-    mixed = mixed.wrapping_add(0x9e37_79b9_7f4a_7c15);
-    mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-    format!("{:08x}", (mixed ^ (mixed >> 31)) & 0xffff_ffff)
 }
 
 fn is_symlink(path: &Path) -> bool {
@@ -1668,34 +1532,12 @@ fn expand_home(path: &Path) -> PathBuf {
     path.to_path_buf()
 }
 
-fn resolved_path(path: &Path) -> PathBuf {
-    let expanded = expand_home(path);
-    if let Ok(resolved) = expanded.canonicalize() {
-        return resolved;
-    }
-    let absolute = if expanded.is_absolute() {
-        expanded
-    } else {
-        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")).join(&expanded)
-    };
-    let mut normalized = PathBuf::new();
-    for component in absolute.components() {
-        match component {
-            Component::ParentDir => {
-                normalized.pop();
-            }
-            Component::CurDir => {}
-            other => normalized.push(other.as_os_str()),
-        }
-    }
-    normalized
-}
 
 fn take_chars(value: &str, limit: usize) -> String {
     value.chars().take(limit).collect()
 }
 
-/// str() по-питоновски для скаляров; None и контейнеры — пустая строка.
+/// преобразует скаляр в строку; null и контейнеры дают пустую строку
 fn py_str(value: &Value) -> String {
     match value {
         Value::String(text) => text.clone(),
@@ -1774,7 +1616,7 @@ fn valid_version_id(id: &str) -> bool {
         && id.chars().all(|character| character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '+' | '-'))
 }
 
-/// версия игры из id: последний фрагмент, предпочтительно 1.x/2.x.
+/// версия игры из id: последний фрагмент, предпочтительно 1.x/2.x
 fn version_from_id(version_id: &str) -> String {
     static VERSION_RE: OnceLock<Regex> = OnceLock::new();
     let regex = VERSION_RE.get_or_init(|| Regex::new(r"\d+\.\d+(?:\.\d+)?").unwrap());
@@ -1807,7 +1649,7 @@ mod tests {
     use std::fs;
     use std::sync::{Mutex, MutexGuard};
 
-    /// тесты меняют XDG/HOME — гонки недопустимы, поэтому держим замок.
+    /// тесты меняют XDG/HOME, поэтому замок исключает гонки
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn env_guard() -> MutexGuard<'static, ()> {
@@ -1827,10 +1669,10 @@ mod tests {
         std::env::set_var("XDG_CONFIG_HOME", root.join("config"));
         std::env::set_var("XDG_DATA_HOME", root.join("data"));
         std::env::set_var("XDG_CACHE_HOME", root.join("cache"));
-        // каталог игры должен существовать до валидации в ConfigStore.
+        // каталог игры должен существовать до валидации в ConfigStore
         fs::create_dir_all(root.join("game")).unwrap();
         let config = ConfigStore::load().unwrap();
-        // свой каталог игры, как это делает GUI после выбора папки.
+        // свой каталог игры, как это делает GUI после выбора папки
         let mut settings = config.settings().clone();
         set_value_on(&mut settings, "game_dir", &json!(root.join("game").to_string_lossy())).unwrap();
         atomic_json_write(&config.paths.settings_file, &settings, true).unwrap();
@@ -1860,7 +1702,7 @@ mod tests {
         let version_json = oversized.join("versions").join("fabric-test").join("fabric-test.json");
         fs::create_dir_all(version_json.parent().unwrap()).unwrap();
         write_json(&oversized.join(INSTANCE_METADATA_FILE), json!({}));
-        let mut big = fs::File::create(&version_json).unwrap();
+        let big = fs::File::create(&version_json).unwrap();
         big.set_len(MAX_INSTANCE_VERSION_JSON_BYTES + 1).unwrap();
         let instance = store.get("oversized-metadata").unwrap();
         assert_eq!(instance.version_id, "");
@@ -1871,7 +1713,7 @@ mod tests {
     fn version_detection_reports_loader_and_version() {
         let _guard = env_guard();
         let (_root, store) = store_with_env("versions");
-        // get() прогоняет имя через safe_instance_name: «Fabric Test» →
+        // get() прогоняет имя через safe_instance_name: "Fabric Test" →
         let instance = store.root().join("Fabric-Test");
         let version_dir = instance.join("versions").join("fabric-loader-0.92.2-1.20.4");
         fs::create_dir_all(&version_dir).unwrap();
@@ -1976,9 +1818,9 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_copies_files_and_export_skips_service_files() {
+    fn duplicate_copies_files_and_keeps_game_data() {
         let _guard = env_guard();
-        let (root, store) = store_with_env("duplicate");
+        let (_root, store) = store_with_env("duplicate");
         let alpha = store.root().join("alpha");
         fs::create_dir_all(alpha.join("mods")).unwrap();
         write_json(
@@ -1993,20 +1835,6 @@ mod tests {
         let again = store.duplicate("alpha", "beta").unwrap_err();
         assert!(again.contains("Экземпляр уже существует"), "{again}");
 
-        let archive = root.join("export").join("alpha.zip");
-        let exported = store.export_zip("alpha", &archive).unwrap();
-        assert!(exported.is_file());
-        // служебные json и cell в архив не попадают, игровые файлы — да.
-        let mut zip = zip::ZipArchive::new(fs::File::open(&archive).unwrap()).unwrap();
-        let mut names: Vec<String> = Vec::new();
-        for index in 0..zip.len() {
-            names.push(zip.by_index(index).unwrap().name().to_owned());
-        }
-        assert!(names.contains(&"alpha/mods/mod.jar".to_owned()));
-        assert!(names.iter().all(|name| !name.contains(".nivora-launcher") && !name.contains(".trial-cell")));
-        // архив внутри экземпляра запрещён
-        let inside = alpha.join("nested.zip");
-        assert!(store.export_zip("alpha", &inside).unwrap_err().contains("нельзя создавать внутри"));
     }
 
     #[test]
@@ -2044,32 +1872,13 @@ mod tests {
     }
 
     #[test]
-    fn shortcut_writes_desktop_entry() {
-        let _guard = env_guard();
-        let (root, store) = store_with_env("shortcut");
-        let alpha = store.root().join("alpha");
-        fs::create_dir_all(&alpha).unwrap();
-        write_json(&alpha.join(INSTANCE_METADATA_FILE), json!({ "display_name": "Alpha" }));
-        let destination = root.join("shortcuts");
-        let shortcut = store.create_shortcut("alpha", Some(&destination)).unwrap();
-        let content = fs::read_to_string(&shortcut).unwrap();
-        assert!(content.contains("[Desktop Entry]"));
-        assert!(content.contains("Name=Nivora Launcher - alpha"));
-        assert!(content.contains("--instance \"alpha\" --account auto"));
-    }
-
-    #[test]
-    fn shortcut_argument_escapes_percent_and_quotes() {
-        assert_eq!(desktop_exec_argument("a%b\"c").unwrap(), "\"a%%b\\\"c\"");
-        assert!(desktop_exec_argument("bad\nline").is_err());
+    fn loader_and_version_parsing_helpers() {
         assert_eq!(loader_from_version("Neoforge 21"), "neoforge");
         assert_eq!(version_from_id("1.8.9-forge1.8.9"), "1.8.9");
         assert!(!valid_version_id("../evil"));
     }
 
-    /// Ручной бенчмарк списка экземпляров: `cargo test --lib
-    /// benchmark_list_500 -- --ignored --nocapture`. Числа печатаются в
-    /// stdout и попадают в отчёт оптимизаций (baseline vs after).
+    /// измеряет время чтения списка из 500 экземпляров; запуск описан в атрибуте `ignore`
     #[test]
     #[ignore = "бенчмарк: cargo test --lib benchmark_list_500 -- --ignored --nocapture"]
     fn benchmark_list_500_instances() {

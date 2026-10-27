@@ -21,8 +21,7 @@ test('normalizeHotkey canonicalizes synonyms and rejects bare modifiers', () => 
   assert.equal(normalizeHotkey('мама+мыла', 'F7'), 'F7')
   assert.equal(normalizeHotkey('Ctrl+F13', 'F7'), 'Ctrl+F13')
   assert.equal(normalizeHotkey('Ctrl+F25', 'F7'), 'F7')
-  // «Ctrl+,» — дефолт настроек лаунчера: пунктуация обязана выживать,
-  // раньше её затирало фолбэком и клавиша «Открыть настройки» умирала
+  // "Ctrl+," должно оставаться допустимым сочетанием
   assert.equal(normalizeHotkey('Ctrl+,', 'F7'), 'Ctrl+,')
   assert.equal(normalizeHotkey('ctrl+comma', 'F7'), 'Ctrl+,')
   assert.equal(normalizeHotkey('Ctrl+.', 'F7'), 'Ctrl+.')
@@ -31,13 +30,14 @@ test('normalizeHotkey canonicalizes synonyms and rejects bare modifiers', () => 
 })
 
 test('hotkeyFromEvent assembles combinations from live key presses', async () => {
-  const { hotkeyFromEvent } = await import('../src/services/overlayHelpers.ts')
+  const { hotkeyFromEvent, hotkeyModifiersFromEvent } = await import('../src/services/overlayHelpers.ts')
   assert.equal(hotkeyFromEvent({ ctrlKey: true, shiftKey: false, altKey: false, metaKey: false, key: 'Tab' }), 'Ctrl+Tab')
   assert.equal(hotkeyFromEvent({ ctrlKey: false, shiftKey: true, altKey: true, metaKey: false, key: 'r' }), 'Alt+Shift+R')
   assert.equal(hotkeyFromEvent({ key: 'F9' }), 'F9')
   assert.equal(hotkeyFromEvent({ key: ' ' }), 'Space')
   assert.equal(hotkeyFromEvent({ key: 'ArrowLeft' }), 'Left')
   assert.equal(hotkeyFromEvent({ ctrlKey: true, key: 'Shift' }), '')
+  assert.deepEqual(hotkeyModifiersFromEvent({ ctrlKey: true, shiftKey: true, key: 'Shift' }), ['Ctrl', 'Shift'])
   assert.equal(hotkeyFromEvent({ ctrlKey: true, key: 'ф' }), '')
   assert.equal(hotkeyFromEvent({ key: 'Delete' }), 'Delete')
   assert.equal(hotkeyFromEvent({ ctrlKey: true, key: ',' }), 'Ctrl+,')
@@ -51,6 +51,14 @@ test('recordingFileName reports the last path segment on every platform style', 
   assert.equal(recordingFileName(''), '')
 })
 
+test('hidden overlay requests do not create a second window', async () => {
+  const { overlayWindowAction } = await import('../src/services/overlayHelpers.ts')
+  assert.equal(overlayWindowAction(false, false), 'noop')
+  assert.equal(overlayWindowAction(false, true), 'hide')
+  assert.equal(overlayWindowAction(true, false), 'create')
+  assert.equal(overlayWindowAction(true, true), 'show')
+})
+
 test('overlayWindowRequested detects the overlay query parameter', () => {
   globalThis.window = { location: { search: '?window=overlay' } }
   assert.equal(overlayWindowRequested(), true)
@@ -62,10 +70,7 @@ test('overlayWindowRequested detects the overlay query parameter', () => {
 })
 
 test('overlayWindowRequested falls back to the Tauri window label', () => {
-  // Параметр URL может потеряться (редиректы, особенности протокола
-  // webview) — тогда окно оверлея рисовало ВЕСЬ лаунчер заново: второй
-  // bootstrap, «уменьшенное окно-клон». Метка окна из рантайма Tauri
-  // не теряется никогда.
+  // метка Tauri остаётся доступна, если параметр URL потерялся при редиректе
   globalThis.window = {
     location: { search: '' },
     __TAURI_INTERNALS__: { metadata: { currentWindow: { label: 'nivora-overlay' } } },
@@ -105,14 +110,12 @@ test('overlayWindowPlan: совместимый план для Wayland и ав�
     assert.equal(plan.center, true, mode)
     assert.equal(plan.url, 'index.html?window=overlay&opaque=1', mode)
     assert.equal(plan.x, undefined, mode)
-    // Размер ограничен 980×640, но не меньше 640×480
     assert.equal(plan.width, 980, mode)
     assert.equal(plan.height, 640, mode)
   }
   const tiny = overlayWindowPlan('wayland', { width: 100, height: 100, x: 0, y: 0 })
   assert.equal(tiny.width, 640)
   assert.equal(tiny.height, 480)
-  // А в X11-режиме маленькая геометрия поднимается до минимума 640×480
   const tinyX11 = overlayWindowPlan('x11', { width: 100, height: 100, x: 0, y: 0 })
   assert.equal(tinyX11.width, 640)
   assert.equal(tinyX11.height, 480)

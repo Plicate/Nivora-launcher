@@ -28,6 +28,8 @@ const newWhitelistName = ref('')
 const newOpName = ref('')
 const newOpLevel = ref(4)
 const loadError = ref('')
+const propertiesMissing = ref(false)
+let loadGeneration = 0
 
 const opLevelOptions: SelectOption[] = [
   { value: '1', label: '1', meta: 'обход спавн-защиты' },
@@ -36,7 +38,7 @@ const opLevelOptions: SelectOption[] = [
   { value: '4', label: '4', meta: 'полный доступ' },
 ]
 
-// ключи, которым даём понятные подписи; остальное показываем как есть.
+// ключи, которым даём понятные подписи; остальное показываем как есть
 const propertyLabels: Record<string, string> = {
   'motd': 'MOTD',
   'max-players': 'Максимум игроков',
@@ -89,13 +91,41 @@ function errorMessage(error: unknown): string {
   return typeof error === 'string' ? error : 'Неизвестная ошибка'
 }
 
-function parseJsonArray(content: string): unknown[] {
+function playerName(value: unknown): string | null {
+  if (typeof value !== 'string') return null
+  const name = value.trim()
+  return /^[A-Za-z0-9_]{3,16}$/.test(name) ? name : null
+}
+
+function parseJsonArray(content: string, path: string): unknown[] {
+  let parsed: unknown
   try {
-    const parsed = JSON.parse(content || '[]')
-    return Array.isArray(parsed) ? parsed : []
+    parsed = JSON.parse(content)
   } catch {
-    return []
+    throw new Error(`${path}: некорректный JSON`)
   }
+  if (!Array.isArray(parsed)) throw new Error(`${path}: ожидался JSON-массив`)
+  return parsed
+}
+
+function parseWhitelist(content: string): WhitelistEntry[] {
+  return parseJsonArray(content, 'whitelist.json').map((entry, index) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw new Error(`whitelist.json: некорректная запись ${index + 1}`)
+    const name = playerName((entry as Record<string, unknown>).name)
+    if (!name) throw new Error(`whitelist.json: некорректное имя игрока в записи ${index + 1}`)
+    return { name }
+  })
+}
+
+function parseOps(content: string): OpEntry[] {
+  return parseJsonArray(content, 'ops.json').map((entry, index) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw new Error(`ops.json: некорректная запись ${index + 1}`)
+    const record = entry as Record<string, unknown>
+    const name = playerName(record.name)
+    if (!name) throw new Error(`ops.json: некорректное имя игрока в записи ${index + 1}`)
+    if (!Number.isInteger(record.level) || Number(record.level) < 1 || Number(record.level) > 4) throw new Error(`ops.json: некорректный уровень прав в записи ${index + 1}`)
+    return { name, level: Number(record.level) }
+  })
 }
 
 function parseProperties(content: string): PropertyRow[] {
@@ -111,114 +141,140 @@ function serializeProperties(rows: PropertyRow[]): string {
   return `${rows.map((row) => `${row.key}=${row.value}`).join('\n')}\n`
 }
 
-async function readOptional(path: string): Promise<string | null> {
+async function readOptional(serverName: string, path: string): Promise<string | null> {
   try {
-    return (await bridge.serverFileRead(props.name, path)).content
-  } catch {
-    return null
+    return (await bridge.serverFileRead(serverName, path)).content
+  } catch (error) {
+    const message = errorMessage(error)
+    if (message !== 'Файл недоступен' && message !== 'Текстовый файл не найден или недоступен') throw error
+    const { files } = await bridge.serverFileList(serverName)
+    if (!files.some((file) => file.kind === 'file' && file.path === path)) return null
+    throw error
   }
 }
 
 async function load() {
+  const generation = ++loadGeneration
+  const serverName = props.name
   loading.value = true
   loadError.value = ''
+  propertiesMissing.value = false
+  whitelist.value = []
+  ops.value = []
+  properties.value = []
   try {
     const [whitelistRaw, opsRaw, propertiesRaw] = await Promise.all([
-      readOptional('whitelist.json'),
-      readOptional('ops.json'),
-      readOptional('server.properties'),
+      readOptional(serverName, 'whitelist.json'),
+      readOptional(serverName, 'ops.json'),
+      readOptional(serverName, 'server.properties'),
     ])
-    whitelist.value = parseJsonArray(whitelistRaw || '[]')
-      .map((entry) => ({ name: String((entry as Record<string, unknown>).name || '').trim() }))
-      .filter((entry) => entry.name)
-    ops.value = parseJsonArray(opsRaw || '[]')
-      .map((entry) => {
-        const record = entry as Record<string, unknown>
-        const level = Number(record.level)
-        return { name: String(record.name || '').trim(), level: Number.isFinite(level) ? Math.min(4, Math.max(1, Math.round(level))) : 4 }
-      })
-      .filter((entry) => entry.name)
-    properties.value = propertiesRaw === null ? [] : parseProperties(propertiesRaw)
-    if (propertiesRaw === null && section.value === 'properties') loadError.value = 'server.properties ещё не создан: запустите сервер один раз, и файл появится.'
+    const loadedWhitelist = parseWhitelist(whitelistRaw ?? '[]')
+    const loadedOps = parseOps(opsRaw ?? '[]')
+    const loadedProperties = propertiesRaw === null ? [] : parseProperties(propertiesRaw)
+    if (generation !== loadGeneration || serverName !== props.name) return
+    whitelist.value = loadedWhitelist
+    ops.value = loadedOps
+    properties.value = loadedProperties
+    propertiesMissing.value = propertiesRaw === null
   } catch (error) {
-    loadError.value = errorMessage(error)
+    if (generation === loadGeneration && serverName === props.name) loadError.value = errorMessage(error)
   } finally {
-    loading.value = false
+    if (generation === loadGeneration && serverName === props.name) loading.value = false
   }
 }
 
 onMounted(load)
 watch(() => props.name, load)
 
-async function sendCommand(command: string): Promise<boolean> {
+async function sendCommand(serverName: string, command: string): Promise<boolean> {
   try {
-    await bridge.serverCommand(props.name, command)
+    await bridge.serverCommand(serverName, command)
     return true
   } catch (error) {
-    emit('toast', errorMessage(error))
+    if (props.name === serverName) emit('toast', errorMessage(error))
     return false
   }
 }
 
 async function addWhitelist() {
-  const name = newWhitelistName.value.trim()
-  if (!name) return
+  const name = playerName(newWhitelistName.value)
+  if (!name) {
+    emit('toast', 'Введите корректный ник игрока (3–16 латинских букв, цифр или _)')
+    return
+  }
+  const serverName = props.name
+  const running = props.running
   busy.value = true
   try {
-    if (props.running) {
-      if (!(await sendCommand(`whitelist add ${name}`))) return
-      whitelist.value = [...whitelist.value, { name }]
-      if (!(await sendCommand('whitelist reload'))) return
+    if (running) {
+      if (!(await sendCommand(serverName, `whitelist add ${name}`))) return
+      if (props.name === serverName) whitelist.value = [...whitelist.value, { name }]
+      if (!(await sendCommand(serverName, 'whitelist reload'))) return
     } else {
       if (whitelist.value.some((entry) => entry.name.toLowerCase() === name.toLowerCase())) {
         emit('toast', 'Этот игрок уже в списке')
         return
       }
-      whitelist.value = [...whitelist.value, { name }]
-      await bridge.serverFileWrite(props.name, 'whitelist.json', `${JSON.stringify(whitelist.value.map((entry) => ({ name: entry.name })), null, 2)}\n`)
+      const nextWhitelist = [...whitelist.value, { name }]
+      await bridge.serverFileWrite(serverName, 'whitelist.json', `${JSON.stringify(nextWhitelist.map((entry) => ({ name: entry.name })), null, 2)}\n`)
+      if (props.name === serverName) whitelist.value = nextWhitelist
     }
-    newWhitelistName.value = ''
-    emit('toast', props.running ? `Игрок ${name} добавлен в белый список` : `Белый список сохранён (${whitelist.value.length})`)
+    if (props.name === serverName) {
+      newWhitelistName.value = ''
+      emit('toast', running ? `Игрок ${name} добавлен в белый список` : `Белый список сохранён (${whitelist.value.length})`)
+    }
   } finally {
     busy.value = false
   }
 }
 
 async function removeWhitelist(entry: WhitelistEntry) {
+  const serverName = props.name
+  const running = props.running
+  if (!playerName(entry.name)) {
+    emit('toast', 'Нельзя удалить игрока с некорректным ником')
+    return
+  }
   busy.value = true
   try {
-    if (props.running) {
-      if (!(await sendCommand(`whitelist remove ${entry.name}`))) return
-      if (!(await sendCommand('whitelist reload'))) return
+    if (running) {
+      if (!(await sendCommand(serverName, `whitelist remove ${entry.name}`))) return
+      if (!(await sendCommand(serverName, 'whitelist reload'))) return
+      if (props.name === serverName) whitelist.value = whitelist.value.filter((item) => item.name !== entry.name)
+    } else {
+      const nextWhitelist = whitelist.value.filter((item) => item.name !== entry.name)
+      await bridge.serverFileWrite(serverName, 'whitelist.json', `${JSON.stringify(nextWhitelist.map((item) => ({ name: item.name })), null, 2)}\n`)
+      if (props.name === serverName) whitelist.value = nextWhitelist
     }
-    whitelist.value = whitelist.value.filter((item) => item.name !== entry.name)
-    if (!props.running) {
-      await bridge.serverFileWrite(props.name, 'whitelist.json', `${JSON.stringify(whitelist.value.map((item) => ({ name: item.name })), null, 2)}\n`)
-    }
-    emit('toast', `Игрок ${entry.name} убран из белого списка`)
+    if (props.name === serverName) emit('toast', `Игрок ${entry.name} убран из белого списка`)
   } finally {
     busy.value = false
   }
 }
 
 async function toggleWhitelistEnabled() {
+  const serverName = props.name
+  const running = props.running
   const row = properties.value.find((item) => item.key === 'white-list')
   busy.value = true
   try {
     const next = row?.value === 'true' ? 'false' : 'true'
-    if (props.running) {
-      if (!(await sendCommand(`whitelist ${next === 'true' ? 'on' : 'off'}`))) return
+    if (running) {
+      if (!(await sendCommand(serverName, `whitelist ${next === 'true' ? 'on' : 'off'}`))) return
     } else if (row) {
+      if (props.name !== serverName) return
       row.value = next
       row.edited = true
-      await saveProperties()
+      await saveProperties(serverName, running)
       return
     }
-    if (row) {
-      row.value = next
-      row.edited = false
+    if (props.name === serverName) {
+      if (row) {
+        row.value = next
+        row.edited = false
+      }
+      emit('toast', next === 'true' ? 'Белый список включён' : 'Белый список выключен')
     }
-    emit('toast', next === 'true' ? 'Белый список включён' : 'Белый список выключен')
   } finally {
     busy.value = false
   }
@@ -227,51 +283,72 @@ async function toggleWhitelistEnabled() {
 const whitelistEnabled = computed(() => properties.value.find((item) => item.key === 'white-list')?.value === 'true')
 
 async function addOp() {
-  const name = newOpName.value.trim()
-  if (!name) return
+  const name = playerName(newOpName.value)
+  if (!name) {
+    emit('toast', 'Введите корректный ник игрока (3–16 латинских букв, цифр или _)')
+    return
+  }
+  const serverName = props.name
+  const running = props.running
   busy.value = true
   try {
-    if (props.running) {
-      if (!(await sendCommand(`op ${name}`))) return
-      ops.value = [...ops.value.filter((entry) => entry.name.toLowerCase() !== name.toLowerCase()), { name, level: newOpLevel.value }]
+    const nextOps = [...ops.value.filter((entry) => entry.name.toLowerCase() !== name.toLowerCase()), { name, level: newOpLevel.value }]
+    if (running) {
+      if (!(await sendCommand(serverName, `op ${name}`))) return
     } else {
-      ops.value = [...ops.value.filter((entry) => entry.name.toLowerCase() !== name.toLowerCase()), { name, level: newOpLevel.value }]
-      await bridge.serverFileWrite(props.name, 'ops.json', `${JSON.stringify(ops.value.map((entry) => ({ name: entry.name, level: entry.level })), null, 2)}\n`)
+      await bridge.serverFileWrite(serverName, 'ops.json', `${JSON.stringify(nextOps.map((entry) => ({ name: entry.name, level: entry.level })), null, 2)}\n`)
     }
-    newOpName.value = ''
-    emit('toast', `Права оператора выданы: ${name}`)
+    if (props.name === serverName) {
+      ops.value = nextOps
+      newOpName.value = ''
+      emit('toast', `Права оператора выданы: ${name}`)
+    }
   } finally {
     busy.value = false
   }
 }
 
 async function changeOpLevel(entry: OpEntry, level: number) {
+  const serverName = props.name
+  const running = props.running
+  if (!playerName(entry.name)) {
+    emit('toast', 'Нельзя изменить права игрока с некорректным ником')
+    return
+  }
   busy.value = true
   try {
-    entry.level = level
-    if (props.running) {
-      const command = level >= 1 ? `op ${entry.name}` : `deop ${entry.name}`
-      if (!(await sendCommand(command))) return
+    if (running) {
+      if (!(await sendCommand(serverName, `op ${entry.name}`))) return
+      if (props.name === serverName) entry.level = level
     } else {
-      await bridge.serverFileWrite(props.name, 'ops.json', `${JSON.stringify(ops.value.map((item) => ({ name: item.name, level: item.level })), null, 2)}\n`)
+      const nextOps = ops.value.map((item) => item.name === entry.name ? { ...item, level } : item)
+      await bridge.serverFileWrite(serverName, 'ops.json', `${JSON.stringify(nextOps.map((item) => ({ name: item.name, level: item.level })), null, 2)}\n`)
+      if (props.name === serverName) ops.value = nextOps
     }
-    emit('toast', `Уровень ${entry.name}: ${level}`)
+    if (props.name === serverName) emit('toast', `Уровень ${entry.name}: ${level}`)
   } finally {
     busy.value = false
   }
 }
 
 async function removeOp(entry: OpEntry) {
+  const serverName = props.name
+  const running = props.running
+  if (!playerName(entry.name)) {
+    emit('toast', 'Нельзя снять права у игрока с некорректным ником')
+    return
+  }
   busy.value = true
   try {
-    if (props.running) {
-      if (!(await sendCommand(`deop ${entry.name}`))) return
+    if (running) {
+      if (!(await sendCommand(serverName, `deop ${entry.name}`))) return
+      if (props.name === serverName) ops.value = ops.value.filter((item) => item.name !== entry.name)
+    } else {
+      const nextOps = ops.value.filter((item) => item.name !== entry.name)
+      await bridge.serverFileWrite(serverName, 'ops.json', `${JSON.stringify(nextOps.map((item) => ({ name: item.name, level: item.level })), null, 2)}\n`)
+      if (props.name === serverName) ops.value = nextOps
     }
-    ops.value = ops.value.filter((item) => item.name !== entry.name)
-    if (!props.running) {
-      await bridge.serverFileWrite(props.name, 'ops.json', `${JSON.stringify(ops.value.map((item) => ({ name: item.name, level: item.level })), null, 2)}\n`)
-    }
-    emit('toast', `Права оператора сняты: ${entry.name}`)
+    if (props.name === serverName) emit('toast', `Права оператора сняты: ${entry.name}`)
   } finally {
     busy.value = false
   }
@@ -282,14 +359,18 @@ function setProperty(row: PropertyRow, value: string) {
   row.edited = true
 }
 
-async function saveProperties() {
+async function saveProperties(serverName = props.name, running = props.running) {
+  const rows = properties.value
+  const content = serializeProperties(rows)
   busy.value = true
   try {
-    await bridge.serverFileWrite(props.name, 'server.properties', serializeProperties(properties.value))
-    properties.value.forEach((row) => { row.edited = false })
-    emit('toast', props.running ? 'server.properties сохранён; часть ключей применяется после рестарта' : 'server.properties сохранён')
+    await bridge.serverFileWrite(serverName, 'server.properties', content)
+    if (props.name === serverName && properties.value === rows) {
+      rows.forEach((row) => { row.edited = false })
+      emit('toast', running ? 'server.properties сохранён; часть ключей применяется после рестарта' : 'server.properties сохранён')
+    }
   } catch (error) {
-    emit('toast', errorMessage(error))
+    if (props.name === serverName) emit('toast', errorMessage(error))
   } finally {
     busy.value = false
   }
@@ -349,25 +430,28 @@ const sections: Array<{ id: Section; label: string }> = [
       </div>
 
       <div v-else class="server-access-body">
-        <div class="server-access-toolbar">
-          <button class="button button--small button--accent" type="button" :disabled="busy || loading || !properties.length || !propertiesDirty" @click="saveProperties">{{ propertiesDirty ? 'Сохранить server.properties' : 'Изменений нет' }}</button>
-          <small class="field-help">Порядок ключей и комментарии сохраняются, порт управляется из настроек сервера.</small>
-        </div>
-        <div v-if="properties.length" class="workspace-form-grid">
-          <div v-for="row in structuredKeys" :key="row.key" class="field">
-            <span>{{ propertyLabels[row.key] }}<i v-if="row.edited" class="server-access-edited">•</i></span>
-            <CustomSelect v-if="propertyOptions(row.key)" :model-value="row.value" :options="propertyOptions(row.key)!" :disabled="busy" @update:model-value="setProperty(row, String($event))" />
-            <input v-else :value="row.value" :disabled="busy" @input="setProperty(row, ($event.target as HTMLInputElement).value)" />
+        <p v-if="propertiesMissing" class="muted">server.properties ещё не создан: запустите сервер один раз, и файл появится.</p>
+        <template v-else>
+          <div class="server-access-toolbar">
+            <button class="button button--small button--accent" type="button" :disabled="busy || loading || !properties.length || !propertiesDirty" @click="() => saveProperties()">{{ propertiesDirty ? 'Сохранить server.properties' : 'Изменений нет' }}</button>
+            <small class="field-help">Порядок ключей и комментарии сохраняются, порт управляется из настроек сервера.</small>
           </div>
-        </div>
-        <Collapsible v-if="otherKeys.length" class="server-access-other" :title="`Остальные ключи (${otherKeys.length})`">
-          <div class="workspace-form-grid">
-            <div v-for="row in otherKeys" :key="row.key" class="field">
-              <span><code>{{ row.key }}</code><i v-if="row.edited" class="server-access-edited">•</i></span>
-              <input :value="row.value" :disabled="busy" @input="setProperty(row, ($event.target as HTMLInputElement).value)" />
+          <div v-if="properties.length" class="workspace-form-grid">
+            <div v-for="row in structuredKeys" :key="row.key" class="field">
+              <span>{{ propertyLabels[row.key] }}<i v-if="row.edited" class="server-access-edited">•</i></span>
+              <CustomSelect v-if="propertyOptions(row.key)" :model-value="row.value" :options="propertyOptions(row.key)!" :disabled="busy" @update:model-value="setProperty(row, String($event))" />
+              <input v-else :value="row.value" :disabled="busy" @input="setProperty(row, ($event.target as HTMLInputElement).value)" />
             </div>
           </div>
-        </Collapsible>
+          <Collapsible v-if="otherKeys.length" class="server-access-other" :title="`Остальные ключи (${otherKeys.length})`">
+            <div class="workspace-form-grid">
+              <div v-for="row in otherKeys" :key="row.key" class="field">
+                <span><code>{{ row.key }}</code><i v-if="row.edited" class="server-access-edited">•</i></span>
+                <input :value="row.value" :disabled="busy" @input="setProperty(row, ($event.target as HTMLInputElement).value)" />
+              </div>
+            </div>
+          </Collapsible>
+        </template>
       </div>
     </template>
   </div>

@@ -2,8 +2,7 @@ import assert from 'node:assert/strict'
 import { registerHooks } from 'node:module'
 import test from 'node:test'
 
-// Load the real host dispatcher while replacing only desktop RPC and dialogs.
-// This keeps these tests runnable without a Tauri window or Vue application.
+// подменяем RPC и диалоги, чтобы тестировать обработчик без окна Tauri и Vue
 const hostUrl = new URL('../src/services/pluginHost.ts', import.meta.url).href
 const bridgeUrl = `data:text/javascript,${encodeURIComponent(`
   export const calls = [];

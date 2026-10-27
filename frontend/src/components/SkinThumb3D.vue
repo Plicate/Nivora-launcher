@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// миниатюрная 3D-модель скина. Рисуется общим WebGL-рендерером (один
+// миниатюрная 3D-модель скина; рисуется общим WebGL-рендерером (один
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { thumbnailRenderer } from '../services/skinRenderer'
 
@@ -37,8 +37,8 @@ function draw() {
     target.height = height
   }
   renderer.render({ skin: props.image, model: props.model, cape: props.capeImage, back: props.capeImage ? 'cape' : null, yaw, pitch, zoom: 1.08 }, width, height)
-  // текстура не загрузилась (например, удалённый https-адрес без CORS) —
-  // показываем обычную картинку вместо пустого места.
+  // без CORS удалённая текстура недоступна
+  // показываем обычную картинку вместо пустого места
   const status = renderer.skinStatus(props.image)
   failed.value = status !== null && !status.startsWith('Загрузка')
   const context = target.getContext('2d')
@@ -75,7 +75,7 @@ function pointerUp() {
   dragging = false
 }
 
-// вращение не должно выбирать карточку: клик после перетаскивания гасим.
+// вращение не должно выбирать карточку: клик после перетаскивания гасим
 function click(event: MouseEvent) {
   if (moved) {
     event.stopPropagation()

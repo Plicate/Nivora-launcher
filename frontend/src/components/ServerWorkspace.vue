@@ -27,8 +27,9 @@ const props = withDefaults(defineProps<{
   focusTab?: ServerTab
   settingsOnly?: boolean
   showSettingsTab?: boolean
+  fileEditorMode?: 'builtin' | 'system' | string
   snapshotCreated?: (instance: PluginInstanceRef, snapshot: ServerSnapshot) => Promise<void>
-}>(), { settingsOnly: false, showSettingsTab: true })
+}>(), { settingsOnly: false, showSettingsTab: true, fileEditorMode: 'builtin' })
 const emit = defineEmits<{ (event: 'toast', message: string): void; (event: 'changed'): void }>()
 
 const tabs: Array<{ id: ServerTab; label: string }> = [
@@ -353,8 +354,7 @@ async function refreshCoreVersions(core: string, resetCurrent = true) {
     if (!coreVersionOptions.value.length && draft.version) {
       coreVersionOptions.value = [{ value: draft.version, label: draft.version, meta: 'Текущая версия' }]
     } else if (!coreVersionOptions.value.some((option) => option.value === draft.version)) {
-      // сменили ядро, а прежней версии у нового нет — берём свежую;
-      // при обычной перезагрузке списка сохранённую версию не теряем.
+      // после смены ядра выбираем доступную версию, при обычном обновлении сохраняем текущую
       if (resetCurrent) draft.version = coreVersionOptions.value[0].value
       else if (draft.version) coreVersionOptions.value.unshift({ value: draft.version, label: draft.version, meta: 'Текущая версия' })
     }
@@ -399,7 +399,7 @@ async function refreshStatus() {
     if (details.value) details.value.status = status
     recordMetric(status.metrics)
   } catch {
-    // the dashboard is best effort while the backend is restarting.
+    // ошибка запроса не мешает работе панели во время перезапуска движка
   } finally {
     statusBusy.value = false
   }
@@ -414,7 +414,7 @@ async function refreshLogs() {
     logCursor.value = value.cursor ?? logCursor.value
     if (details.value) details.value.status.running = value.running
   } catch {
-    // the status poll remains the fallback.
+    // запасной вариант остаётся через опрос статуса
   } finally {
     logBusy.value = false
   }
@@ -511,6 +511,13 @@ async function sendQuickCommand(value: string) {
 async function openFile(file: ServerFile) {
   if (file.kind !== 'file' || !file.editable || !instance.value) return
   try {
+    if (props.fileEditorMode === 'system') {
+      const root = details.value?.server.path || instance.value.path
+      const separator = root.includes('\\') ? '\\' : '/'
+      const fullPath = `${root.replace(/[\\/]+$/, '')}${separator}${file.path.replace(/^[\\/]+/, '').replace(/[\\/]/g, separator)}`
+      await bridge.fsOpenFile(fullPath)
+      return
+    }
     selectedFile.value = file
     editorContent.value = (await bridge.serverFileRead(instance.value.name, file.path)).content
     editorDirty.value = false
@@ -573,7 +580,7 @@ function onCoreDrop(event: DragEvent) {
   coreDropActive.value = false
   const file = event.dataTransfer?.files[0]
   if (!file) return
-  // drag-and-drop остаётся быстрым путём: File читается прямо здесь.
+  // перетаскивание остаётся быстрым способом: файл читаем здесь
   void file.arrayBuffer().then((buffer) => {
     let binary = ''
     const bytes = new Uint8Array(buffer)
@@ -863,7 +870,7 @@ async function loadProfileGroups() {
   try {
     profileGroups.value = (await bridge.instanceGroups()).groups || []
   } catch {
-    // groups are optional profile metadata.
+    // группы являются необязательными метаданными профиля
   }
 }
 
@@ -916,8 +923,7 @@ defineExpose({ openSettings, stop })
     <template v-if="!settingsOnly">
      <header class="server-header">
       <div>
-        <span class="eyebrow">SERVER WORKSPACE</span>
-        <h2>{{ instance.display_name || instance.name }}</h2>
+         <!-- имя сервера уже показано в заголовке страницы -->
          <p><span class="server-status-dot" :class="{ 'server-status-dot--online': running }" /><CoreBadge :core="coreLabel" compact />{{ running ? 'Процесс работает' : 'Остановлен' }}<span v-if="running" class="server-uptime-label"> · В работе {{ formatUptime(details?.status.uptime_seconds || 0) }}</span> · {{ coreLabel }} · {{ details?.config.version || instance.server_core_version || 'версия не указана' }} · {{ instance.name }}</p>
      </div>
       <div class="server-header-actions">
@@ -1015,7 +1021,7 @@ defineExpose({ openSettings, stop })
         <CatalogDetailsDialog v-if="pluginDetailsOpen" :details="pluginDetails" :versions="[]" project-type="plugin" :catalog-name="catalogOptions.find((item) => item.value === pluginCatalogId)?.label || 'Каталог плагинов'" :loading="pluginDetailsLoading" :error="pluginDetailsError" :can-install="Boolean(instance) && !running" :busy="pluginBusy || pluginUpdatesBusy" @close="closePluginDetails" @install="installPluginFromDetails" />
       </section>
        <section v-else-if="tab === 'snapshots'" class="workspace-card"><div class="workspace-card-heading"><div><h3>Снапшоты ресурсов</h3><span class="muted">Авто-retention {{ details.config.snapshot_retention_hours }} ч · максимум {{ details.config.snapshot_max_count }}</span></div><div class="workspace-card-actions"><CustomSelect v-model="snapshotCategory" :options="[{ value: 'plugins', label: 'Плагины' }, { value: 'mods', label: 'Моды' }]" /><button class="button button--small button--accent" type="button" :disabled="snapshotBusy" @click="createSnapshot">Создать</button></div></div><div class="server-snapshot-list"><article v-for="snapshot in snapshots" :key="snapshot.id" class="server-snapshot-row"><span><strong>{{ snapshot.id }}</strong><small>{{ snapshot.file_count }} файлов · {{ formatBytes(snapshot.source_bytes) }} · {{ formatDate(snapshot.created_at) }}</small></span><span><button class="button button--small button--quiet" type="button" :disabled="running || snapshotBusy" @click="restoreSnapshot(snapshot)">Восстановить</button><button class="icon-button" type="button" aria-label="Удалить снапшот" @click="deleteSnapshot(snapshot)"><Icon name="trash" :size="14" /></button></span></article><span v-if="!snapshots.length" class="muted workspace-empty">Снапшотов пока нет.</span></div></section>
-       <section v-else-if="tab === 'settings'" class="workspace-card server-config-card"><div class="workspace-card-heading"><div><h3>Настройки сервера</h3><span class="muted">Изменения сохраняются в .nivora-launcher-server.json</span></div><button class="button button--small button--accent" type="button" :disabled="settingsSaveState === 'saving'" @click="saveSettings">{{ settingsSaveState === 'saving' ? 'Сохраняю…' : 'Сохранить' }}</button></div><div class="workspace-form-grid"><label class="field"><span>Ядро</span><CustomSelect v-model="draft.core" :options="coreOptions" /></label><label class="field"><span>Версия Minecraft</span><CustomSelect v-model="draft.version" :options="coreVersionOptions" :disabled="coreVersionBusy" /></label><div class="field"><span>Порт</span><NumericStepper v-model="draft.port" :min="1" :max="65535" aria-label="Порт сервера" /></div><div class="field"><span>Максимум игроков</span><NumericStepper v-model="draft.max_players" :min="1" :max="100000" aria-label="Максимум игроков" /></div><div class="field"><span>Память JVM</span><div class="memory-input-row"><NumericStepper v-model="memoryValue" :min="memoryMinimum" :max="memoryMaximum" :step="memoryStep" :decimals="memoryDecimals" aria-label="Память сервера" /><CustomSelect v-model="memoryUnit" :options="memoryUnitOptions" /></div><small class="field-help">Лимит {{ memoryLimitLabel }} из {{ systemMemoryLabel }}; 25% RAM оставляется системе. JVM получит {{ memorySetting }}.</small></div><label class="field"><span>Java executable</span><input v-model="draft.java_path" placeholder="глобальная Java" /></label><label class="field"><span>Профиль изоляции</span><CustomSelect v-model="draft.security_profile" :options="securityProfileOptions" /></label><label class="field field--wide"><span>MOTD</span><input v-model="draft.motd" /></label><div class="field"><span>Retention, часы</span><NumericStepper v-model="draft.snapshot_retention_hours" :min="1" :max="720" aria-label="Retention снапшотов" /></div><div class="field"><span>Максимум снапшотов</span><NumericStepper v-model="draft.snapshot_max_count" :min="1" :max="50" aria-label="Максимум снапшотов" /></div><label class="workspace-check"><input v-model="draft.eula_accepted" type="checkbox" /><span><strong>Я принимаю EULA Minecraft</strong><small>Без этого запуск сервера блокируется.</small></span></label><label class="workspace-check"><input v-model="draft.auto_restart" type="checkbox" /><span><strong>Автоперезапуск</strong><small>Подготовлено для supervisor policy.</small></span></label>
+       <section v-else-if="tab === 'settings'" class="workspace-card server-config-card"><div class="workspace-card-heading"><div><h3>Настройки сервера</h3><span class="muted">Изменения сохраняются в .nivora-launcher-server.json</span></div><button class="button button--small button--accent" type="button" :disabled="settingsSaveState === 'saving'" @click="saveSettings">{{ settingsSaveState === 'saving' ? 'Сохраняю…' : 'Сохранить' }}</button></div><div class="workspace-form-grid"><label class="field"><span>Ядро</span><CustomSelect v-model="draft.core" :options="coreOptions" /></label><label class="field"><span>Версия Minecraft</span><CustomSelect v-model="draft.version" :options="coreVersionOptions" :disabled="coreVersionBusy" /></label><div class="field"><span>Порт</span><NumericStepper v-model="draft.port" :min="1" :max="65535" aria-label="Порт сервера" /></div><div class="field"><span>Максимум игроков</span><NumericStepper v-model="draft.max_players" :min="1" :max="100000" aria-label="Максимум игроков" /></div><div class="field"><span>Память JVM</span><div class="memory-input-row"><NumericStepper v-model="memoryValue" :min="memoryMinimum" :max="memoryMaximum" :step="memoryStep" :decimals="memoryDecimals" aria-label="Память сервера" /><CustomSelect v-model="memoryUnit" :options="memoryUnitOptions" /></div><small class="field-help">Лимит {{ memoryLimitLabel }} из {{ systemMemoryLabel }}; 25% RAM оставляется системе. JVM получит {{ memorySetting }}.</small></div><label class="field"><span>Java executable</span><input v-model="draft.java_path" placeholder="глобальная Java" /></label><label class="field"><span>Профиль изоляции</span><CustomSelect v-model="draft.security_profile" :options="securityProfileOptions" /></label><label class="field field--wide"><span>MOTD</span><input v-model="draft.motd" /></label><div class="field"><span>Retention, часы</span><NumericStepper v-model="draft.snapshot_retention_hours" :min="1" :max="720" aria-label="Retention снапшотов" /></div><div class="field"><span>Максимум снапшотов</span><NumericStepper v-model="draft.snapshot_max_count" :min="1" :max="50" aria-label="Максимум снапшотов" /></div><label class="workspace-check"><input v-model="draft.eula_accepted" type="checkbox" /><span><strong>Я принимаю EULA Minecraft</strong><small>Без этого запуск сервера блокируется.</small></span></label><label class="workspace-check"><input v-model="draft.auto_restart" type="checkbox" /><span><strong>Автоперезапуск</strong><small>Перезапускать после завершения процесса; кнопка «Остановить» не перезапускает.</small></span></label>
 <div class="field"><span>Плановый рестарт в <small>локальное время сервера</small></span><input v-model="draft.restart_schedule.time" :disabled="!draft.restart_schedule.enabled" placeholder="04:00" maxlength="5" /></div>
 <div class="field"><span>Предупреждать, минут</span><NumericStepper v-model="draft.restart_schedule.warn_minutes" :min="0" :max="30" :disabled="!draft.restart_schedule.enabled" aria-label="Предупреждение о рестарте" /><small class="field-help">say в консоли перед рестартом.</small></div>
 <label class="workspace-check"><input v-model="draft.restart_schedule.enabled" type="checkbox" /><span><strong>Расписание перезапуска</strong><small>Рестарт каждый день в указанное время{{ draft.restart_schedule.last_run ? `; последний ${draft.restart_schedule.last_run}` : '' }}.</small></span></label>
@@ -1040,13 +1046,6 @@ defineExpose({ openSettings, stop })
              <span v-else class="profile-upload-placeholder"><Icon name="server" :size="22" /></span>
              <button class="button button--small button--quiet" type="button" @click="chooseProfileAsset('icon')">Иконка</button>
              <button v-if="profileIconPreview" class="text-button" type="button" @click="clearProfileAsset('icon')">Убрать</button>
-           </div>
-           <div class="profile-upload profile-upload--banner">
-             <img v-if="profileBannerPreview" :src="profileBannerPreview" alt="" />
-             <span v-else class="profile-upload-placeholder"><Icon name="image" :size="22" /></span>
-             <span class="profile-upload-caption">Баннер · виден на карточке сервера</span>
-             <button class="button button--small button--quiet" type="button" @click="chooseProfileAsset('banner')">Загрузить баннер</button>
-             <button v-if="profileBannerPreview" class="text-button" type="button" @click="clearProfileAsset('banner')">Убрать</button>
            </div>
          </div>
          

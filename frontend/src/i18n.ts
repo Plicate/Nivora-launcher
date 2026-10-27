@@ -1,4 +1,3 @@
-// локализация интерфейса без переписывания ~2500 шаблонных строк: русские
 import { ref } from 'vue'
 
 export type Locale = 'ru' | 'en'
@@ -130,7 +129,7 @@ const EN: Record<string, string> = {
   'Microsoft аккаунт': 'Microsoft account', 'Оффлайн-аккаунт': 'Offline account',
   'Добавить аккаунт': 'Add account', 'Активный аккаунт': 'Active account',
 
-  // bedrock-воркспейс: консоль, скриншоты, снапшоты
+  // рабочая область Bedrock: консоль, скриншоты и снапшоты
   'Консоль сессии': 'Session console', 'Архив логов': 'Log archive',
   'Скриншоты Bedrock': 'Bedrock screenshots', 'Снапшоты контента': 'Content snapshots',
   'Создать снапшот': 'Create snapshot', 'Остановлена': 'Stopped',
@@ -142,6 +141,11 @@ const EN: Record<string, string> = {
 
   // активность: остановка и копирование
   'Копировать содержимое': 'Copy contents',
+  'Копировать путь': 'Copy path', 'Копировать ссылку': 'Copy link',
+  'Свойства': 'Properties', 'Сохранить копию…': 'Save a copy…',
+  'Вырезать': 'Cut', 'Вставить': 'Paste', 'Выделить всё': 'Select all',
+  'Выбрать файл': 'Choose file', 'Выбрать папку': 'Choose folder',
+  'Изменить размер окна': 'Resize window',
   'Остановка запрошена — операция завершит текущий шаг сама.': 'Stop requested — the operation will finish its current step on its own.',
   'Переименовать группу (экземпляры остаются в ней)': 'Rename the group (instances stay in it)',
 
@@ -222,6 +226,7 @@ const EN: Record<string, string> = {
   'Вкл.': 'On', 
   'Экран при запуске': 'Screen on startup', 'Последний экран': 'Last screen',
   'Версии по умолчанию': 'Default versions', 'Loader по умолчанию': 'Default loader',
+  'Проводник файлов': 'File explorer', 'Встроенный': 'Built-in', 'Системный': 'System',
   'Аккаунт по умолчанию': 'Default account', 'Обновление metadata, часы': 'Metadata refresh, hours',
   'Timeout загрузки, секунд': 'Download timeout, seconds', 'Хранить логи, дней': 'Keep logs, days',
   '0 = без лимита': '0 = no limit', 'Запоминать экран': 'Remember the screen',
@@ -328,8 +333,7 @@ function walk(root: Node): void {
   const element = root as Element
   if (SKIP_TAGS.has(element.tagName)) return
   applyToElement(element)
-  // FILTER_REJECT на служебных тегах режет их поддеревья целиком: переводы
-  // не должны попадать в <code>/<pre> (консоль, JSON, логи).
+  // маркер FILTER_REJECT исключает код и логи из перевода вместе с их поддеревьями
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT, {
     acceptNode: (node) => node.nodeType === Node.ELEMENT_NODE && SKIP_TAGS.has((node as Element).tagName)
       ? NodeFilter.FILTER_REJECT

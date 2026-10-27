@@ -1,5 +1,3 @@
-// хранилище настроек: settings.json в XDG-корнях, значения по умолчанию,
-// нормализация при загрузке и запись отдельных ключей с валидацией.
 use base64::Engine;
 use regex::Regex;
 use serde_json::{json, Map, Value};
@@ -34,7 +32,7 @@ pub const DEFAULT_COLOR_TOKENS: &[(&str, &str)] = &[
     ("banner_shade", "#191a17"),
 ];
 
-// скругления углов основных групп элементов интерфейса, в пикселях.
+// скругления углов основных групп элементов интерфейса, в пикселях
 pub const DEFAULT_RADIUS_TOKENS: &[(&str, i64)] = &[("card", 7), ("button", 8), ("control", 10)];
 
 const PAGES: &[&str] = &[
@@ -159,6 +157,9 @@ pub fn default_settings_object() -> Value {
         "auto_repair_muted": [],
         "show_activity_panel": true,
         "show_toasts": true,
+        // по умолчанию используем встроенный проводник лаунчера
+        "file_explorer": "builtin",
+        "file_editor": "builtin",
         "minimize_on_launch": false,
         "close_to_tray": false,
         "language": null,
@@ -219,20 +220,82 @@ pub fn default_settings_object() -> Value {
     })
 }
 
+#[cfg(any(target_os = "linux", test))]
+fn parse_memtotal_kib(meminfo: &str) -> Option<i64> {
+    meminfo.lines().find_map(|line| {
+        let rest = line.strip_prefix("MemTotal:")?;
+        let kib = rest.split_whitespace().next()?.parse::<i64>().ok()?;
+        (kib > 0).then_some(kib)
+    })
+}
+
+#[cfg(any(unix, test))]
+fn pages_to_kib(pages: i64, page_size: i64) -> i64 {
+    if pages <= 0 || page_size <= 0 {
+        return 0;
+    }
+    pages
+        .checked_mul(page_size)
+        .map(|bytes| bytes / 1024)
+        .unwrap_or(0)
+}
+
+#[cfg(any(windows, test))]
+fn bytes_to_kib(bytes: u64) -> i64 {
+    i64::try_from(bytes / 1024).unwrap_or(0)
+}
+
 pub fn system_memory_kib() -> i64 {
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     {
         if let Ok(text) = std::fs::read_to_string("/proc/meminfo") {
-            for line in text.lines() {
-                if let Some(rest) = line.strip_prefix("MemTotal:") {
-                    if let Some(value) = rest.split_whitespace().next().and_then(|part| part.parse::<i64>().ok()) {
-                        return value;
-                    }
-                }
+            if let Some(kib) = parse_memtotal_kib(&text) {
+                return kib;
+            }
+        }
+    }
+    // на macOS и без procfs в Linux читаем память через sysconf
+    #[cfg(unix)]
+    unsafe {
+        let pages = libc::sysconf(libc::_SC_PHYS_PAGES);
+        let page_size = libc::sysconf(libc::_SC_PAGESIZE);
+        let kib = pages_to_kib(pages as i64, page_size as i64);
+        if kib > 0 {
+            return kib;
+        }
+    }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+        let mut status: MEMORYSTATUSEX = unsafe { std::mem::zeroed() };
+        status.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
+        if unsafe { GlobalMemoryStatusEx(&mut status) } != 0 {
+            let kib = bytes_to_kib(status.ullTotalPhys);
+            if kib > 0 {
+                return kib;
             }
         }
     }
     0
+}
+
+/// memavailable из /proc/meminfo (Linux; на остальных системах None)
+/// нужен автонастройке: не обещать игре память, которой сейчас нет
+pub fn mem_available_kib() -> Option<i64> {
+    #[cfg(unix)]
+    {
+        let text = std::fs::read_to_string("/proc/meminfo").ok()?;
+        for line in text.lines() {
+            if let Some(rest) = line.strip_prefix("MemAvailable:") {
+                return rest.split_whitespace().next().and_then(|part| part.parse::<i64>().ok());
+            }
+        }
+        None
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
 }
 
 pub fn recommended_memory_kib() -> i64 {
@@ -240,7 +303,8 @@ pub fn recommended_memory_kib() -> i64 {
     if total <= 0 {
         return 2 * 1024 * 1024;
     }
-    (total / 2 / 1024).max(1024 * 1024) * 1024
+    // минимум применяется к итоговым KiB, не к промежуточному значению MiB
+    (total / 2 / 1024 * 1024).max(1024 * 1024)
 }
 
 pub fn parse_memory_kib(value: &str) -> Result<i64, String> {
@@ -352,7 +416,7 @@ impl Paths {
     }
 
     pub fn discover() -> Self {
-        // корни одни на весь движок — state::launcher_roots: Windows берёт
+        // все пути движка берутся из общего набора `state::launcher_roots`
         Self::from_roots(&launcher_roots())
     }
 
@@ -388,7 +452,7 @@ impl ConfigStore {
         Self::from_paths(Paths::discover())
     }
 
-    /// тот же магазин, но с явными корнями — для тестов без env.
+    /// создаёт магазин с явными корнями, без переменных окружения
     pub(crate) fn from_paths(paths: Paths) -> Result<Self, String> {
         paths.ensure()?;
         let mut store = Self { settings: default_settings_object(), paths };
@@ -417,7 +481,7 @@ impl ConfigStore {
         let Value::Object(map) = parsed else {
             return Err("Файл настроек имеет неожиданный формат".to_owned());
         };
-        // берём известные поля из файла поверх умолчаний.
+        // берём известные поля из файла поверх умолчаний
         let mut settings = defaults;
         for (key, value) in map {
             if settings.get(&key).is_some() {
@@ -630,7 +694,7 @@ impl ConfigStore {
         self.paths.data_home.join("game")
     }
 
-    /// папка игры из настроек; создаётся с правами 0700.
+    /// папка игры из настроек; создаётся с правами 0700
     pub fn game_dir(&self) -> Result<PathBuf, String> {
         let path = self.validated_game_dir(&self.str_setting("game_dir"))?;
         std::fs::create_dir_all(&path).map_err(|error| format!("Не удалось создать папку игры: {error}"))?;
@@ -695,6 +759,9 @@ impl ConfigStore {
             "auto_repair_kinds": issue_kinds_public(),
             "show_activity_panel": bool_field("show_activity_panel"),
             "show_toasts": bool_field("show_toasts"),
+            // значение `system` включает системный проводник, остальные используют встроенный
+            "file_explorer": if str_field("file_explorer") == "system" { "system" } else { "builtin" },
+            "file_editor": if str_field("file_editor") == "system" { "system" } else { "builtin" },
             "minimize_on_launch": bool_field("minimize_on_launch"),
             "close_to_tray": bool_field("close_to_tray"),
             "language": raw_field("language"),
@@ -751,7 +818,6 @@ impl ConfigStore {
             "cloud_remote_path": str_field("cloud_remote_path"),
             "cloud_include_accounts": bool_field("cloud_include_accounts"),
             "cloud_last_sync": raw_field("cloud_last_sync"),
-            // пароль WebDAV живёт в системном хранилище секретов и читается
             "cloud_configured": !str_field("cloud_url").trim().is_empty() && !str_field("cloud_username").trim().is_empty(),
         })
     }
@@ -762,7 +828,7 @@ impl ConfigStore {
         } else {
             PathBuf::from(value)
         };
-        // canonicalize строг: требует существования пути. Питонья пара этого
+        // canonicalize требует, чтобы путь уже существовал
         let path = super::platform_support::canonical_path(&expanded).unwrap_or_else(|_| {
             if expanded.is_absolute() {
                 expanded.clone()
@@ -793,6 +859,7 @@ pub fn save_settings(request: &Value) -> Result<Value, String> {
         "open_last_instance", "launch_after_install", "auto_refresh_metadata", "metadata_refresh_hours",
         "download_timeout_seconds", "download_retries", "confirm_destructive_actions",
         "auto_repair_enabled", "auto_repair_muted", "show_activity_panel", "show_toasts",
+        "file_explorer", "file_editor",
         "minimize_on_launch", "close_to_tray", "language", "font_family", "keep_logs_days",
         "telemetry", "telemetry_endpoint", "keyboard_shortcuts", "graphics_mode",
         "launcher_profiles", "active_launcher_profile_id", "http_proxy", "download_source",
@@ -812,8 +879,7 @@ pub fn save_settings(request: &Value) -> Result<Value, String> {
         "keyboard_shortcuts", "launcher_profiles", "animation_settings", "overlay_settings",
         "backup_schedule", "auto_repair_muted",
     ];
-    // language: null — валидное значение («язык не выбран»), str(None)
-    // его бы испортил — поэтому тоже без строкового приведения.
+    // null означает, что язык не выбран; сохраняем значение без приведения к строке
     let raw_keys: &[&str] = &["sidebar_floating", "sidebar_width", "language"];
     let mut normalized = Map::new();
     for (key, value) in values.as_object().expect("проверено выше") {
@@ -826,6 +892,15 @@ pub fn save_settings(request: &Value) -> Result<Value, String> {
             python_str_of(value)
         };
         normalized.insert(key.clone(), coerced);
+    }
+    // для проводника оставляем только режимы system и builtin
+    if let Some(Value::String(explorer)) = normalized.get("file_explorer") {
+        let mode = if explorer == "system" { "system" } else { "builtin" };
+        normalized.insert("file_explorer".to_owned(), json!(mode));
+    }
+    if let Some(Value::String(editor)) = normalized.get("file_editor") {
+        let mode = if editor == "system" { "system" } else { "builtin" };
+        normalized.insert("file_editor".to_owned(), json!(mode));
     }
     let mut config = ConfigStore::load()?;
     config.set_values(&Value::Object(normalized))?;
@@ -864,30 +939,9 @@ pub fn is_valid_client_id(value: &str) -> bool {
 }
 
 pub fn issue_kinds_public() -> Value {
-    let kinds: &[(&str, &str)] = &[
-        ("account", "Проблема с аккаунтом"),
-        ("security_sandbox", "Запуску мешают настройки безопасности"),
-        ("loader_broken", "Модлоадер повреждён или не запускается"),
-        ("loader_outdated", "Устаревшая версия модлоадера"),
-        ("missing_dependencies", "Не хватает зависимостей модов"),
-        ("incompatible_mods", "Несовместимые моды"),
-        ("wrong_loader_mods", "Моды для другого загрузчика"),
-        ("duplicate_mods", "Дубликаты модов"),
-        ("mixin_failure", "Ошибка Mixin в моде"),
-        ("corrupted_mods", "Повреждённые файлы модов"),
-        ("broken_config", "Повреждённые конфиги модов"),
-        ("out_of_memory", "Не хватило памяти"),
-        ("memory_too_high", "Выделено слишком много памяти"),
-        ("java_version", "Неподходящая версия Java"),
-        ("jvm_arguments", "Ошибочные аргументы JVM"),
-        ("jvm_crash", "Аварийное падение Java"),
-        ("game_files", "Повреждены файлы игры или загрузчика"),
-        ("graphics", "Проблема с графикой"),
-        ("recent_mods", "Недавно добавленные моды"),
-        ("unknown_crash", "Неизвестная причина краша"),
-    ];
+    // порядок и названия берём из `ISSUE_ORDER` в `auto_repair.rs`
     Value::Array(
-        kinds
+        super::auto_repair::issue_kinds()
             .iter()
             .map(|(id, title)| json!({ "id": id, "title": title }))
             .collect(),
@@ -1141,7 +1195,10 @@ fn normalize_overlay_settings(value: &Value) -> Value {
             .chars()
             .take(32)
             .collect();
-        let allowed = |character: char| character.is_ascii_alphanumeric() || character == '+' || character == '*';
+        let allowed = |character: char| {
+            character.is_ascii_alphanumeric()
+                || matches!(character, '+' | '*' | ',' | '.' | '/' | ';' | '\'' | '[' | ']' | '\\' | '-' | '=' | '`')
+        };
         if !text.is_empty() && text.chars().all(allowed) {
             text
         } else {
@@ -1234,8 +1291,10 @@ pub fn normalize_launcher_profiles(value: &Value) -> Value {
     for (index, item) in raw_values.iter().take(24).enumerate() {
         let Some(fields) = item.as_object() else { continue };
         let get_str = |key: &str, fallback: &str| fields.get(key).and_then(Value::as_str).unwrap_or(fallback).to_owned();
-        let raw_id = Regex::new(r"[^a-z0-9_-]+")
-            .unwrap()
+        // регулярка компилируется один раз, а не на каждый каталог
+        static CATALOG_ID_RE: std::sync::LazyLock<Regex> =
+            std::sync::LazyLock::new(|| Regex::new(r"[^a-z0-9_-]+").unwrap());
+        let raw_id = CATALOG_ID_RE
             .replace_all(get_str("id", "").trim().to_lowercase().as_str(), "-")
             .trim_matches(['-', '_'])
             .to_owned();
@@ -1482,8 +1541,10 @@ pub fn normalize_resource_catalogs(value: &Value, legacy_source: &str, legacy_ur
             None,
             false,
         );
-        let raw_id = Regex::new(r"[^a-z0-9_-]+")
-            .unwrap()
+        // регулярка компилируется один раз, а не на каждый каталог
+        static CATALOG_ID_RE: std::sync::LazyLock<Regex> =
+            std::sync::LazyLock::new(|| Regex::new(r"[^a-z0-9_-]+").unwrap());
+        let raw_id = CATALOG_ID_RE
             .replace_all(fields.get("id").and_then(Value::as_str).unwrap_or("").trim().to_lowercase().as_str(), "-")
             .trim_matches(['-', '_'])
             .to_owned();
@@ -1707,7 +1768,6 @@ pub fn set_value_on(settings: &mut Value, key: &str, value: &Value) -> Result<()
         }
         "keyboard_shortcuts" => value = normalize_shortcuts(&value),
         "language" => {
-            // null = «язык не выбран» (первый запуск спросит), иначе 'ru'|'en'.
             value = match &value {
                 Value::Null => Value::Null,
                 other => match other.as_str().map(|text| text.trim().to_lowercase()) {
@@ -1718,7 +1778,7 @@ pub fn set_value_on(settings: &mut Value, key: &str, value: &Value) -> Result<()
         }
         _ => {}
     }
-    // приведение типов к типу текущего значения.
+    // приведение типов к типу текущего значения
     value = match &current {
         Value::Bool(_) => json!(coerce_bool(&value, current.as_bool().unwrap_or(false))),
         Value::Number(_) => match value.as_str().and_then(|text| text.trim().parse::<i64>().ok()) {
@@ -1728,7 +1788,7 @@ pub fn set_value_on(settings: &mut Value, key: &str, value: &Value) -> Result<()
         _ => value,
     };
     settings[key] = value.clone();
-    // связанные ключи пересчитываются после записи.
+    // связанные ключи пересчитываются после записи
     let behavior_keys = [
         "startup_view", "last_view", "remember_last_view", "default_version_filter", "default_loader",
         "default_account_id", "open_last_instance", "launch_after_install", "auto_refresh_metadata",
@@ -1821,11 +1881,33 @@ mod tests {
     }
 
     #[test]
+    fn overlay_hotkey_normalization_keeps_supported_punctuation() {
+        assert_eq!(normalize_overlay_settings(&json!({ "hotkey_overlay": "Ctrl+," }))[
+            "hotkey_overlay"], json!("Ctrl+,"));
+        assert_eq!(normalize_overlay_settings(&json!({ "hotkey_recording": "Alt+Shift+." }))[
+            "hotkey_recording"], json!("Alt+Shift+."));
+        assert_eq!(normalize_overlay_settings(&json!({ "hotkey_overlay": "Ctrl+?" }))[
+            "hotkey_overlay"], json!("Shift+Tab"));
+    }
+
+    #[test]
     fn defaults_are_written_on_first_load() {
         let store = store_with_env("defaults");
         assert_eq!(store.str_setting("cloud_remote_path"), "nivora-launcher");
         assert!(store.str_setting("client_id").starts_with("ce777973"));
         assert!(store.paths.settings_file.is_file());
+    }
+
+    #[test]
+    fn system_memory_platform_sources_convert_to_kib() {
+        assert_eq!(
+            parse_memtotal_kib("MemFree: 100 kB\nMemTotal: 16777216 kB\n"),
+            Some(16 * 1024 * 1024)
+        );
+        assert_eq!(parse_memtotal_kib("MemTotal: invalid kB\n"), None);
+        assert_eq!(pages_to_kib(4096, 4096), 16 * 1024);
+        assert_eq!(pages_to_kib(-1, 4096), 0);
+        assert_eq!(bytes_to_kib(8 * 1024 * 1024 * 1024), 8 * 1024 * 1024);
     }
 
     #[test]
@@ -1843,13 +1925,25 @@ mod tests {
     #[test]
     fn set_values_validates_and_normalizes() {
         let mut store = store_with_env("set-values");
+        // В системах с маленькой RAM значение 4096 МиБ может быть отклонено —
+        // подбираем размер, который заведомо помещается в доступную память.
+        let available_kib = system_memory_kib();
+        let fits_4gib = available_kib <= 0 || available_kib > 4 * 1024 * 1024;
         store
             .set_values(&json!({ "memory": "4096", "accent_color": "#ABCDEF", "ui_scale": 999, "cloud_remote_path": "a/../b" }))
             .unwrap_err();
-        store
-            .set_values(&json!({ "memory": "4096", "accent_color": "#abcdef", "ui_scale": 999 }))
-            .unwrap();
-        assert_eq!(store.str_setting("memory"), "4GiB");
+        if fits_4gib {
+            store
+                .set_values(&json!({ "memory": "4096", "accent_color": "#abcdef", "ui_scale": 999 }))
+                .unwrap();
+            assert_eq!(store.str_setting("memory"), "4GiB");
+        } else {
+            // На тесной машине проверяем нормализацию на 1 ГиБ
+            store
+                .set_values(&json!({ "memory": "1024", "accent_color": "#abcdef", "ui_scale": 999 }))
+                .unwrap();
+            assert_eq!(store.str_setting("memory"), "1GiB");
+        }
         assert_eq!(store.str_setting("accent_color"), "#abcdef");
         assert_eq!(store.int_setting("ui_scale"), 125);
         assert_eq!(
@@ -1875,7 +1969,7 @@ mod tests {
     fn groups_are_deduplicated_and_capped() {
         let value = json!(["Бета", " бета ", "Альфа", ""]);
         let groups = normalize_groups(&value);
-        // дедупликация чувствительна к регистру, сортировка — нет.
+        // дедупликация различает регистр, сортировка нет
         assert_eq!(groups, json!(["Альфа", "Бета", "бета"]));
         let pinned = normalize_pinned_groups(&json!(["Альфа", "Бета", "Альфа", "Чужая"]), Some(&groups));
         assert_eq!(pinned, json!(["Альфа", "Бета"]));

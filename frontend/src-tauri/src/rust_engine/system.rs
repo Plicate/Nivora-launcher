@@ -1,5 +1,4 @@
-// системные справочники и пробы окружения: выбор Java для запуска,
-// состояние песочницы bubblewrap и каталог серверных ядер.
+// выбор Java, проверка песочницы и каталог серверных ядер
 use regex::Regex;
 use serde_json::{json, Value};
 use std::collections::HashSet;
@@ -37,12 +36,214 @@ const SECURITY_PERMISSIONS: [&str; 10] = [
     "native:load",
 ];
 
+/// частота физического дисплея, не анимации браузера; неизвестную частоту не заменяем на 60 Гц
+pub(crate) fn display_refresh_hz() -> Option<i64> {
+    #[cfg(target_os = "windows")]
+    {
+        return windows_display_refresh_hz();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        return macos_display_refresh_hz();
+    }
+    #[cfg(target_os = "linux")]
+    {
+        return linux_display_refresh_hz();
+    }
+    #[allow(unreachable_code)]
+    None
+}
+
+fn valid_refresh_hz(value: f64) -> Option<i64> {
+    if !value.is_finite() || !(24.0..=480.0).contains(&value) {
+        return None;
+    }
+    Some(value.round() as i64)
+}
+
+fn parse_refresh_token(token: &str) -> Option<i64> {
+    let number = token.trim().trim_end_matches(|ch: char| !ch.is_ascii_digit() && ch != '.');
+    if number.is_empty() {
+        return None;
+    }
+    valid_refresh_hz(number.parse().ok()?)
+}
+
+/// возвращает максимальную частоту активных дисплеев
+fn highest_refresh_hz(rates: impl IntoIterator<Item = Option<i64>>) -> Option<i64> {
+    rates
+        .into_iter()
+        .flatten()
+        .filter(|rate| (24..=480).contains(rate))
+        .max()
+}
+
+fn parse_wlr_randr_current(text: &str) -> Option<i64> {
+    highest_refresh_hz(text.lines().filter_map(|line| {
+        if !line.to_ascii_lowercase().contains("current") {
+            return None;
+        }
+        let tokens: Vec<&str> = line.split_whitespace().collect();
+        tokens
+            .iter()
+            .position(|token| token.eq_ignore_ascii_case("hz"))
+            .and_then(|index| index.checked_sub(1))
+            .and_then(|index| parse_refresh_token(tokens[index]))
+            .map(Some)
+    }))
+}
+
+fn parse_kscreen_current(text: &str) -> Option<i64> {
+    highest_refresh_hz(text.lines().filter_map(|line| {
+        if !line.contains('*') {
+            return None;
+        }
+        let mode = line.split_whitespace().find(|token| token.contains('@'))?;
+        parse_refresh_token(mode.split('@').nth(1)?).map(Some)
+    }))
+}
+
+fn parse_xrandr_current(text: &str) -> Option<i64> {
+    let mut rates = Vec::new();
+    let mut in_connected_output = false;
+    for line in text.lines() {
+        if line.contains(" connected ") {
+            in_connected_output = true;
+            continue;
+        }
+        if line.contains(" disconnected ") {
+            in_connected_output = false;
+            continue;
+        }
+        if !in_connected_output {
+            continue;
+        }
+        if let Some(rate) = line
+            .split_whitespace()
+            .find(|token| token.contains('*'))
+            .and_then(|token| parse_refresh_token(token))
+        {
+            rates.push(Some(rate));
+        }
+    }
+    highest_refresh_hz(rates)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_display_refresh_hz() -> Option<i64> {
+    if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        if let Ok(output) = super::platform::command("wlr-randr").output() {
+            if output.status.success() {
+                if let Some(rate) = parse_wlr_randr_current(&String::from_utf8_lossy(&output.stdout)) {
+                    return Some(rate);
+                }
+            }
+        }
+        if let Ok(output) = super::platform::command("kscreen-doctor").arg("-o").output() {
+            if output.status.success() {
+                return parse_kscreen_current(&String::from_utf8_lossy(&output.stdout));
+            }
+        }
+        return None;
+    }
+
+    if std::env::var_os("DISPLAY").is_none() {
+        return None;
+    }
+    let output = super::platform::command("xrandr").arg("--current").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_xrandr_current(&String::from_utf8_lossy(&output.stdout))
+}
+
+#[cfg(target_os = "windows")]
+fn windows_display_refresh_hz() -> Option<i64> {
+    use windows_sys::Win32::Graphics::Gdi::{
+        EnumDisplayDevicesW, EnumDisplaySettingsW, DEVMODEW, DISPLAY_DEVICEW,
+        DISPLAY_DEVICE_ATTACHED_TO_DESKTOP, DM_DISPLAYFREQUENCY, ENUM_CURRENT_SETTINGS,
+    };
+
+    let mut rates = Vec::new();
+    for index in 0..64u32 {
+        let mut display: DISPLAY_DEVICEW = unsafe { std::mem::zeroed() };
+        display.cb = std::mem::size_of::<DISPLAY_DEVICEW>() as u32;
+        if unsafe { EnumDisplayDevicesW(std::ptr::null(), index, &mut display, 0) } == 0 {
+            break;
+        }
+        if display.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP == 0 {
+            continue;
+        }
+        let mut mode: DEVMODEW = unsafe { std::mem::zeroed() };
+        mode.dmSize = std::mem::size_of::<DEVMODEW>() as u16;
+        if unsafe {
+            EnumDisplaySettingsW(display.DeviceName.as_ptr(), ENUM_CURRENT_SETTINGS, &mut mode)
+        } != 0
+            && mode.dmFields & DM_DISPLAYFREQUENCY != 0
+        {
+            rates.push(mode.dmDisplayFrequency as f64);
+        }
+    }
+
+    let detected = highest_refresh_hz(rates.into_iter().map(valid_refresh_hz));
+    if detected.is_some() {
+        return detected;
+    }
+
+    // если драйвер не указал имя устройства, проверяем основной монитор
+    let mut mode: DEVMODEW = unsafe { std::mem::zeroed() };
+    mode.dmSize = std::mem::size_of::<DEVMODEW>() as u16;
+    let found = unsafe { EnumDisplaySettingsW(std::ptr::null(), ENUM_CURRENT_SETTINGS, &mut mode) };
+    if found == 0 || mode.dmFields & DM_DISPLAYFREQUENCY == 0 {
+        return None;
+    }
+    valid_refresh_hz(mode.dmDisplayFrequency as f64)
+}
+
+#[cfg(target_os = "macos")]
+fn macos_display_refresh_hz() -> Option<i64> {
+    use std::ffi::c_void;
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGGetActiveDisplayList(
+            max_displays: u32,
+            active_displays: *mut u32,
+            display_count: *mut u32,
+        ) -> i32;
+        fn CGDisplayCopyDisplayMode(display: u32) -> *const c_void;
+        fn CGDisplayModeGetRefreshRate(mode: *const c_void) -> f64;
+    }
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        fn CFRelease(value: *const c_void);
+    }
+
+    let mut count = 0;
+    if unsafe { CGGetActiveDisplayList(0, std::ptr::null_mut(), &mut count) } != 0 || count == 0 {
+        return None;
+    }
+    let mut displays = vec![0u32; count as usize];
+    if unsafe { CGGetActiveDisplayList(count, displays.as_mut_ptr(), &mut count) } != 0 {
+        return None;
+    }
+    displays.truncate(count as usize);
+    let rates = displays.into_iter().filter_map(|display| {
+        let mode = unsafe { CGDisplayCopyDisplayMode(display) };
+        if mode.is_null() {
+            return None;
+        }
+        let refresh = unsafe { CGDisplayModeGetRefreshRate(mode) };
+        unsafe { CFRelease(mode) };
+        valid_refresh_hz(refresh)
+    });
+    highest_refresh_hz(rates.map(Some))
+}
+
 fn version_output_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| Regex::new(r#"version\s+"([^"]+)"#).expect("regex версии"))
 }
 
-/// поиск исполняемого файла в PATH (первый существующий и исполняемый).
 fn which(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     for dir in std::env::split_paths(&path) {
@@ -66,7 +267,7 @@ fn expanduser(value: &str) -> PathBuf {
     PathBuf::from(value)
 }
 
-/// запуск с таймаутом: зависший процесс убивается, а не вешает операцию.
+/// запускает процесс с таймаутом и завершает его при зависании
 struct RunOutcome {
     status: Option<i32>,
     stderr_tail: String,
@@ -112,8 +313,7 @@ fn validate_java(resolved: &Path) -> Result<(), String> {
     let name = resolved.file_name().and_then(|value| value.to_str()).unwrap_or("").to_lowercase();
     let parent_name = resolved.parent().and_then(|value| value.file_name()).and_then(|value| value.to_str()).unwrap_or("").to_lowercase();
     let meta = std::fs::metadata(resolved).map_err(|_| err("Java executable не найден"))?;
-    // набор имён как в validate_java_path (runtime.py): на Windows бинарники
-    // носят суффикс .exe.
+    // в Windows принимаем `java.exe` и `javaw.exe`
     let allowed_names: &[&str] = if cfg!(windows) { &["java.exe", "javaw.exe"] } else { &["java", "javaw"] };
     if !allowed_names.contains(&name.as_str()) || parent_name != "bin" || !meta.is_file() {
         return Err(err("Java должна быть исполняемым файлом java/javaw внутри каталога JDK/JRE/bin"));
@@ -121,8 +321,7 @@ fn validate_java(resolved: &Path) -> Result<(), String> {
     if !super::platform::is_executable(&meta) {
         return Err(err("Java должна быть исполняемым файлом java/javaw внутри каталога JDK/JRE/bin"));
     }
-    // владение и group/world-запись — Unix-специфика; на Windows каталоги
-    // JDK закрыты ACL профиля пользователя, проверять нечего.
+    // в Unix проверяем владельца и запрет записи для группы и остальных; в Windows это обеспечивает ACL профиля
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
@@ -147,7 +346,6 @@ fn err(message: &str) -> String {
     message.to_owned()
 }
 
-/// обнаружение установленных Java: JAVA_HOME, PATH, /usr/lib/jvm, /opt.
 fn discover_java_paths() -> Vec<PathBuf> {
     let mut candidates: Vec<PathBuf> = Vec::new();
     if let Ok(java_home) = std::env::var("JAVA_HOME") {
@@ -185,7 +383,7 @@ fn discover_java_paths() -> Vec<PathBuf> {
     result
 }
 
-/// версия Java из вывода `-version`: главная цифра (для 1.8 — вторая).
+/// извлекает версию Java из `-version`; для 1.8 берёт вторую цифру
 fn java_version(java_path: &Path) -> Option<u32> {
     let outcome = run_with_timeout(java_path, &["-version"], Duration::from_secs(10))?;
     let output = format!("{}{}", outcome.stderr_tail, outcome.stdout);
@@ -214,16 +412,13 @@ pub fn java_validate(request: &Value) -> Result<Value, String> {
         return Err(err("Укажите путь к Java executable"));
     }
     let path = expanduser(raw);
-    // allow_directory: каталог JDK/JRE дополняется до bin/java — как в
-    // validate_java_path (runtime.py).
     let resolved = if path.is_dir() {
         path.join("bin").join(if cfg!(windows) { "java.exe" } else { "java" })
     } else {
         path
     };
     validate_java(&resolved)?;
-    // javaw не пишет в stderr/stdout — версию спрашиваем у консольного
-    // собрата из того же bin.
+    // `javaw` не выводит версию, поэтому проверяем `java` из того же каталога
     let probe = if resolved.file_name().and_then(|value| value.to_str()).map(|value| value.to_lowercase() == "javaw.exe").unwrap_or(false) {
         resolved.with_file_name("java.exe")
     } else {
@@ -267,10 +462,7 @@ pub fn java_options(_request: &Value) -> Result<Value, String> {
     Ok(json!({ "options": options }))
 }
 
-/// Отвечает состояние платформы безопасности. Проба bubblewrap запускает
-/// процесс с таймаутом до 3 секунд: без кеша каждый bootstrap (включая
-/// дымовые прогоны и автоповторы фронтенда) платил это заново, хотя
-/// окружение внутри жизни процесса не меняется.
+/// кеширует состояние песочницы: проверка bubblewrap занимает до трёх секунд
 static SECURITY_STATUS_CACHE: OnceLock<Result<Value, String>> = OnceLock::new();
 
 pub fn security_status(_request: &Value) -> Result<Value, String> {
@@ -283,6 +475,20 @@ pub fn security_status(_request: &Value) -> Result<Value, String> {
 }
 
 fn security_status_uncached() -> Result<Value, String> {
+    if cfg!(windows) {
+        // проверка Windows запускает процесс в AppContainer
+        let (available, error) = super::windows_sandbox::probe();
+        return Ok(json!({
+            "platform": "windows",
+            "sandbox": "appcontainer",
+            "bubblewrap": false,
+            "bubblewrap_path": "",
+            "strict_available": available,
+            "strict_probe_error": error,
+            "profiles": SECURITY_PROFILES,
+            "permissions": SECURITY_PERMISSIONS,
+        }));
+    }
     {
     let bubblewrap = which("bwrap");
     let mut strict_available = false;
@@ -322,6 +528,8 @@ fn security_status_uncached() -> Result<Value, String> {
     }
     Ok(json!({
         "platform": if cfg!(windows) { "windows" } else if cfg!(target_os = "macos") { "darwin" } else { "linux" },
+        // поле `sandbox` содержит название выбранной среды
+        "sandbox": if bubblewrap.is_some() { "bubblewrap" } else { "none" },
         "bubblewrap": bubblewrap.is_some(),
         "bubblewrap_path": bubblewrap.map(|path| path.to_string_lossy().to_string()).unwrap_or_default(),
         "strict_available": strict_available,
@@ -359,6 +567,26 @@ mod tests {
     }
 
     #[test]
+    fn display_refresh_parsers_only_accept_the_active_native_mode() {
+        let wlr = "DP-1 \"Display\"\n  2560x1440 px, 60.000000 Hz (current, preferred)\n  1920x1080 px, 144.000000 Hz\nDP-2 \"Fast display\"\n  2560x1440 px, 144.000000 Hz (current, preferred)\n";
+        assert_eq!(parse_wlr_randr_current(wlr), Some(144));
+        assert_eq!(parse_wlr_randr_current("DP-1 1920x1080 px, 60.000000 Hz"), None);
+
+        let kscreen = "Output: 1 eDP-1 enabled connected\n  Modes: 0: 1920x1080@60.000*! 1: 1920x1080@100.000\nOutput: 2 DP-1 enabled connected\n  Modes: 0: 2560x1440@144.000*! 1: 2560x1440@60.000\n";
+        assert_eq!(parse_kscreen_current(kscreen), Some(144));
+        assert_eq!(parse_kscreen_current("Modes: 0: 1920x1080@60.000"), None);
+
+        let xrandr = "HDMI-1 connected primary 1920x1080+0+0\n   1920x1080  60.00*+  59.94\nDP-1 connected 2560x1440+1920+0\n   2560x1440  144.00*+  60.00\n";
+        assert_eq!(parse_xrandr_current(xrandr), Some(144));
+        assert_eq!(parse_xrandr_current("HDMI-1 connected 1920x1080+0+0\n  1920x1080  60.00+"), None);
+        assert_eq!(valid_refresh_hz(0.0), None);
+        assert_eq!(valid_refresh_hz(1.0), None);
+        assert_eq!(valid_refresh_hz(1000.0), None);
+        assert_eq!(highest_refresh_hz([None, Some(1), Some(144)]), Some(144));
+        assert_eq!(highest_refresh_hz([None, Some(1)]), None);
+    }
+
+    #[test]
     fn server_cores_catalog_is_unique_and_complete() {
         let response = server_cores(&json!({})).expect("server_cores");
         let cores = response["cores"].as_array().expect("список ядер");
@@ -376,8 +604,7 @@ mod tests {
         let root = temp_root("java");
         let jdk = root.join("jdk-17");
         fs::create_dir_all(jdk.join("bin")).expect("bin");
-        // права каталогов фиксируем явно: umask окружения тестов может
-        // давать group-writable 0o775, который валидатор обязан отвергать.
+        // фиксируем права явно: umask тестовой среды может разрешить запись группе
         fs::set_permissions(&jdk, fs::Permissions::from_mode(0o755)).expect("jdk 755");
         fs::set_permissions(jdk.join("bin"), fs::Permissions::from_mode(0o755)).expect("bin 755");
         let java = jdk.join("bin").join("java");
@@ -385,7 +612,6 @@ mod tests {
         fs::set_permissions(&java, fs::Permissions::from_mode(0o755)).expect("+x");
         assert!(validate_java(&java).is_ok(), "своя JDK с владельцем-пользователем валидна");
 
-        // java вне каталога bin отвергается: родитель называется lib.
         let misplaced = root.join("lib").join("java");
         fs::create_dir_all(root.join("lib")).expect("lib");
         fs::write(&misplaced, b"#!/bin/sh\n").expect("java");

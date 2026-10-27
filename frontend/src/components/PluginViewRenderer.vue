@@ -2,9 +2,7 @@
 import { defineComponent, h, reactive, watch, useId, type PropType, type VNodeChild } from 'vue'
 import type { PluginJsonValue, PluginUiTone, PluginUiView } from '../../../plugins/api'
 
-/** Payload shape emitted when a declarative node requests a plugin action. */
 type ActionPayload = { action: string; input: PluginJsonValue }
-/** Payload shape emitted when a config-bound control changes. */
 type ConfigPayload = { key: string; value: PluginJsonValue }
 
 const MAX_DEPTH = 10
@@ -65,11 +63,11 @@ export default defineComponent({
     },
   },
   emits: {
-    /** Requests a plugin action; input is null for buttons, the item ID for list actions, the validated URL for links, and the current value for controls. */
+    /** передаёт действие плагина и связанные с ним данные */
     action: (_payload: ActionPayload) => true,
-    /** Reports a changed value from a control that declares config_key. */
+    /** передаёт новое значение поля конфигурации */
     config: (_payload: ConfigPayload) => true,
-    /** Requests opening an absolute HTTP(S) URL that contains no credentials. */
+    /** открывает абсолютную HTTP(S)-ссылку без учётных данных */
     openLink: (_url: string) => true,
   },
   setup(props, { emit }) {
@@ -345,8 +343,7 @@ export default defineComponent({
                 const currentValue = typeof storedValue === 'string' ? storedValue : initialValue ?? ''
                 return h('label', { class: 'plugin-field' }, [
                   h('span', { class: 'plugin-field__label' }, label),
-                  // нативный datetime-календарь выглядит чужеродно и в WebView2
-                  // ещё и по-разному; принимаем значение в формате ISO-минут
+                  // текстовое поле сохраняет единый формат ISO-минут без системного календаря
                   h('input', {
                     class: 'plugin-control',
                     type: 'text',
@@ -922,7 +919,7 @@ export default defineComponent({
   }
 }
 
-/* ── Новые узлы UI v2 ─────────────────────────────────────────────────────── */
+/* узлы интерфейса версии 2 */
 .plugin-textarea { resize: vertical; min-height: 64px; font-family: inherit; }
 
 .plugin-slider { display: flex; align-items: center; gap: 10px; min-width: 0; }

@@ -1,5 +1,4 @@
-// подписи плагинов, доверие к издателям и отзыв. Корень доверия — только
-// ключи, явно закреплённые пользователем; встроенных ключей нет намеренно.
+// доверяем только ключам, явно закреплённым пользователем; встроенных ключей нет
 use base64::Engine as _;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde_json::{json, Map, Value};
@@ -39,7 +38,7 @@ fn reason_valid(value: &str) -> bool {
     value.chars().count() <= MAX_REASON_LENGTH && !value.contains('\0')
 }
 
-/// путь пакета: непустой, относительный, нормализованный, без «.»/«..».
+/// путь пакета: непустой, относительный, нормализованный, без "."/".."
 fn package_path_valid(value: &str) -> Result<(), String> {
     if value.is_empty() || value.contains('\0') {
         return Err("Plugin package paths must be non-empty relative paths".to_owned());
@@ -92,7 +91,7 @@ fn decode_base64(value: &str, expected_length: usize, label: &str) -> Result<Vec
     Ok(decoded)
 }
 
-/// публичный ключ — 32 байта или их canonical base64.
+/// принимает публичный ключ длиной 32 байта или в каноническом Base64
 pub(crate) fn coerce_public_key(value: &Value, label: &str) -> Result<Vec<u8>, String> {
     match value {
         Value::String(text) => decode_base64(text, 32, label),
@@ -136,13 +135,13 @@ fn sorted_deep(value: &Value, depth: usize, label: &str) -> Result<Value, String
     }
 }
 
-/// json.dumps(..., sort_keys=True, separators=(",",":"), ensure_ascii=False).
+/// сериализует JSON без пробелов, с отсортированными ключами и без экранирования Unicode
 pub(crate) fn canonical_json_bytes(value: &Value, label: &str) -> Result<Vec<u8>, String> {
     let sorted = sorted_deep(value, 0, label)?;
     serde_json::to_vec(&sorted).map_err(|_| format!("{label} cannot be encoded as canonical JSON"))
 }
 
-/// копия-нормализация: объект → канонизируемо → снова объект.
+/// проверяет, что объект можно привести к каноническому JSON и разобрать обратно
 pub(crate) fn copy_json_object(value: &Value, label: &str) -> Result<Map<String, Value>, String> {
     let Some(fields) = value.as_object() else {
         return Err(format!("{label} must be a JSON object"));
@@ -180,7 +179,7 @@ fn parse_ed25519_private_pem(pem: &[u8]) -> Result<[u8; 32], String> {
     let der = base64::engine::general_purpose::STANDARD
         .decode(base64_body.as_bytes())
         .map_err(|_| "private_key_pem must be an unencrypted Ed25519 private key".to_owned())?;
-    // PKCS8 Ed25519: SEQUENCE { version 0, AlgId ed25519, OCTET STRING { OCTET STRING seed } }
+    // формат PKCS8 Ed25519: SEQUENCE { version 0, AlgId ed25519, OCTET STRING { OCTET STRING seed } }
     const PREFIX: &[u8] = &[
         0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20,
     ];
@@ -481,7 +480,7 @@ impl<'a> JsonScanner<'a> {
                 }
                 other if other < 0x20 => return Err("control character in string".to_owned()),
                 other => {
-                    // многобайтовый UTF-8 копируем целиком.
+                    // многобайтовый UTF-8 копируем целиком
                     let width = utf8_width(other);
                     let start = self.position - 1;
                     self.position = start + width;
@@ -565,7 +564,7 @@ fn utf8_width(byte: u8) -> usize {
     }
 }
 
-/// разбор JSON с запретом повторяющихся ключей (как object_pairs_hook).
+/// отклоняет повторяющиеся ключи в JSON
 pub(crate) fn parse_strict_json(raw: &[u8], label: &str) -> Result<Value, String> {
     let text = std::str::from_utf8(raw).map_err(|_| format!("{label} contains invalid JSON"))?;
     scan_json_no_duplicate_keys(text).map_err(|_| format!("{label} contains invalid JSON"))?;
@@ -830,6 +829,7 @@ impl PluginTrustStore {
         Ok(true)
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn is_publisher_pinned(&self, key_id: &str, public_key: Option<&Value>) -> Result<bool, String> {
         if !identifier_valid(key_id) {
             return Err("Publisher key ID must be a non-empty ASCII identifier".to_owned());
@@ -949,14 +949,6 @@ impl PluginTrustStore {
         Ok(reason.as_str().map(str::to_owned))
     }
 
-    pub(crate) fn is_publisher_revoked(&self, key_id: &str) -> Result<bool, String> {
-        if !identifier_valid(key_id) {
-            return Err("Publisher key ID must be a non-empty ASCII identifier".to_owned());
-        }
-        let state = self.state_snapshot();
-        Ok(self.publisher_revocation_status(&state, key_id)["revoked"].as_bool().unwrap_or(false))
-    }
-
     pub(crate) fn is_trusted_publisher(&self, key_id: &str, public_key: Option<&Value>) -> Result<bool, String> {
         if !identifier_valid(key_id) {
             return Err("Publisher key ID must be a non-empty ASCII identifier".to_owned());
@@ -975,50 +967,6 @@ impl PluginTrustStore {
             }
         }
         Ok(!self.publisher_revocation_status(&state, key_id)["revoked"].as_bool().unwrap_or(false))
-    }
-
-    pub(crate) fn revoke_publisher(&self, key_id: &str, reason: &str) -> Result<(), String> {
-        if !identifier_valid(key_id) {
-            return Err("Publisher key ID must be a non-empty ASCII identifier".to_owned());
-        }
-        if !reason_valid(reason) {
-            return Err(format!("Revocation reason must be text of at most {MAX_REASON_LENGTH} characters"));
-        }
-        let state = self.state_snapshot();
-        if state.get("local_revoked_publishers").and_then(Value::as_object).and_then(|fields| fields.get(key_id)).and_then(Value::as_str) == Some(reason) {
-            return Ok(());
-        }
-        let mut updated = state.clone();
-        updated["local_revoked_publishers"][key_id] = json!(reason);
-        self.commit(updated)
-    }
-
-    pub(crate) fn unrevoke_publisher(&self, key_id: &str) -> Result<bool, String> {
-        if !identifier_valid(key_id) {
-            return Err("Publisher key ID must be a non-empty ASCII identifier".to_owned());
-        }
-        let state = self.state_snapshot();
-        if !state
-            .get("local_revoked_publishers")
-            .and_then(Value::as_object)
-            .map(|fields| fields.contains_key(key_id))
-            .unwrap_or(false)
-        {
-            return Ok(false);
-        }
-        let mut updated = state.clone();
-        updated["local_revoked_publishers"].as_object_mut().unwrap().remove(key_id);
-        self.commit(updated)?;
-        Ok(true)
-    }
-
-    pub(crate) fn publisher_revocation_reason(&self, key_id: &str) -> Result<Option<String>, String> {
-        if !identifier_valid(key_id) {
-            return Err("Publisher key ID must be a non-empty ASCII identifier".to_owned());
-        }
-        let state = self.state_snapshot();
-        let reason = self.publisher_revocation_status(&state, key_id)["reason"].clone();
-        Ok(reason.as_str().map(str::to_owned))
     }
 
     fn plugin_revocation_status(&self, state: &Value, plugin_id: &str) -> Value {
@@ -1206,7 +1154,7 @@ fn load_store_state(path: &Path) -> Result<Value, String> {
     Ok(state)
 }
 
-/// чтение с O_NOFOLLOW на unix: symlink не откроется даже при гонке.
+/// чтение с O_NOFOLLOW на unix: symlink не откроется даже при гонке
 fn read_private_file(path: &Path, max_bytes: usize) -> Result<Option<Vec<u8>>, String> {
     #[cfg(unix)]
     {
@@ -1227,7 +1175,7 @@ fn read_private_file(path: &Path, max_bytes: usize) -> Result<Option<Vec<u8>>, S
             unsafe { libc::close(fd) };
             return Err("Could not securely read the plugin trust store".to_owned());
         }
-        let mut file = unsafe { File::from_raw_fd(fd) };
+        let file = unsafe { File::from_raw_fd(fd) };
         let mut buffer = Vec::new();
         let outcome = file.take(max_bytes as u64 + 1).read_to_end(&mut buffer);
         match outcome {
@@ -1352,7 +1300,7 @@ mod tests {
         assert_eq!(verified["valid"], json!(true));
         assert_eq!(verified["error"], json!(null));
 
-        // подмененный файл ломает хеш, но не подпись манифеста.
+        // подмененный файл ломает хеш, но не подпись манифеста
         let mut tampered = files.clone();
         tampered.insert("main.js".to_owned(), b"console.log('evil')".to_vec());
         let broken = verify_manifest(&signed, &tampered);
@@ -1376,7 +1324,7 @@ mod tests {
         assert!(store.is_publisher_pinned("author", None).unwrap());
         assert!(!store.is_publisher_pinned("author", Some(&json!(json!("aGk=")))).is_ok_and(|value| value));
 
-        // повторный pin с тем же ключом — идемпотентен.
+        // повторная фиксация того же ключа не меняет состояние
         store.pin_publisher_key("author", &json!(public_key), true).unwrap();
         let status = store.publisher_status("author", None).unwrap();
         assert_eq!(status["revocation_authority"], json!(true));
@@ -1390,7 +1338,7 @@ mod tests {
         assert!(store.unrevoke_plugin("bad-plugin").unwrap());
         assert!(!store.is_plugin_revoked("bad-plugin").unwrap());
 
-        // перезагрузка с диска сохраняет состояние.
+        // перезагрузка с диска сохраняет состояние
         drop(store);
         let reopened = PluginTrustStore::new(&root).unwrap();
         assert!(reopened.unrevoke_plugin("persisted").is_ok());
@@ -1434,7 +1382,7 @@ mod tests {
         assert_eq!(imported["sequence"], json!(7));
         assert!(store.is_plugin_revoked("evil").unwrap());
 
-        // повторная вставка той же последовательности отклоняется.
+        // повторная вставка той же последовательности отклоняется
         assert!(store.import_revocations_json(&document.to_string()).is_err());
         let _ = fs::remove_dir_all(&root);
     }

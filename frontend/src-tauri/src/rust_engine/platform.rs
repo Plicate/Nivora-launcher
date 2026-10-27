@@ -1,9 +1,9 @@
-// кроссплатформенная замена Unix-правам на файлах лаунчера. Токены и
+// единые права на файлы лаунчера; в Windows за доступ отвечают ACL
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::path::Path;
 
-/// выставить режим файла (0700/0755/0600…). На Windows — no-op.
+/// устанавливает режим Unix; на Windows ничего не делает
 #[cfg(unix)]
 pub fn set_mode(path: &Path, mode: u32) {
     use std::os::unix::fs::PermissionsExt;
@@ -21,7 +21,7 @@ pub fn restrict_file(path: &Path) {
     set_mode(path, 0o600);
 }
 
-/// write+create+truncate с правами 0600 (временные файлы токенов/расписаний).
+/// создаёт или обнуляет файл с правами 0600 в Unix
 #[cfg(unix)]
 pub fn create_private(path: &Path) -> io::Result<File> {
     use std::os::unix::fs::OpenOptionsExt;
@@ -55,10 +55,8 @@ pub fn is_executable(_meta: &std::fs::Metadata) -> bool {
     true
 }
 
-/// Единственная точка создания дочерних процессов движка. На Windows процесс
-/// GUI-подсистемы не имеет консоли, и каждый консольный дочерний процесс
-/// (java, ffmpeg, powershell, taskkill, winget, хелперы Go/C++) открывал бы
-/// своё окно. CREATE_NO_WINDOW подавляет его; на других ОС — обычный Command.
+/// создаёт дочерний процесс. `CREATE_NO_WINDOW` не даёт Windows открывать
+/// консольное окно для каждого запуска
 pub fn command<S: AsRef<std::ffi::OsStr>>(program: S) -> std::process::Command {
     #[allow(unused_mut)]
     let mut command = std::process::Command::new(program);
@@ -71,12 +69,8 @@ pub fn command<S: AsRef<std::ffi::OsStr>>(program: S) -> std::process::Command {
     command
 }
 
-/// Каталоги, где лежат нативные хелперы (nivora-turbo, nivora-modcat,
-/// ModScan.java) в каждой раскладке: установщик Windows (`<exe>/backend`),
-/// .app на macOS (`Contents/Resources/backend`), распакованный встроенный
-/// бэкенд Windows, пакеты Linux и dev-дерево (`src-tauri/resources/backend`).
-/// Раньше каждый модуль искал только `<exe>/имя` без `.exe` — в установленных
-/// сборках Windows и macOS хелперы не находились вовсе.
+/// каталоги встроенных помощников для установленных сборок и дерева разработки
+/// на Windows также проверяется имя с расширением `.exe`
 pub fn helper_dirs() -> Vec<std::path::PathBuf> {
     use std::path::PathBuf;
     let mut directories: Vec<PathBuf> = Vec::new();
@@ -109,8 +103,8 @@ pub fn helper_dirs() -> Vec<std::path::PathBuf> {
     directories
 }
 
-/// Путь к хелперу: сначала переменная окружения, затем [`helper_dirs`].
-/// `name` — имя без расширения; на Windows пробуется и `name.exe`.
+/// путь к хелперу: сначала переменная окружения, затем [`helper_dirs`]
+/// имя задаётся без расширения; в Windows проверяется и `name.exe`
 pub fn helper_path(name: &str, env_var: &str) -> Option<std::path::PathBuf> {
     if let Ok(value) = std::env::var(env_var) {
         let path = std::path::PathBuf::from(value.trim());
@@ -151,23 +145,35 @@ mod tests {
         assert!(directories.iter().any(|path| path.ends_with("backend")));
     }
 
-    /// Регрессия: прямой Command::new в коде движка снова открыл бы окно
-    /// консоли на Windows. Тестовые модули не проверяются.
+    /// регрессия: прямой Command::new в коде движка снова открыл бы окно
+    /// консоли на Windows; тестовые модули не проверяются
     #[test]
     fn engine_spawns_processes_only_through_platform_command() {
         let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/rust_engine");
         let mut offenders = Vec::new();
-        for entry in std::fs::read_dir(&directory).unwrap().flatten() {
-            let path = entry.path();
-            if path.file_name().and_then(|name| name.to_str()) == Some("platform.rs") {
-                continue;
-            }
-            let source = std::fs::read_to_string(&path).unwrap();
-            let production = source.split("#[cfg(test)]\nmod tests").next().unwrap_or("");
-            if production.contains("Command::new(") {
-                offenders.push(path.display().to_string());
+        // обходим и вложенные каталоги (bedrock/, launcher/, auto_repair/, plugins/),
+        // иначе новый модуль в подпапке обходит проверку незамеченным
+        fn visit(directory: &std::path::Path, offenders: &mut Vec<String>) {
+            for entry in std::fs::read_dir(directory).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    visit(&path, offenders);
+                    continue;
+                }
+                if path.extension().and_then(|value| value.to_str()) != Some("rs") {
+                    continue;
+                }
+                if path.file_name().and_then(|name| name.to_str()) == Some("platform.rs") {
+                    continue;
+                }
+                let source = std::fs::read_to_string(&path).unwrap();
+                let production = source.split("#[cfg(test)]\nmod tests").next().unwrap_or("");
+                if production.contains("Command::new(") {
+                    offenders.push(path.display().to_string());
+                }
             }
         }
+        visit(&directory, &mut offenders);
         assert!(offenders.is_empty(), "Command::new вне platform::command: {offenders:?}");
     }
 }

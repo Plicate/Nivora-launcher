@@ -1,11 +1,8 @@
-// оптимизация экземпляра: пресеты JVM, рекомендуемая память, GPU,
-// рекомендации модов и требуемая Java (даёт Java-хелпер ModScan.java).
-// Раньше анализ жил в Python optimizer.py.
+// рекомендации по параметрам Java и графики
 use serde_json::{json, Map, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::time::Duration;
 
 use super::config::ConfigStore;
 use super::instances::InstanceStore;
@@ -37,7 +34,6 @@ const FPS_FLAGS: &[&str] = &[
     "-XX:MaxGCPauseMillis=50",
     "-XX:G1HeapRegionSize=32M",
     "-XX:+ParallelRefProcEnabled",
-    "-XX:+AlwaysPreTouch",
     "-XX:+DisableExplicitGC",
     "-Dfml.earlyprogresswindow=false",
 ];
@@ -50,7 +46,6 @@ const BALANCED_FLAGS: &[&str] = &[
     "-XX:MaxGCPauseMillis=100",
     "-XX:G1HeapRegionSize=32M",
     "-XX:+ParallelRefProcEnabled",
-    "-XX:+AlwaysPreTouch",
     "-XX:+DisableExplicitGC",
 ];
 
@@ -64,7 +59,6 @@ const STREAMING_FLAGS: &[&str] = &[
     "-XX:MaxGCPauseMillis=100",
     "-XX:G1HeapRegionSize=32M",
     "-XX:+ParallelRefProcEnabled",
-    "-XX:+AlwaysPreTouch",
     "-XX:+DisableExplicitGC",
     "-XX:+PerfDisableSharedMem",
 ];
@@ -72,25 +66,25 @@ const STREAMING_FLAGS: &[&str] = &[
 struct Preset {
     id: &'static str,
     name: &'static str,
-    description: &'static str,
     flags: &'static [&'static str],
 }
 
 const PRESETS: &[Preset] = &[
-    Preset { id: "fps", name: "FPS (низкие паузы GC)", description: "Минимальные паузы сборщика мусора. Лучший FPS для ванильных и лёгких сборок.", flags: FPS_FLAGS },
-    Preset { id: "balanced", name: "Balanced", description: "Хороший баланс FPS и стабильности. Универсальный вариант для большинства сборок.", flags: BALANCED_FLAGS },
-    Preset { id: "heavy_modpack", name: "Heavy Modpack (Aikar's)", description: "Флаги Aikar — проверенный стандарт для тяжёлых сборок с сотнями модов.", flags: AIKARS_FLAGS },
-    Preset { id: "compatibility", name: "Compatibility", description: "Только SerialGC, без эксперименталок. Для старых версий и проблемных окружений.", flags: COMPAT_FLAGS },
-    Preset { id: "streaming", name: "Streaming", description: "Равномерный фреймтайм. Снижает дропы при стриминге/записи.", flags: STREAMING_FLAGS },
-    Preset { id: "none", name: "Без пресета", description: "JVM-аргументы из профиля не изменяются.", flags: &[] },
+    Preset { id: "fps", name: "FPS (низкие паузы GC)", flags: FPS_FLAGS },
+    Preset { id: "balanced", name: "Balanced", flags: BALANCED_FLAGS },
+    Preset { id: "heavy_modpack", name: "Heavy Modpack (Aikar's)", flags: AIKARS_FLAGS },
+    Preset { id: "compatibility", name: "Compatibility", flags: COMPAT_FLAGS },
+    Preset { id: "streaming", name: "Streaming", flags: STREAMING_FLAGS },
+    Preset { id: "none", name: "Без пресета", flags: &[] },
 ];
 
 fn preset_by_id(id: &str) -> Option<&'static Preset> {
     PRESETS.iter().find(|preset| preset.id == id)
 }
 
-pub fn preset_ids() -> Vec<&'static str> {
-    PRESETS.iter().map(|preset| preset.id).collect()
+/// возвращает флаги JVM для команды запуска; неизвестный пресет даёт пустой список
+pub(crate) fn preset_flags(id: &str) -> Vec<&'static str> {
+    preset_by_id(id).map(|preset| preset.flags.to_vec()).unwrap_or_default()
 }
 
 struct OptimizerMod {
@@ -105,18 +99,18 @@ struct OptimizerMod {
 }
 
 const OPTIMIZER_MODS: &[OptimizerMod] = &[
-    OptimizerMod { name: "Sodium", mod_id: "sodium", description: "Мощная замена рендерера Minecraft. Огромный прирост FPS.", url: "https://modrinth.com/mod/sodium", loaders: &["fabric", "quilt"], min_mc_version: "1.16", category: "fps", required_side: "client" },
-    OptimizerMod { name: "Lithium", mod_id: "lithium", description: "Оптимизации игровой логики без изменения поведения.", url: "https://modrinth.com/mod/lithium", loaders: &["fabric", "quilt"], min_mc_version: "1.16", category: "fps", required_side: "both" },
-    OptimizerMod { name: "FerriteCore", mod_id: "ferrite-core", description: "Снижает потребление памяти блок-состояниями.", url: "https://modrinth.com/mod/ferrite-core", loaders: &["fabric", "quilt", "forge", "neoforge"], min_mc_version: "1.16", category: "memory", required_side: "both" },
-    OptimizerMod { name: "Phosphor", mod_id: "phosphor", description: "Оптимизирует движок освещения (для старых версий).", url: "https://modrinth.com/mod/phosphor", loaders: &["fabric"], min_mc_version: "1.15", category: "fps", required_side: "both" },
-    OptimizerMod { name: "Starlight", mod_id: "starlight", description: "Полная переработка движка освещения (1.17+).", url: "https://modrinth.com/mod/starlight", loaders: &["fabric", "quilt"], min_mc_version: "1.17", category: "fps", required_side: "both" },
-    OptimizerMod { name: "LazyDFU", mod_id: "lazydfu", description: "Ленивая инициализация DataFixerUpper — ускоряет загрузку.", url: "https://modrinth.com/mod/lazydfu", loaders: &["fabric", "quilt"], min_mc_version: "1.16", category: "loading", required_side: "client" },
-    OptimizerMod { name: "ModernFix", mod_id: "modernfix", description: "Снижает использование памяти и время загрузки. Поддерживает Forge/Fabric/NeoForge.", url: "https://modrinth.com/mod/modernfix", loaders: &["fabric", "quilt", "forge", "neoforge"], min_mc_version: "1.16", category: "loading", required_side: "both" },
-    OptimizerMod { name: "Indium", mod_id: "indium", description: "Поддержка Fabric Rendering API для Sodium.", url: "https://modrinth.com/mod/indium", loaders: &["fabric", "quilt"], min_mc_version: "1.16", category: "fps", required_side: "client" },
-    OptimizerMod { name: "ImmediatelyFast", mod_id: "immediatelyfast", description: "Ускоряет immediate mode рендеринг (entity, GUI, HUD).", url: "https://modrinth.com/mod/immediatelyfast", loaders: &["fabric", "quilt"], min_mc_version: "1.18", category: "fps", required_side: "client" },
-    OptimizerMod { name: "Entity Culling", mod_id: "entityculling", description: "Не рендерит сущности за стенами. Прирост FPS на городах/фермах.", url: "https://modrinth.com/mod/entityculling", loaders: &["fabric", "quilt", "forge", "neoforge"], min_mc_version: "1.16", category: "fps", required_side: "client" },
-    OptimizerMod { name: "Clumps", mod_id: "clumps", description: "Группирует шарики опыта → меньше сущностей → лучше TPS.", url: "https://modrinth.com/mod/clumps", loaders: &["fabric", "quilt", "forge", "neoforge"], min_mc_version: "1.16", category: "fps", required_side: "both" },
-    OptimizerMod { name: "Krypton", mod_id: "krypton", description: "Оптимизирует сетевой стек Minecraft.", url: "https://modrinth.com/mod/krypton", loaders: &["fabric", "quilt"], min_mc_version: "1.16", category: "network", required_side: "both" },
+    OptimizerMod { name: "Sodium", mod_id: "sodium", description: "Современный рендерер чанков: значительный рост FPS на клиенте.", url: "https://modrinth.com/mod/sodium", loaders: &["fabric", "quilt"], min_mc_version: "1.16", category: "fps", required_side: "client" },
+    OptimizerMod { name: "Lithium", mod_id: "lithium", description: "Оптимизация игровой логики (физика, мобы, ИИ) без изменения поведения.", url: "https://modrinth.com/mod/lithium", loaders: &["fabric", "quilt"], min_mc_version: "1.16", category: "fps", required_side: "both" },
+    OptimizerMod { name: "FerriteCore", mod_id: "ferrite-core", description: "Снижает потребление памяти данными блоков и предметов.", url: "https://modrinth.com/mod/ferrite-core", loaders: &["fabric", "quilt", "forge", "neoforge"], min_mc_version: "1.16", category: "memory", required_side: "both" },
+    OptimizerMod { name: "Phosphor", mod_id: "phosphor", description: "Оптимизация системы освещения чанков.", url: "https://modrinth.com/mod/phosphor", loaders: &["fabric"], min_mc_version: "1.15", category: "fps", required_side: "both" },
+    OptimizerMod { name: "Starlight", mod_id: "starlight", description: "Переписанный движок освещения — быстрее ванильного.", url: "https://modrinth.com/mod/starlight", loaders: &["fabric", "quilt"], min_mc_version: "1.17", category: "fps", required_side: "both" },
+    OptimizerMod { name: "LazyDFU", mod_id: "lazydfu", description: "Откладывает компиляцию датапаков DFU — быстрее старт игры.", url: "https://modrinth.com/mod/lazydfu", loaders: &["fabric", "quilt"], min_mc_version: "1.16", category: "loading", required_side: "client" },
+    OptimizerMod { name: "ModernFix", mod_id: "modernfix", description: "Комплексное ускорение загрузки и снижение памяти для больших сборок.", url: "https://modrinth.com/mod/modernfix", loaders: &["fabric", "quilt", "forge", "neoforge"], min_mc_version: "1.16", category: "loading", required_side: "both" },
+    OptimizerMod { name: "Indium", mod_id: "indium", description: "Совместимость Sodium с Fabric Rendering API (нужно некоторым модам).", url: "https://modrinth.com/mod/indium", loaders: &["fabric", "quilt"], min_mc_version: "1.16", category: "fps", required_side: "client" },
+    OptimizerMod { name: "ImmediatelyFast", mod_id: "immediatelyfast", description: "Ускоряет рендеринг сущностей и элементов HUD.", url: "https://modrinth.com/mod/immediatelyfast", loaders: &["fabric", "quilt"], min_mc_version: "1.18", category: "fps", required_side: "client" },
+    OptimizerMod { name: "Entity Culling", mod_id: "entityculling", description: "Пропускает рендеринг невидимых сущностей.", url: "https://modrinth.com/mod/entityculling", loaders: &["fabric", "quilt", "forge", "neoforge"], min_mc_version: "1.16", category: "fps", required_side: "client" },
+    OptimizerMod { name: "Clumps", mod_id: "clumps", description: "Склеивает дроп опыта в один объект — меньше нагрузки на сервер.", url: "https://modrinth.com/mod/clumps", loaders: &["fabric", "quilt", "forge", "neoforge"], min_mc_version: "1.16", category: "fps", required_side: "both" },
+    OptimizerMod { name: "Krypton", mod_id: "krypton", description: "Оптимизация сетевого стека: пакеты и каналы.", url: "https://modrinth.com/mod/krypton", loaders: &["fabric", "quilt"], min_mc_version: "1.16", category: "network", required_side: "both" },
 ];
 
 // --------------------------------------------------------- система и память ----
@@ -124,7 +118,7 @@ const OPTIMIZER_MODS: &[OptimizerMod] = &[
 pub fn system_ram_kib() -> u64 {
     #[cfg(unix)]
     {
-        // sysconf не даёт страниц на всех платформах одинаково — /proc надёжнее
+        // `sysconf` не везде возвращает число страниц, поэтому используем `/proc`
         if let Ok(text) = fs::read_to_string("/proc/meminfo") {
             for line in text.lines() {
                 if let Some(rest) = line.strip_prefix("MemTotal:") {
@@ -235,7 +229,7 @@ pub fn recommended_memory_kib() -> u64 {
     (total / 2 / 1024 * 1024).max(1024 * 1024)
 }
 
-// аналог parse_memory_kib из config.py: "auto", 2G, 1536MiB, 512KiB
+// поддерживает auto и значения с единицами G, MiB и KiB
 fn parse_memory_kib(value: &str) -> Option<u64> {
     let raw = value.trim().to_lowercase();
     if raw.is_empty() || raw == "auto" || raw == "automatic" {
@@ -254,7 +248,7 @@ fn parse_memory_kib(value: &str) -> Option<u64> {
     if !number.is_finite() || number <= 0.0 {
         return None;
     }
-    // как в config.py: юнит по умолчанию — MiB, «b» — байты
+    // по умолчанию значения указаны в MiB; суффикс b означает байты
     let bytes = unit == "b";
     let unit = unit.trim_end_matches('b').trim_end_matches('i');
     let factor = match unit {
@@ -313,7 +307,7 @@ fn recommend_optimizer_mods(loader: &str, mc_version: &str, installed: &[String]
     results
 }
 
-// ------------------------------------------------------------------- GPU ----
+// ------------------------------------------------------------------- gPU ----
 
 #[derive(Default, Clone)]
 struct GpuInfo {
@@ -464,7 +458,7 @@ fn detect_gpu_windows() -> GpuInfo {
     info
 }
 
-// ------------------------------------------------------------- Java-скан ----
+// ------------------------------------------------------------- java-скан ----
 
 fn modscan_script() -> Option<PathBuf> {
     super::platform::helper_path("ModScan.java", "NIVORA_MODSCAN").or_else(|| {
@@ -496,7 +490,7 @@ fn java_binary() -> Option<PathBuf> {
             }
         }
     }
-    // управляемые рантаймы лаунчера: ~/.local/share/nivora-launcher/runtimes/*/bin/java
+    // ищем Java в рантаймах, которыми управляет лаунчер
     let home = std::env::var("HOME").ok()?;
     let runtimes = PathBuf::from(home).join(".local/share/nivora-launcher/runtimes");
     let Ok(entries) = fs::read_dir(&runtimes) else { return None };
@@ -514,7 +508,7 @@ struct ModScanOutcome {
     installed_ids: Vec<String>,
 }
 
-// один запуск java на все jar-ы: и требуемая Java, и список mod_id
+// один запуск Java сканирует все JAR и собирает версии и идентификаторы модов
 fn run_modscan(jars: &[PathBuf]) -> Option<ModScanOutcome> {
     if jars.is_empty() {
         return Some(ModScanOutcome { java_required: None, installed_ids: Vec::new() });
@@ -551,7 +545,7 @@ fn run_modscan(jars: &[PathBuf]) -> Option<ModScanOutcome> {
     Some(ModScanOutcome { java_required: max_java, installed_ids })
 }
 
-// s id-кары манифестов установленных модов (sайдкары каталога mods)
+// идентификаторы модов из боковых файлов каталога mods
 fn installed_sidecar_mod_ids(mods_dir: &Path) -> Vec<String> {
     let mut ids: Vec<String> = Vec::new();
     let Ok(entries) = fs::read_dir(mods_dir) else { return ids };
@@ -574,6 +568,93 @@ fn installed_sidecar_mod_ids(mods_dir: &Path) -> Vec<String> {
 
 // ------------------------------------------------------------ операция ----
 
+
+const LAUNCH_HISTORY_FILE: &str = ".nivora-launcher-launch-history.json";
+const MAX_LAUNCH_HISTORY_JSON_BYTES: u64 = 256 * 1024;
+const MAX_HISTORY_ENTRIES: usize = 20;
+
+pub(crate) fn record_launch_start(
+    instance_dir: &Path,
+    launch_id: &str,
+    loader: &str,
+    preset: &str,
+    memory: &str,
+    mc_version: &str,
+) {
+    let path = instance_dir.join(LAUNCH_HISTORY_FILE);
+    let mut history = load_launch_history(&path);
+    history.push(json!({
+        "launch_id": launch_id,
+        "started_at": epoch_seconds(),
+        "loader": loader,
+        "preset": preset,
+        "memory": memory,
+        "mc_version": mc_version,
+        "exit_code": null,
+        "elapsed_seconds": null,
+        "time_to_window_seconds": null,
+    }));
+    save_launch_history(&path, &mut history);
+}
+
+pub(crate) fn record_launch_end(
+    instance_dir: &Path,
+    launch_id: &str,
+    exit_code: i32,
+    elapsed_seconds: f64,
+    time_to_window_seconds: Option<f64>,
+) {
+    let path = instance_dir.join(LAUNCH_HISTORY_FILE);
+    let mut history = load_launch_history(&path);
+    for entry in history.iter_mut().rev() {
+        if entry.get("launch_id").and_then(Value::as_str) == Some(launch_id) {
+            entry["exit_code"] = json!(exit_code);
+            entry["elapsed_seconds"] = json!((elapsed_seconds * 100.0).round() / 100.0);
+            if let Some(seconds) = time_to_window_seconds {
+                entry["time_to_window_seconds"] = json!((seconds * 100.0).round() / 100.0);
+            }
+            break;
+        }
+    }
+    save_launch_history(&path, &mut history);
+}
+
+fn load_launch_history(path: &Path) -> Vec<Value> {
+    let Ok(meta) = fs::symlink_metadata(path) else {
+        return Vec::new();
+    };
+    if meta.is_symlink() || !meta.is_file() || meta.len() > MAX_LAUNCH_HISTORY_JSON_BYTES {
+        return Vec::new();
+    }
+    let Ok(text) = fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    match serde_json::from_str::<Value>(&text) {
+        Ok(Value::Array(entries)) => entries.into_iter().filter(|entry| entry.is_object()).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// читает историю запусков; автонастройка использует её для поиска повторных сбоев
+pub(crate) fn launch_history_public(instance_dir: &Path) -> Vec<Value> {
+    load_launch_history(&instance_dir.join(LAUNCH_HISTORY_FILE))
+}
+
+fn save_launch_history(path: &Path, history: &mut Vec<Value>) {
+    if history.len() > MAX_HISTORY_ENTRIES {
+        let drained = history.split_off(history.len() - MAX_HISTORY_ENTRIES);
+        *history = drained;
+    }
+    let _ = super::net::atomic_json_write(path, &Value::Array(history.clone()), false);
+}
+
+fn epoch_seconds() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|value| value.as_secs_f64())
+        .unwrap_or(0.0)
+}
+
 pub fn optimization_analyze(request: &Value) -> Result<Value, String> {
     let config = ConfigStore::load()?;
     let store = InstanceStore::new(&config)?;
@@ -592,7 +673,7 @@ pub fn optimization_analyze(request: &Value) -> Result<Value, String> {
         let info = store.get(&instance_name)?;
         instance_dir = Some(info.path.clone());
         let settings = instance_settings(&info.path);
-        // приоритет — явные настройки, затем метаданные экземпляра
+        // сначала учитываем явные настройки, затем метаданные экземпляра
         loader = settings
             .get("loader")
             .and_then(Value::as_str)
@@ -632,7 +713,6 @@ pub fn optimization_analyze(request: &Value) -> Result<Value, String> {
         _ => "fps",
     };
 
-    // Java-скан: требуемая версия и список mod_id (одним вызовом)
     let mut jar_list: Vec<PathBuf> = Vec::new();
     if let Some(dir) = instance_dir.as_deref() {
         let mods = dir.join("mods");
@@ -713,8 +793,7 @@ pub fn optimization_analyze(request: &Value) -> Result<Value, String> {
     Ok(json!({ "report": report }))
 }
 
-// чтение .trial-launcher.json без нормализации: интересуют loader/version/
-// memory/jvm_preset, остальное не трогаем
+// читаем только поля, нужные для рекомендаций, не изменяя файл
 fn instance_settings(instance_dir: &Path) -> Map<String, Value> {
     let path = instance_dir.join(".trial-launcher.json");
     if path.is_symlink() || !path.is_file() {
@@ -727,9 +806,98 @@ fn instance_settings(instance_dir: &Path) -> Map<String, Value> {
         .unwrap_or_default()
 }
 
+/// применяет пресет и заданные параметры памяти и графики
+pub fn optimization_apply(request: &Value) -> Result<Value, String> {
+    let instance_name = request.get("name").and_then(Value::as_str).unwrap_or_default().trim().to_owned();
+    let preset_id = request.get("preset_id").and_then(Value::as_str).unwrap_or("none").trim().to_owned();
+    let memory_mib = request.get("memory_mib").and_then(Value::as_i64);
+    let graphics_mode = request.get("graphics_mode").and_then(Value::as_str).unwrap_or_default().trim().to_owned();
+    if preset_by_id(&preset_id).is_none() {
+        return Err(format!("Неизвестный пресет: {preset_id}"));
+    }
+    let memory_kib = |mib: i64| -> String {
+        super::config::format_memory_kib(mib.clamp(512, 32_768) * 1024)
+    };
+    if !instance_name.is_empty() {
+        let mut updates = Map::new();
+        updates.insert("jvm_preset".into(), json!(preset_id));
+        if let Some(mib) = memory_mib {
+            updates.insert("memory".into(), json!(memory_kib(mib)));
+        }
+        if matches!(graphics_mode.as_str(), "auto" | "nvidia" | "mesa" | "software") {
+            updates.insert("graphics_mode".into(), json!(graphics_mode));
+        }
+        // общий путь сохранения нормализует настройки и защищает служебные поля
+        let workspace = super::instance_workspace::InstanceWorkspace::new()?;
+        workspace.save_settings(&instance_name, &Value::Object(updates))?;
+    } else {
+        let mut config = ConfigStore::load()?;
+        let mut values = Map::new();
+        if let Some(mib) = memory_mib {
+            values.insert("memory".into(), json!(memory_kib(mib)));
+        }
+        if matches!(graphics_mode.as_str(), "auto" | "nvidia" | "mesa" | "software") {
+            values.insert("graphics_mode".into(), json!(graphics_mode));
+        }
+        // глобальный пресет хранится в активном профиле запуска
+        let profiles = config
+            .settings()
+            .get("launcher_profiles")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let active_id = config.str_setting("active_launcher_profile_id");
+        let mut updated = profiles;
+        for profile in &mut updated {
+            if profile.get("id").and_then(Value::as_str) == Some(active_id.as_str()) {
+                profile["jvm_preset"] = json!(preset_id);
+                break;
+            }
+        }
+        values.insert("launcher_profiles".into(), Value::Array(updated));
+        config.set_values(&Value::Object(values))?;
+    }
+    Ok(json!({ "ok": true, "preset_id": preset_id }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn launch_history_start_and_end_roundtrip() {
+        let root = std::env::temp_dir().join(format!("nivora-launchhistory-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        record_launch_start(&root, "launch-1", "fabric-1.20.1", "balanced", "4096M", "1.20.1");
+        record_launch_start(&root, "launch-2", "fabric-1.20.1", "fps", "2048M", "1.20.1");
+        record_launch_end(&root, "launch-1", 0, 123.456, Some(12.34));
+        let text = fs::read_to_string(root.join(LAUNCH_HISTORY_FILE)).unwrap();
+        let entries: Vec<Value> = serde_json::from_str(&text).unwrap();
+        assert_eq!(entries.len(), 2);
+        let first = entries.iter().find(|entry| entry["launch_id"] == json!("launch-1")).unwrap();
+        assert_eq!(first["exit_code"], json!(0));
+        assert_eq!(first["elapsed_seconds"], json!(123.46));
+        assert_eq!(first["time_to_window_seconds"], json!(12.34));
+        let second = entries.iter().find(|entry| entry["launch_id"] == json!("launch-2")).unwrap();
+        assert_eq!(second["exit_code"], json!(null));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn launch_history_trims_to_bound() {
+        let root = std::env::temp_dir().join(format!("nivora-launchhistory-trim-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        for index in 0..(MAX_HISTORY_ENTRIES + 5) {
+            record_launch_start(&root, &format!("launch-{index}"), "vanilla", "none", "auto", "1.21");
+        }
+        let text = fs::read_to_string(root.join(LAUNCH_HISTORY_FILE)).unwrap();
+        let entries: Vec<Value> = serde_json::from_str(&text).unwrap();
+        assert_eq!(entries.len(), MAX_HISTORY_ENTRIES);
+        assert_eq!(entries.last().unwrap()["launch_id"], json!(format!("launch-{}", MAX_HISTORY_ENTRIES + 4)));
+        let _ = fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn weight_classification_follows_mod_count() {

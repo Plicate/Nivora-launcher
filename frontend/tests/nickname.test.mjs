@@ -1,4 +1,3 @@
-// Ник Minecraft: 3–16 символов, только латиница, цифры и «_».
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { nicknameError } from '../src/services/nickname.ts'

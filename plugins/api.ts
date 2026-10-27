@@ -1,4 +1,4 @@
-/** Type-only contract for Nivora Launcher v2 plugins. It ships no runtime code. */
+/** type-only contract for Nivora Launcher v2 plugins; it ships no runtime code */
 
 export type PluginApiVersion = "2";
 

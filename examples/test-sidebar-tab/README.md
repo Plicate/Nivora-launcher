@@ -11,7 +11,7 @@ The page is a host-rendered placeholder. The `main.js` entrypoint is required by
 
 ---
 
-<!-- Русская версия / Russian version -->
+<!-- русская версия / Russian version -->
 
 # Тестовая sidebar-вкладка
 

@@ -12,7 +12,7 @@ the launcher UI usable offline and are not presented as an endorsement by those 
 
 ---
 
-<!-- Русская версия / Russian version -->
+<!-- русская версия / Russian version -->
 
 # Марки загрузчиков
 

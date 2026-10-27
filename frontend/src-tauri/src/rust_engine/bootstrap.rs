@@ -1,4 +1,3 @@
-// нативный bootstrap: стартовое состояние приложения без Python-воркера.
 use serde_json::{json, Value};
 
 use super::accounts;
@@ -84,7 +83,6 @@ mod tests {
         for key in ["platform", "machine", "python", "session", "gdk_backend", "display", "nvidia_smi", "glxinfo", "security"] {
             assert!(block.get(key).is_some(), "нет ключа {key}");
         }
-        // платформа — те же имена, что даёт platform.system() в Python
         assert!(["Windows", "Darwin", "Linux"].contains(&block["platform"].as_str().unwrap()));
         assert_eq!(block["machine"].as_str().unwrap(), std::env::consts::ARCH);
         let security = block["security"].as_object().unwrap();

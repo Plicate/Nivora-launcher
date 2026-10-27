@@ -1,4 +1,0 @@
-#!/bin/sh
-# placeholder: собирается scripts/build_deb.sh (PyInstaller)
-echo "nivora-launcher-backend: заглушка для cargo check" >&2
-exit 1

@@ -1,15 +1,17 @@
-// пресеты глобальных настроек: список, удаление, экспорт и импорт
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use super::config::ConfigStore;
 use super::state::launcher_roots;
 
 const PROFILE_FORMAT: &str = "nivora-settings-profile/1";
 const PROFILE_DIR_NAME: &str = "settings-profiles";
 const MAX_PROFILE_JSON_BYTES: u64 = 1024 * 1024;
 const NAME_LIMIT: usize = 48;
+/// машинно-зависимые настройки не переносятся между профилями
+const EXCLUDED_FIELDS: [&str; 3] = ["game_dir", "client_id", "launcher_version"];
 
 const SETTINGS_FIELDS: [&str; 77] = [
     "accent_color",
@@ -156,7 +158,6 @@ fn read_profile(path: &Path) -> Result<Value, String> {
     Ok(document)
 }
 
-/// сводка профилей: повреждённые файлы молча пропускаются.
 fn list_documents(config_home: &Path) -> Result<Vec<Value>, String> {
     let directory = profile_dir(config_home)?;
     let mut names: Vec<String> = fs::read_dir(&directory)
@@ -225,6 +226,67 @@ pub fn profile_import(request: &Value) -> Result<Value, String> {
     let roots = launcher_roots();
     import_at(&roots.config_home, json_text, raw_name)?;
     Ok(json!({ "profiles": list_documents(&roots.config_home)? }))
+}
+
+pub fn settings_profile_save(request: &Value) -> Result<Value, String> {
+    let config = ConfigStore::load()?;
+    let name = request.get("name").and_then(Value::as_str).unwrap_or_default();
+    save_at(&config, name)?;
+    Ok(json!({ "profiles": list_documents(&config.paths.config_home)? }))
+}
+
+pub(crate) fn save_at(config: &ConfigStore, name: &str) -> Result<(), String> {
+    let path = profile_path(&config.paths.config_home, name)?;
+    let now = epoch_seconds();
+    let settings = config.settings().as_object().cloned().unwrap_or_default();
+    let mut payload = Map::new();
+    for key in SETTINGS_FIELDS {
+        if EXCLUDED_FIELDS.contains(&key) {
+            continue;
+        }
+        if let Some(value) = settings.get(key) {
+            payload.insert(key.to_owned(), value.clone());
+        }
+    }
+    let mut document = json!({
+        "format": PROFILE_FORMAT,
+        "name": safe_profile_name(name)?,
+        "created_at": now,
+        "updated_at": now,
+        "settings": payload,
+    });
+    if let Ok(previous) = read_profile(&path) {
+        if let Some(object) = document.as_object_mut() {
+            object.insert("created_at".into(), previous.get("created_at").cloned().unwrap_or(json!(now)));
+        }
+    }
+    fs::write(&path, dump_profile(&document)).map_err(|error| format!("Не удалось записать профиль: {error}"))?;
+    Ok(())
+}
+
+pub fn settings_profile_apply(request: &Value) -> Result<Value, String> {
+    let mut config = ConfigStore::load()?;
+    let name = request.get("name").and_then(Value::as_str).unwrap_or_default();
+    let applied = apply_at(&mut config, name)?;
+    Ok(json!({ "settings": config.settings_public(), "applied": applied }))
+}
+
+pub(crate) fn apply_at(config: &mut ConfigStore, name: &str) -> Result<Vec<String>, String> {
+    let document = read_profile(&profile_path(&config.paths.config_home, name)?)?;
+    let settings = document.get("settings").and_then(Value::as_object).cloned().unwrap_or_default();
+    let mut payload = Map::new();
+    for (key, value) in settings {
+        if SETTINGS_FIELDS.contains(&key.as_str()) && !EXCLUDED_FIELDS.contains(&key.as_str()) {
+            payload.insert(key, value);
+        }
+    }
+    if payload.is_empty() {
+        return Err(err("Профиль настроек пуст"));
+    }
+    let mut applied: Vec<String> = payload.keys().cloned().collect();
+    applied.sort();
+    config.set_values(&Value::Object(payload))?;
+    Ok(applied)
 }
 
 fn import_at(config_home: &Path, json_text: &str, raw_name: &str) -> Result<(), String> {
@@ -341,8 +403,6 @@ mod tests {
 
     #[test]
     fn settings_fields_cover_dataclass_names() {
-        // контракт: список полей уникален и включает машинно-зависимые
-        // ключи, которые сохранение профиля обязано отфильтровать.
         let mut seen = std::collections::HashSet::new();
         for field in SETTINGS_FIELDS {
             assert!(seen.insert(field), "дубликат поля {field}");
@@ -352,4 +412,34 @@ mod tests {
         }
         assert_eq!(SETTINGS_FIELDS.len(), 77);
     }
+
+    #[test]
+    fn save_and_apply_roundtrip_through_settings_store() {
+        let dir = temp_root("save-apply");
+        let roots = super::super::state::LauncherRoots {
+            config_home: dir.join("config"),
+            data_home: dir.join("data"),
+            cache_home: dir.join("cache"),
+        };
+        let mut config = ConfigStore::from_paths(super::super::config::Paths::from_roots(&roots)).expect("хранилище");
+        config.set_values(&json!({ "theme": "light", "ui_scale": 110, "game_dir": "/machine/specific" })).expect("настройки");
+        save_at(&config, "Снимок").expect("save");
+        let documents = list_documents(&roots.config_home).expect("список");
+        assert_eq!(documents.len(), 1);
+        assert_eq!(documents[0]["name"], json!("Снимок"));
+        let profile_path_value = profile_path(&roots.config_home, "Снимок").expect("путь");
+        let document = read_profile(&profile_path_value).expect("профиль");
+        let settings = document.get("settings").and_then(Value::as_object).expect("settings");
+        assert!(!settings.contains_key("game_dir"), "машинно-зависимые ключи не снимаются");
+        assert!(settings.contains_key("theme"));
+        let mut fresh = ConfigStore::from_paths(super::super::config::Paths::from_roots(&roots)).expect("хранилище");
+        fresh.set_values(&json!({ "theme": "dark" })).expect("настройки");
+        assert_eq!(fresh.str_setting("theme"), "dark");
+        let applied = apply_at(&mut fresh, "Снимок").expect("apply");
+        assert!(applied.contains(&"theme".to_owned()));
+        assert!(!applied.contains(&"game_dir".to_owned()));
+        assert_eq!(fresh.str_setting("theme"), "light");
+        assert_eq!(fresh.settings().get("ui_scale").and_then(Value::as_i64), Some(110));
+    }
 }
+

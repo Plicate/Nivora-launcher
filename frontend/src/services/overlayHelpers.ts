@@ -1,4 +1,3 @@
-// чистые helpers оверлея без зависимостей: используются и в окне лаунчера,
 export const OVERLAY_WINDOW_LABEL = 'nivora-overlay'
 
 export const DEFAULT_OVERLAY_SETTINGS = {
@@ -86,28 +85,37 @@ export function normalizeHotkey(value: string | undefined, fallback: string): st
     if (!key) return fallback
     if (!keys.includes(key)) keys.push(key)
   }
-  // комбинация без обычной клавиши («Ctrl+Shift») — не комбинация
+  // требуется ровно одна клавиша помимо модификаторов
   if (keys.length !== 1) return fallback
   const order: Record<string, number> = { Ctrl: 0, Alt: 1, Shift: 2, Meta: 3 }
   modifiers.sort((a, b) => order[a] - order[b])
   return [...modifiers, keys[0]].join('+')
 }
 
+export function hotkeyModifiersFromEvent(event: { ctrlKey?: boolean; altKey?: boolean; shiftKey?: boolean; metaKey?: boolean; key: string }): string[] {
+  const key = event.key.toLowerCase()
+  return [
+    ...(event.ctrlKey || key === 'control' ? ['Ctrl'] : []),
+    ...(event.altKey || key === 'alt' ? ['Alt'] : []),
+    ...(event.shiftKey || key === 'shift' ? ['Shift'] : []),
+    ...(event.metaKey || key === 'meta' ? ['Meta'] : []),
+  ]
+}
+
 export function hotkeyFromEvent(event: { ctrlKey?: boolean; altKey?: boolean; shiftKey?: boolean; metaKey?: boolean; key: string }): string {
   const key = canonicalKey(event.key || '')
   if (!key || isModifierOnly(event.key || '')) return ''
-  const parts: string[] = []
-  if (event.ctrlKey) parts.push('Ctrl')
-  if (event.altKey) parts.push('Alt')
-  if (event.shiftKey) parts.push('Shift')
-  if (event.metaKey) parts.push('Meta')
-  parts.push(key)
-  return parts.join('+')
+  return [...hotkeyModifiersFromEvent(event), key].join('+')
+}
+
+export function overlayWindowAction(visible: boolean, exists: boolean): 'create' | 'show' | 'hide' | 'noop' {
+  if (visible) return exists ? 'show' : 'create'
+  return exists ? 'hide' : 'noop'
 }
 
 export function overlayWindowRequested(): boolean {
   if (typeof window === 'undefined') return false
-  // два независимых признака: параметр URL живёт при редиректах webview
+  // метка окна служит запасной проверкой, если URL потерялся при редиректе
   if (new URLSearchParams(window.location.search).get('window') === 'overlay') return true
   try {
     const internals = (window as Window & { __TAURI_INTERNALS__?: { metadata?: { currentWindow?: { label?: string } } } }).__TAURI_INTERNALS__
@@ -123,9 +131,9 @@ export function recordingFileName(file: string): string {
   return parts[parts.length - 1] || file
 }
 
-export type OverlayWindowMode = 'x11' | 'wayland' | 'fallback'
+type OverlayWindowMode = 'x11' | 'wayland' | 'fallback'
 
-export interface OverlayWindowPlan {
+interface OverlayWindowPlan {
   url: string
   transparent: boolean
   decorations: boolean
@@ -146,8 +154,7 @@ export function overlayWindowPlan(
   const compatible = mode !== 'x11'
   if (compatible) {
     return {
-      // &opaque=1 сообщает окну оверлея, что оно живёт в непрозрачном окне:
-      // иначе полупрозрачная вёрстка ляжет на белый фон.
+      // флаг убирает прозрачную вёрстку в непрозрачном окне Wayland
       url: 'index.html?window=overlay&opaque=1',
       transparent: false,
       decorations: true,
@@ -163,8 +170,7 @@ export function overlayWindowPlan(
     url: 'index.html?window=overlay',
     transparent: true,
     decorations: false,
-    // тень у бордерлесс-окна на WebKitGTK — источник артефактов, оверлею
-    // она не нужна.
+    // тень WebKitGTK может давать артефакты на прозрачном окне
     shadow: false,
     alwaysOnTop: true,
     skipTaskbar: true,

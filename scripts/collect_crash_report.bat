@@ -1,8 +1,5 @@
 @echo off
-rem Nivora Launcher: сбор диагностики краша на Windows за один запуск.
-rem Положит отчёт на рабочий стол (nivora-crash-report.txt) и откроет его.
-rem Можно перетащить exe лаунчера на этот bat — тогда отчёт запишет ещё и
-rem код завершения запуска (0xC0000005 и т.п. расшифрованы внизу).
+rem собирает отчёт Windows на рабочий стол; переданный exe запускается для записи кода выхода
 setlocal
 
 set "OUT=%USERPROFILE%\Desktop\nivora-crash-report.txt"

@@ -1,4 +1,4 @@
-// операции над локальными данными без сети:
+// локальные операции без сетевых запросов
 use serde_json::{json, Value};
 use std::fs;
 use std::path::Path;
@@ -28,7 +28,7 @@ pub fn launch_history(request: &Value) -> Result<Value, String> {
 }
 
 pub(crate) fn launch_history_from(game_dir: &Path, name: &str) -> Value {
-    // «Экземпляр не найден» — это пустая история, а не ошибка.
+    // для отсутствующего экземпляра возвращаем пустую историю
     let Some(instance_path) = resolve_instance_path(game_dir, name) else {
         return json!({ "history": [] });
     };
@@ -117,7 +117,7 @@ pub(crate) fn cache_prune_from(cache_dir: &Path, max_age_hours: i64) -> Value {
 }
 
 fn request_age_hours(request: &Value) -> Result<i64, String> {
-    // ключ опционален: по умолчанию 48; ошибка разбора падает наружу.
+    // параметр необязателен (по умолчанию 48); неверное значение даёт ошибку
     let default_value = json!(48);
     let raw = request.get("max_age_hours").unwrap_or(&default_value);
     if let Some(value) = raw.as_i64() {
@@ -145,7 +145,7 @@ fn round_mib_one_decimal(total_bytes: u64) -> f64 {
     let rounded = match scaled - floor {
         difference if difference == 0.5 => {
             let lower = floor as i64;
-            // соседи отличаются на 1 — чётный выбирается точно.
+            // при равном расстоянии выбираем ближайшее чётное значение
             if lower % 2 == 0 {
                 lower as f64
             } else {
@@ -184,7 +184,6 @@ fn jvm_presets() -> Value {
         "-XX:MaxGCPauseMillis=50",
         "-XX:G1HeapRegionSize=32M",
         "-XX:+ParallelRefProcEnabled",
-        "-XX:+AlwaysPreTouch",
         "-XX:+DisableExplicitGC",
         "-Dfml.earlyprogresswindow=false",
     ];
@@ -196,7 +195,6 @@ fn jvm_presets() -> Value {
         "-XX:MaxGCPauseMillis=100",
         "-XX:G1HeapRegionSize=32M",
         "-XX:+ParallelRefProcEnabled",
-        "-XX:+AlwaysPreTouch",
         "-XX:+DisableExplicitGC",
     ];
     let aikars_flags = [
@@ -226,7 +224,6 @@ fn jvm_presets() -> Value {
         "-XX:MaxGCPauseMillis=100",
         "-XX:G1HeapRegionSize=32M",
         "-XX:+ParallelRefProcEnabled",
-        "-XX:+AlwaysPreTouch",
         "-XX:+DisableExplicitGC",
         "-XX:+PerfDisableSharedMem",
     ];
@@ -273,9 +270,11 @@ mod tests {
         let presets = jvm_presets();
         let ids: Vec<&str> = presets.as_array().unwrap().iter().map(|p| p["id"].as_str().unwrap()).collect();
         assert_eq!(ids, vec!["fps", "balanced", "heavy_modpack", "compatibility", "streaming", "none"]);
-        // количество флагов и якорные значения, которые видит пользователь.
         let counts: Vec<usize> = presets.as_array().unwrap().iter().map(|p| p["flags"].as_array().unwrap().len()).collect();
-        assert_eq!(counts, vec![10, 9, 16, 2, 10, 0]);
+        assert_eq!(counts, vec![9, 8, 16, 2, 9, 0]);
+        assert!(presets.as_array().unwrap().iter().all(|preset| {
+            preset["flags"].as_array().unwrap().iter().all(|flag| flag.as_str() != Some("-XX:+AlwaysPreTouch"))
+        }));
         assert_eq!(presets[0]["flags"][5], json!("-XX:G1HeapRegionSize=32M"));
         assert_eq!(presets[2]["flags"][14], json!("-Dusing.aikars.flags=https://mcflags.emc.gs"));
         assert_eq!(presets[3]["flags"][0], json!("-XX:+UseSerialGC"));
@@ -287,8 +286,7 @@ mod tests {
     fn launch_history_reads_only_object_entries() {
         let root = fixture_root("history");
         let game = root.join("game");
-        // каталоги экземпляров всегда хранятся в безопасной форме имени
-        // («My World» → «My-World»), запрос же может приходить «человеческий».
+        // на диске имя нормализовано, а запрос может содержать исходное имя
         let instance = game.join("instances").join("My-World");
         fs::create_dir_all(&instance).unwrap();
         write_json(
@@ -304,12 +302,9 @@ mod tests {
         assert_eq!(response["history"].as_array().map(Vec::len), Some(2));
         assert_eq!(response["history"][0]["launch_id"], json!("a"));
 
-        // неизвестный экземпляр — пустая история, а не ошибка.
         assert_eq!(launch_history_from(&game, "нет такого")["history"], json!([]));
-        // пустое имя — тоже (уровень обработчика).
         assert_eq!(launch_history(&json!({ "name": "  " })).unwrap()["history"], json!([]));
 
-        // разрушенный JSON → пустая история, не ошибка.
         fs::write(instance.join(LAUNCH_HISTORY_FILE), "{not json").unwrap();
         assert_eq!(read_launch_history(&instance), json!([]));
     }
@@ -330,17 +325,15 @@ mod tests {
         assert_eq!(stats["file_count"], json!(4));
         assert_eq!(stats["total_bytes"], json!(1024 + 2048 + 2 + 2));
 
-        // огромный возраст: cutoff глубоко в прошлом — ничего не удалено.
         assert_eq!(cache_prune_from(&cache, 100_000)["deleted_files"], json!(0));
         assert!(stale.exists());
         assert!(fresh.exists());
 
         assert_eq!(cache_prune_from(&cache, 0)["deleted_files"], json!(2));
         assert!(!stale.exists() && !fresh.exists());
-        // .jar не тронуты — чистка выбирает только .json/.cache.
+        // чистка удаляет метаданные кэша, но не скачанные JAR-файлы
         assert!(cache.join("a.jar").exists());
 
-        // отсутствующий каталог кеша — нули без ошибок.
         let empty = cache_stats_from(&root.join("no-such-cache"));
         assert_eq!(empty["cache"]["file_count"], json!(0));
         assert_eq!(empty["cache"]["total_bytes"], json!(0));
@@ -349,7 +342,6 @@ mod tests {
 
     #[test]
     fn mib_rounding_is_half_even() {
-        // 262144 байта = ровно 0,25 МиБ → 0.2, а не 0.3.
         assert_eq!(round_mib_one_decimal(262_144), 0.2);
         assert_eq!(round_mib_one_decimal(786_432), 0.8);
         assert_eq!(round_mib_one_decimal(1_048_576), 1.0);

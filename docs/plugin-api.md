@@ -48,9 +48,9 @@ V2 предоставляет `launcher:servers` для списка серве�
 V3 добавляет расширенные host-секции `runtime`, `permissions`, `config.readProjected`, `http`, `instances`, `os` и `proxy`. Уже реализованы следующие операции:
 
 - `api.runtime.getInfo()`, `getCapabilities()`, `getQuotaUsage()`, `assertCapability()`;
-- `api.permissions.get()` и `set()`;
+- `api.permissions.get()` и `set()`; `set()` может только отозвать выданные разрешения, новые выдаются пользователем в менеджере плагинов;
 - `api.config.readProjected(schemaId)` для схем `launcher-public-config` и `network-diagnostics`;
-- `api.http.request(...)` для host-mediated HTTP(S) запросов с allowlist-проверкой домена;
+- `api.http.request(...)` для HTTPS-запросов к разрешённым доменам; HTTP и настроенные прокси блокируются, чтобы не обходить проверку адреса;
 - `api.instances.list()` и `api.instances.getProcessMetrics(instanceName)`;
 - `api.os.openUrl(url)`;
 - `api.proxy.listRoutes()`, `saveRoutes()`, `addRoute()`, `removeRoute()`.
@@ -133,7 +133,7 @@ DNS и TCP probe не обходят allowlist: `host` обязан точно �
 
 ## Extended UI, quotas, audit and developer reload
 
-The implementation status, exact limits, executable UI/data-binding example and remaining unsupported services are documented in [plugin-core-extension-status.md](plugin-core-extension-status.md).
+Хост проверяет узлы интерфейса при разборе манифеста и во время работы. Для каждого плагина действуют пределы: глубина 10, 512 узлов и элементов коллекций на представление, 256 КиБ сериализованных данных на представление, 32 представления, 128 фрагментов и 16 привязок данных; таблица может содержать до 32 колонок. Исполнитель плагина и нативный хост независимо ограничивают число вызовов и объём данных. Аудит хранит сведения об операции, но не значения аргументов.
 
 Developer mode enables a bounded manifest/entrypoint polling watcher. To explicitly request a runtime replacement in an open desktop launcher:
 
@@ -145,7 +145,7 @@ Reload preserves signature/integrity checks and user permission grants; it is no
 
 ---
 
-<!-- English version / Английская версия -->
+<!-- english version / Английская версия -->
 
 # Nivora Launcher Plugin API
 
@@ -197,9 +197,9 @@ V2 provides `launcher:servers` for a server list namespaced to the plugin. Avail
 V3 adds the extended host sections `runtime`, `permissions`, `config.readProjected`, `http`, `instances`, `os` and `proxy`. Implemented operations:
 
 - `api.runtime.getInfo()`, `getCapabilities()`, `getQuotaUsage()`, `assertCapability()`;
-- `api.permissions.get()` and `set()`;
+- `api.permissions.get()` and `set()`; `set()` may only revoke existing grants, while new grants require a user action in Plugin Center;
 - `api.config.readProjected(schemaId)` for the `launcher-public-config` and `network-diagnostics` schemas;
-- `api.http.request(...)` for host-mediated HTTP(S) requests with allowlist checking of the domain;
+- `api.http.request(...)` for HTTPS requests to allowlisted domains; HTTP and configured proxies are blocked to preserve address validation;
 - `api.instances.list()` and `api.instances.getProcessMetrics(instanceName)`;
 - `api.os.openUrl(url)`;
 - `api.proxy.listRoutes()`, `saveRoutes()`, `addRoute()`, `removeRoute()`.
@@ -281,7 +281,7 @@ The v2 permission list is defined by the `PluginPermission` type in `plugins/api
 
 ## Extended UI, quotas, audit and developer reload
 
-Implementation status, exact limits, an executable UI/data-binding example and the remaining unsupported services are documented in [plugin-core-extension-status.md](plugin-core-extension-status.md).
+The host validates UI nodes at package and runtime boundaries. Per guest runtime, limits are depth 10, 512 nodes and collection entries per view, 256 KiB per serialized view, 32 views, 128 fragments and 16 data bindings; tables allow up to 32 columns. Worker and native host-call quotas are enforced separately. The audit records operation metadata, not argument values.
 
 Developer mode enables a bounded manifest/entrypoint polling watcher. To explicitly request a runtime replacement in an open desktop launcher:
 

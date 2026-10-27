@@ -1,4 +1,4 @@
-// минимальные типы для qrcode: @types/qrcode тянет @types/node
+// минимальные типы qrcode без зависимости от @types/node
 declare module 'qrcode' {
   interface QrStringOptions {
     type?: 'svg' | 'utf8' | 'terminal'

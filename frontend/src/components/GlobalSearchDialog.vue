@@ -1,6 +1,6 @@
 <script setup lang="ts">
 // глобальный поиск по всем экземплярам: где установлен мод, в каком
-// экземпляре мир или ресурспак. Ctrl+K или кнопка в верхней панели
+// экземпляре мир или ресурспак; сочетание Ctrl+K или кнопка в верхней панели
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import Icon from './Icon.vue'
 import { bridge } from '../services/bridge'
@@ -136,7 +136,6 @@ onBeforeUnmount(() => {
 
 <template>
   <Teleport to="body">
-    <Transition name="dialog">
       <div class="dialog-scrim" role="presentation" @click.self="emit('close')">
         <section class="dialog-card global-search-card" role="dialog" tabindex="-1" aria-modal="true" aria-label="Глобальный поиск">
           <div class="global-search-head">
@@ -186,6 +185,5 @@ onBeforeUnmount(() => {
           <footer class="global-search-foot">Ctrl+K — открыть поиск · Enter — первый результат · клик по папке — проводник</footer>
         </section>
       </div>
-    </Transition>
   </Teleport>
 </template>

@@ -1,74 +1,17 @@
-//! Единый реестр GUI-операций desktop-моста.
-//!
-//! Раньше белый список жил отдельным массивом в `lib.rs`, нативные операции —
-//! в `NATIVE_OPS`, а операции воркера — только в диспетчере `gui_service.py`.
-//! Три списка расходились, и новая функция падала с «Операция GUI не
-//! разрешена desktop bridge». Теперь разрешено ровно объединение
-//! `NATIVE_OPS ∪ WORKER_OPS`, маршрут выбирает одна функция [`route`], а
-//! тесты ниже сверяют реестр с фронтендом, диспетчером движка и воркером.
+//! реестр GUI-операций; [`route`] выбирает обработчик разрешённого запроса
+
 use serde_json::Value;
 
-use super::{bedrock, is_native, needs_worker, NATIVE_OPS};
+use super::{bedrock, NATIVE_OPS};
 
-/// Операции, которые обслуживает только Python-воркер. Нативные операции,
-/// временно уходящие в воркер по условию (`needs_worker`), здесь не
-/// дублируются — они в `NATIVE_OPS`.
-pub const WORKER_OPS: &[&str] = &[
-    "auto_repair_apply", "auto_repair_diagnose", "auto_repair_mute", "export_modpack",
-    "external_instance_import", "github_theme_install", "github_theme_search",
-    "graphics_diagnostics", "instance_log", "instance_repair_version", "instance_snapshot_create",
-    "instance_snapshot_delete", "instance_snapshot_list", "instance_snapshot_restore",
-    "instance_version_import", "instance_version_override_save", "instance_versions", "launch",
-    "launch_instance", "mod_audit_accept", "mod_audit_cancel", "mod_audit_prepare",
-    "mod_audit_status", "modpack_import", "mods_install", "mods_remove", "mods_update",
-    "open_external", "open_folder", "optimization_apply", "plugin_api_authorize",
-    "plugin_api_capabilities", "plugin_api_config_projected_read", "plugin_api_files_list",
-    "plugin_api_files_read", "plugin_api_files_remove", "plugin_api_files_write",
-    "plugin_api_instances_list", "plugin_api_open_external", "plugin_api_operation_trace",
-    "plugin_api_permissions_get", "plugin_api_permissions_set", "plugin_api_process_metrics",
-    "plugin_api_proxy_routes_add", "plugin_api_proxy_routes_get", "plugin_api_proxy_routes_remove",
-    "plugin_api_proxy_routes_save", "plugin_api_runtime_info", "plugin_api_source",
-    "plugin_config_get", "plugin_config_remove", "plugin_config_set", "plugin_database_execute",
-    "plugin_database_query", "plugin_file_list", "plugin_file_read", "plugin_file_remove",
-    "plugin_file_write", "plugin_http_request", "plugin_install", "plugin_local_revoke",
-    "plugin_local_unrevoke", "plugin_local_untrusted_execution", "plugin_network_dns",
-    "plugin_network_fetch", "plugin_network_ping", "plugin_network_port_check",
-    "plugin_permission_grants_set", "plugin_publisher_pin",
-    "plugin_publisher_revocation_authority_set", "plugin_publisher_unpin",
-    "plugin_revocations_import", "plugin_security_status", "plugin_server_list_add",
-    "plugin_server_list_get", "plugin_server_list_remove", "plugin_server_list_save",
-    "plugin_set_enabled", "plugin_storage_get", "plugin_storage_remove", "plugin_storage_set",
-    "plugin_uninstall", "save_server_plugin_catalogs", "server_core_download", "server_create",
-    "server_details", "server_file_delete", "server_file_list", "server_file_mkdir",
-    "server_file_read", "server_file_upload", "server_file_write", "server_plugin_catalogs",
-    "server_plugin_details", "server_plugin_install", "server_plugin_remove",
-    "server_plugin_search", "server_plugin_update", "server_plugin_updates", "server_save_config",
-    "server_snapshot_create", "server_snapshot_delete", "server_snapshot_list",
-    "server_snapshot_restore", "server_upload_core", "settings_profile_apply",
-    "settings_profile_save", "shader_benchmark_start", "shader_benchmark_status", "system_notify",
-    "update_instance_profile", "wallpaper_clear", "wallpaper_import", "world_import_begin",
-    "world_import_cancel", "world_import_chunk", "world_import_finish",
-];
-
-/// Операции запуска игры: обслуживаются отдельным короткоживущим воркером,
-/// чтобы долгая игровая сессия не держала общий воркер.
-const TRANSIENT_WORKER_OPS: &[&str] = &["launch", "launch_instance"];
-
-/// Куда отправить разрешённый запрос.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Route {
-    /// Rust-движок в процессе Tauri.
     Native,
-    /// Запуск Bedrock-экземпляра движком (перехват `launch_instance`).
     BedrockLaunch,
-    /// Отдельный воркер на время игровой сессии.
-    TransientWorker,
-    /// Общий Python-воркер.
-    Worker,
 }
 
 pub fn is_allowed(operation: &str) -> bool {
-    NATIVE_OPS.contains(&operation) || WORKER_OPS.contains(&operation)
+    NATIVE_OPS.contains(&operation)
 }
 
 pub fn operation_of(request: &Value) -> Result<&str, String> {
@@ -78,8 +21,8 @@ pub fn operation_of(request: &Value) -> Result<&str, String> {
         .ok_or_else(|| "GUI-запрос не содержит operation".to_owned())
 }
 
-/// Проверка белого списка. Формат ошибки сохранён: фронтенд и журналы
-/// поддержки ищут именно эту строку.
+/// проверка белого списка; формат ошибки сохранён: фронтенд и журналы
+/// поддержки ищут именно эту строку
 pub fn validate(request: &Value) -> Result<&str, String> {
     let operation = operation_of(request)?;
     if !is_allowed(operation) {
@@ -88,28 +31,12 @@ pub fn validate(request: &Value) -> Result<&str, String> {
     Ok(operation)
 }
 
-/// Единственная точка выбора обработчика: сначала белый список, затем
-/// маршрут. `lib.rs` только исполняет выбранный маршрут.
 pub fn route(request: &Value) -> Result<Route, String> {
-    let operation = validate(request)?;
-    if is_native(operation) && !needs_worker(operation, request) {
-        return Ok(Route::Native);
-    }
+    validate(request)?;
     if bedrock::should_intercept_launch(request) {
         return Ok(Route::BedrockLaunch);
     }
-    if TRANSIENT_WORKER_OPS.contains(&operation) {
-        return Ok(Route::TransientWorker);
-    }
-    Ok(Route::Worker)
-}
-
-pub fn uses_transient_worker(request: &Value) -> bool {
-    request
-        .get("operation")
-        .and_then(Value::as_str)
-        .map(|operation| TRANSIENT_WORKER_OPS.contains(&operation))
-        .unwrap_or(false)
+    Ok(Route::Native)
 }
 
 #[cfg(test)]
@@ -127,9 +54,7 @@ mod tests {
         std::fs::read_to_string(path).unwrap_or_else(|error| panic!("{}: {error}", path.display()))
     }
 
-    /// Строковые литералы-операции в `request<...>('op'` и `request('op'`.
-    /// Дженерики фронтенда бывают вложенными (`Array<{...}>`, `import('...')`),
-    /// поэтому скобки не разбираются регуляркой, а пропускаются счётчиком.
+    /// счётчик скобок учитывает вложенные типы TypeScript
     fn frontend_operations() -> BTreeSet<String> {
         let mut found = BTreeSet::new();
         let mut stack = vec![project_root().join("frontend/src")];
@@ -202,25 +127,6 @@ mod tests {
         }
     }
 
-    fn worker_dispatch() -> BTreeSet<String> {
-        let mut found = BTreeSet::new();
-        let pattern = regex::Regex::new(r#"operation == "([a-z0-9_]+)""#).unwrap();
-        let group = regex::Regex::new(r#"operation in [\{\(]([^}\)]*)[\}\)]"#).unwrap();
-        let literal = regex::Regex::new(r#""([a-z0-9_]+)""#).unwrap();
-        for name in ["gui_service.py", "gui_cloud_ops.py"] {
-            let source = read(&project_root().join("nivora_launcher").join(name));
-            for capture in pattern.captures_iter(&source) {
-                found.insert(capture[1].to_owned());
-            }
-            for capture in group.captures_iter(&source) {
-                for item in literal.captures_iter(&capture[1]) {
-                    found.insert(item[1].to_owned());
-                }
-            }
-        }
-        found
-    }
-
     fn native_dispatch() -> BTreeSet<String> {
         let source = read(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src/rust_engine/mod.rs"));
         let body = &source[source.find("pub fn handle(").expect("handle() в mod.rs")..];
@@ -229,9 +135,9 @@ mod tests {
     }
 
     #[test]
-    fn registry_lists_do_not_overlap_or_repeat() {
+    fn registry_operations_are_unique() {
         let mut seen = BTreeSet::new();
-        for operation in NATIVE_OPS.iter().chain(WORKER_OPS) {
+        for operation in NATIVE_OPS.iter() {
             assert!(seen.insert(*operation), "операция {operation} указана в реестре дважды");
         }
     }
@@ -252,31 +158,6 @@ mod tests {
     }
 
     #[test]
-    fn every_worker_operation_has_a_python_handler() {
-        let handled = worker_dispatch();
-        assert!(handled.len() > 100, "разбор gui_service.py выглядит неверным");
-        let missing: Vec<_> = WORKER_OPS.iter().filter(|operation| !handled.contains(**operation)).collect();
-        assert!(missing.is_empty(), "WORKER_OPS без обработчика в gui_service.py: {missing:?}");
-    }
-
-    #[test]
-    fn conditional_worker_fallbacks_exist_in_python() {
-        // needs_worker() отдаёт эти нативные операции воркеру по условию —
-        // у воркера обязан быть обработчик, иначе условие превращается в краш.
-        let handled = worker_dispatch();
-        for operation in [
-            "security_status", "instance_file_list", "instance_file_read", "instance_file_write",
-            "instance_file_mkdir", "instance_file_upload", "instance_file_delete", "delete_instance",
-            "world_backup_create", "world_backup_restore", "world_backup_delete", "world_backup_list",
-            "create_offline_account", "delete_account", "set_default_account", "move_account",
-            "mods_search", "mods_details", "mods_check_updates",
-        ] {
-            assert!(NATIVE_OPS.contains(&operation), "{operation}");
-            assert!(handled.contains(operation), "у воркера нет фолбэка для {operation}");
-        }
-    }
-
-    #[test]
     fn unknown_and_malformed_requests_are_rejected_with_stable_messages() {
         assert_eq!(
             validate(&json!({"operation": "lan_session_create"})).unwrap_err(),
@@ -287,20 +168,33 @@ mod tests {
     }
 
     #[test]
-    fn launch_operations_use_the_transient_worker_only() {
-        assert!(uses_transient_worker(&json!({"operation": "launch"})));
-        assert!(uses_transient_worker(&json!({"operation": "launch_instance"})));
-        assert!(!uses_transient_worker(&json!({"operation": "server_start"})));
-        assert_eq!(route(&json!({"operation": "launch"})).unwrap(), Route::TransientWorker);
+    fn launch_operations_are_native_and_mods_ops_are_native() {
+        assert_eq!(route(&json!({"operation": "launch", "name": ""})).unwrap(), Route::Native);
+        assert_eq!(route(&json!({"operation": "launch_instance", "name": ""})).unwrap(), Route::Native);
         assert_eq!(route(&json!({"operation": "engine_info"})).unwrap(), Route::Native);
-        assert_eq!(route(&json!({"operation": "mods_install"})).unwrap(), Route::Worker);
+        assert_eq!(route(&json!({"operation": "mods_install"})).unwrap(), Route::Native);
+        assert_eq!(route(&json!({"operation": "mods_update"})).unwrap(), Route::Native);
+        assert_eq!(route(&json!({"operation": "mods_update_all_safe"})).unwrap(), Route::Native);
+        assert_eq!(route(&json!({"operation": "modpack_import"})).unwrap(), Route::Native);
+        assert_eq!(route(&json!({"operation": "mods_search", "project_type": "plugin"})).unwrap(), Route::Native);
+        assert_eq!(route(&json!({"operation": "mods_search", "project_type": "modpack"})).unwrap(), Route::Native);
+        assert_eq!(route(&json!({"operation": "world_backup_create", "destination": "cloud"})).unwrap(), Route::Native);
+        assert_eq!(route(&json!({"operation": "world_import_begin", "label": "w.tar.bz2"})).unwrap(), Route::Native);
+    }
+
+    #[test]
+    fn autotune_and_plugin_dev_tools_are_native() {
+        assert_eq!(route(&json!({"operation": "instance_autotune", "name": "x"})).unwrap(), Route::Native);
+        assert_eq!(route(&json!({"operation": "plugin_dev_init", "directory": "."})).unwrap(), Route::Native);
+        assert_eq!(route(&json!({"operation": "plugin_dev_lint", "directory": "."})).unwrap(), Route::Native);
+        assert_eq!(route(&json!({"operation": "plugin_dev_pack", "directory": ".", "output": "x.zip"})).unwrap(), Route::Native);
+        assert_eq!(route(&json!({"operation": "plugin_dev_verify", "archive": "x.zip"})).unwrap(), Route::Native);
+        assert_eq!(route(&json!({"operation": "plugin_dev_keypair", "private_pem": "a", "public_pem": "b"})).unwrap(), Route::Native);
     }
 
     #[test]
     fn routing_is_stable_under_parallel_repeated_calls() {
-        // 32 потока × 25 повторов по всему реестру: маршрут детерминирован и
-        // ни одна разрешённая операция не отбивается мостом.
-        let operations: Vec<&str> = NATIVE_OPS.iter().chain(WORKER_OPS).copied().collect();
+        let operations: Vec<&str> = NATIVE_OPS.iter().copied().collect();
         std::thread::scope(|scope| {
             for _ in 0..32 {
                 scope.spawn(|| {

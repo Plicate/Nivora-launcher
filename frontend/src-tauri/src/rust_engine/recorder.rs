@@ -1,7 +1,3 @@
-// порт python-модуля recorder.py: запись игрового процесса для оверлея
-// Nivora (F7). Один активный процесс ffmpeg на весь лаунчер; статус
-// дублируется на диск (recordings/recording-state.json) — его читает
-// overlay_state, живость ffmpeg проверяется по pid.
 use serde_json::{json, Value};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
@@ -19,7 +15,7 @@ const DEFAULT_VAAPI_DEVICE: &str = "/dev/dri/renderD128";
 
 pub(crate) const RECORDING_STATE_FILE: &str = "recording-state.json";
 
-/// один активный процесс ffmpeg (воркер сериален — как GameRecorder в Python).
+/// один процесс записи на приложение
 struct Recording {
     child: Child,
     file: String,
@@ -39,9 +35,7 @@ fn unix_now() -> f64 {
         .unwrap_or(0.0)
 }
 
-/// собрать аргументы ffmpeg для записи экрана с минимальной нагрузкой.
-/// (восемь аргументов — прямое соответствие kwargs build_recording_args
-/// в Python; сворачивать в структуру ломает побочную простоту порта)
+/// собирает аргументы ffmpeg для записи экрана
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_recording_args(
     display: &str,
@@ -55,7 +49,7 @@ pub(crate) fn build_recording_args(
 ) -> Vec<String> {
     let fps = fps.clamp(15, 120);
     let quality = quality.clamp(15, 35);
-    // stdin остаётся открытым: остановка записи — это буква «q» в stdin ffmpeg.
+    // запись останавливается буквой `q` в stdin ffmpeg
     let mut args: Vec<String> = vec!["-hide_banner".into(), "-loglevel".into(), "warning".into()];
     if encoder == "vaapi" {
         args.extend(["-vaapi_device".into(), vaapi_device.into()]);
@@ -139,7 +133,6 @@ pub(crate) fn build_recording_args(
     args
 }
 
-/// Названия кодировщиков, которые собирает этот ffmpeg.
 pub(crate) fn detect_encoders(ffmpeg: &Path) -> Vec<String> {
     let known = [ENCODER_NVENC, ENCODER_VAAPI, ENCODER_X264];
     let output = super::platform::command(ffmpeg)
@@ -163,7 +156,7 @@ fn vaapi_available() -> bool {
     Path::new(DEFAULT_VAAPI_DEVICE).exists()
 }
 
-/// выбрать тип кодировщика («nvenc»/«vaapi»/«x264»): приоритет аппаратных.
+/// выбирает аппаратный кодировщик или `x264`, если он недоступен
 pub(crate) fn pick_encoder(requested: &str, encoders: &[String]) -> &'static str {
     let has = |name: &str| encoders.iter().any(|item| item == name);
     match requested {
@@ -202,7 +195,7 @@ fn encoder_name(kind: &str) -> &'static str {
     }
 }
 
-/// %Y-%m-%d_%H-%M-%S по местному времени — как time.strftime в Python.
+/// возвращает местное время в формате YYYY-MM-DD_HH-MM-SS
 fn local_timestamp() -> String {
     #[cfg(unix)]
     {
@@ -226,7 +219,7 @@ fn local_timestamp() -> String {
     }
     #[cfg(not(unix))]
     {
-        // Windows сюда не доходит: запись требует X11 (проверка DISPLAY выше).
+        // на Windows этот участок не выполняется: запись требует X11 (проверка DISPLAY выше)
         utc_timestamp()
     }
 }
@@ -257,7 +250,7 @@ fn utc_timestamp() -> String {
     )
 }
 
-/// Атомарно записать файл состояния записи (см. Recording::state_file).
+/// атомарно записать файл состояния записи (см; recording::state_file)
 pub(crate) fn write_recording_state(output_dir: &Path, payload: &Value) -> Result<PathBuf, String> {
     fs::create_dir_all(output_dir)
         .map_err(|error| format!("Не удалось создать каталог записей: {error}"))?;
@@ -288,8 +281,6 @@ pub(crate) fn remove_recording_state(state_path: &Path) {
     let _ = fs::remove_file(state_path);
 }
 
-/// статус записи; file/encoder/instance остаются и после завершения
-/// процесса — UI показывает последний файл (как status() в Python).
 fn recorder_status_locked(recording: Option<&mut Recording>) -> Value {
     match recording {
         Some(recording) => {
@@ -394,7 +385,6 @@ pub(crate) fn recording_start(request: &Value) -> Result<Value, String> {
     let encoder_kind = pick_encoder(&value_str("recording_encoder", "auto"), &encoders);
     let encoder = encoder_name(encoder_kind);
     let container = value_str("recording_container", "mp4");
-    // unicode-алфавит «как в Python»: буквы других алфавитов не превращаем в «-».
     let safe_instance: String = instance_name
         .chars()
         .map(|c| {
@@ -445,11 +435,11 @@ pub(crate) fn recording_start(request: &Value) -> Result<Value, String> {
         .stdout(Stdio::null())
         .stderr(Stdio::from(log_handle));
     // бэкенд работает без консоли (--noconsole), поэтому ffmpeg без этого
-    // флага получил бы собственное окно консоли.
+    // флага получил бы собственное окно консоли
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        command.creation_flags(0x0800_0000); // flag CREATE_NO_WINDOW
     }
     let child = command
         .spawn()
@@ -465,8 +455,7 @@ pub(crate) fn recording_start(request: &Value) -> Result<Value, String> {
         instance: instance_name.clone(),
         state_file: output_dir.join(RECORDING_STATE_FILE),
     };
-    // ошибка записи файла состояния не должна ломать саму запись:
-    // состояние вторично, ffmpeg уже работает.
+    // ошибка записи состояния не должна прерывать уже запущенную запись
     let state_file = write_recording_state(
         &output_dir,
         &json!({
@@ -509,7 +498,7 @@ pub(crate) fn recording_stop(_request: &Value) -> Result<Value, String> {
         None => None,
     };
     if let Some(recording) = running {
-        // мягкая остановка: «q» в stdin — ffmpeg финализирует контейнер.
+        // буква "q" позволяет ffmpeg завершить файл корректно
         if let Some(stdin) = recording.child.stdin.as_mut() {
             let _ = stdin.write_all(b"q");
             let _ = stdin.flush();
@@ -551,8 +540,7 @@ fn wait_with_timeout(child: &mut Child, timeout: std::time::Duration) -> bool {
 fn terminate_process(child: &mut Child) {
     #[cfg(unix)]
     unsafe {
-        // std::process::Child::kill посылает SIGKILL; Python-код просил
-        // SIGTERM (process.terminate) — сохраняем семантику.
+        // посылаем SIGTERM, чтобы дать процессу завершиться корректно
         libc::kill(child.id() as i32, libc::SIGTERM);
     }
     #[cfg(not(unix))]
@@ -621,7 +609,6 @@ mod tests {
             "o.mkv",
             DEFAULT_VAAPI_DEVICE,
         );
-        // fps и качество зажимаются в границы, как в Python.
         assert!(args.windows(2).any(|pair| pair == ["-framerate", "120"]));
         assert!(args.windows(2).any(|pair| pair == ["-cq", "15"]));
         assert!(args.contains(&"-c:a".to_owned()));
@@ -655,7 +642,6 @@ mod tests {
         assert_eq!(pick_encoder("nvenc", &none), "x264");
         let nvenc = vec![ENCODER_NVENC.to_owned()];
         assert_eq!(pick_encoder("auto", &nvenc), "nvenc");
-        // vaapi требует и поддержку ffmpeg, и устройство /dev/dri/renderD128.
         let vaapi = vec![ENCODER_VAAPI.to_owned()];
         assert_eq!(
             pick_encoder("vaapi", &vaapi),
@@ -667,7 +653,6 @@ mod tests {
     #[test]
     fn timestamp_shape_is_sortable() {
         let stamp = local_timestamp();
-        // %Y-%m-%d_%H-%M-%S: разбор по позициям ловит регрессии формата.
         let bytes = stamp.as_bytes();
         assert_eq!(&stamp[4..5], "-");
         assert_eq!(&stamp[7..8], "-");
@@ -685,7 +670,6 @@ mod tests {
         let payload = json!({ "pid": 42, "file": "/tmp/a.mp4", "started_at": 1.5, "encoder": "libx264", "instance": "A" });
         let path = write_recording_state(&dir, &payload).expect("записать состояние");
         assert!(path.is_file());
-        // формат совместим с overlay_state: те же поля, тот же файл.
         let loaded: serde_json::Map<String, Value> =
             serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(loaded["pid"], json!(42));
@@ -695,9 +679,8 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// полный цикл через rust_engine::handle: старт → статус → стоп.
-    /// ffmpeg подменяется скриптом, который читает stdin до буквы «q».
-    #[cfg(unix)] // фиктивный ffmpeg — это /bin/sh-скрипт
+    /// проверяет полный цикл записи через движок с подменным ffmpeg
+    #[cfg(unix)] // на Unix ffmpeg подменяется shell-скриптом
     #[test]
     fn recording_lifecycle_through_engine_handle() {
         let root =
@@ -748,7 +731,7 @@ mod tests {
                 None => std::env::remove_var("DISPLAY"),
             }
         };
-        // остановка возможной прошлой записи — глобальное состояние процесса.
+        // сначала останавливаем прошлую запись из-за общего состояния процесса
         let _ = recording_stop(&json!({}));
         let started = recording_start(&json!({ "instance_name": "Alpha ЭкзMP" }));
         match started {
@@ -770,12 +753,9 @@ mod tests {
                 assert_eq!(status["active"], json!(true));
                 let stopped = recording_stop(&json!({})).expect("стоп");
                 assert_eq!(stopped["active"], json!(false));
-                // файл-состояние убран: оверлей больше не считает запись живой
                 assert!(!state_path.exists());
-                // повторный стоп по мёртвой записи не ломается
                 let again = recording_stop(&json!({})).expect("повторный стоп");
                 assert_eq!(again["active"], json!(false));
-                // маршрутизация через главный handle движка (как из Tauri)
                 let routed = super::super::handle("recording_status", &json!({}))
                     .expect("handle(recording_status)");
                 assert_eq!(routed["ok"], json!(true));

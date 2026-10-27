@@ -1,6 +1,5 @@
-// встроенный проводник и выбор файлов — вместо системных диалогов.
 import { ref } from 'vue'
-import { bridge } from './bridge'
+import { bridge, mockFileSystemAvailable } from './bridge'
 
 export interface FileBrowserEntry {
   name: string
@@ -17,11 +16,7 @@ export interface FileBrowserListing {
   entries: FileBrowserEntry[]
 }
 
-/**
- * История «назад/вперёд» как в обычных проводниках: navigate() усекает
- * forward-хвост, back/forward только передвигают курсор. Чистый класс,
- * чтобы его покрыть node-тестом вне Vue.
- */
+/** новая навигация отбрасывает путь вперёд, а назад и вперёд двигают курсор */
 export class PathHistory {
   private paths: string[] = []
   private index = -1
@@ -55,52 +50,67 @@ export class PathHistory {
     return this.paths[this.index]
   }
 
-  /** повторный заход в ту же папку не раздувает историю. */
+  /** повторный заход в ту же папку не раздувает историю */
   reset(path: string): void {
     this.paths = [path]
     this.index = 0
   }
 }
 
-export type FileBrowserMode = 'browse' | 'open' | 'directory'
+type FileBrowserMode = 'browse' | 'open' | 'directory'
 
 export interface FileBrowserRequest {
   mode: FileBrowserMode
-  /** Расширения для режима open, например '.zip,.mrpack'. */
+  /** расширения для режима open, например '.zip,.mrpack' */
   accept?: string
   title?: string
   startPath?: string
-  /** Разрешить выбрать несколько файлов сразу. */
+  /** файл, который нужно подсветить в списке (полный путь) */
+  reveal?: string
+  /** разрешить выбрать несколько файлов сразу */
   multiple?: boolean
 }
 
 export interface PickedFile {
   fileName: string
-  /** base64 содержимого без префикса data-URL. */
+  /** base64 содержимого без префикса data-URL */
   data: string
   size: number
 }
 
-export interface PickedDirectory {
+interface PickedDirectory {
   name: string
   path: string
 }
 
-/** Состояние открытого окна проводника; рендерит его App.vue. */
 export const fileBrowserRequest = ref<FileBrowserRequest | null>(null)
 let fileBrowserResolve: ((value: PickedFile | null) => void) | null = null
 let fileBrowserResolveMany: ((value: PickedFile[] | null) => void) | null = null
 let directoryResolve: ((value: PickedDirectory | null) => void) | null = null
 
-export function isDesktopShell(): boolean {
+function isDesktopShell(): boolean {
   return typeof window !== 'undefined' && Boolean((window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__)
+}
+
+// выбор встроенного или системного проводника
+export type FileExplorerMode = 'builtin' | 'system'
+const FILE_EXPLORER_MODE_KEY = 'nivora-file-explorer-mode'
+const explorerMode = ref<FileExplorerMode>(readStoredExplorerMode())
+
+function readStoredExplorerMode(): FileExplorerMode {
+  const stored = localStorage.getItem(FILE_EXPLORER_MODE_KEY)
+  return stored === 'system' ? 'system' : 'builtin'
+}
+
+export function setExplorerMode(mode: FileExplorerMode): void {
+  explorerMode.value = mode === 'system' ? 'system' : 'builtin'
+  localStorage.setItem(FILE_EXPLORER_MODE_KEY, explorerMode.value)
 }
 
 export async function browsePath(path?: string, showHidden = false): Promise<FileBrowserListing> {
   return bridge.fsBrowse(path, { showHidden })
 }
 
-/** Читает файл кусками и собирает в одну base64-строку. */
 export async function readFileBase64(path: string, onProgress?: (loaded: number, total: number) => void): Promise<{ data: string; size: number }> {
   let offset = 0
   let total = 0
@@ -122,31 +132,35 @@ function browserFallbackPick(accept: string): Promise<PickedFile | null> {
     input.type = 'file'
     input.style.display = 'none'
     input.accept = accept
+    let settled = false
+    const finish = (value: PickedFile | null) => {
+      if (settled) return
+      settled = true
+      input.remove()
+      resolve(value)
+    }
     input.addEventListener('change', () => {
       const file = input.files?.[0] || null
-      input.remove()
       if (!file) {
-        resolve(null)
+        finish(null)
         return
       }
       const reader = new FileReader()
       reader.onload = () => {
         const raw = String(reader.result || '')
-        resolve({ fileName: file.name, data: raw.replace(/^data:[^;]*;base64,/, ''), size: file.size })
+        finish({ fileName: file.name, data: raw.replace(/^data:[^;]*;base64,/, ''), size: file.size })
       }
-      reader.onerror = () => resolve(null)
+      reader.onerror = () => finish(null)
       reader.readAsDataURL(file)
     })
+    // событие cancel завершает запрос и убирает скрытый input
+    input.addEventListener('cancel', () => finish(null))
     document.body.appendChild(input)
     input.click()
   })
 }
 
-/**
- * Выбор одного файла встроенным окном. В desktop-сборке открывает
- * FileBrowserDialog (там же живёт прогресс чтения больших файлов),
- * в браузерном предпросмотре — скрытый input.
- */
+/** в приложении открывает встроенный диалог, в браузере использует input */
 export function pickFile(options: { accept?: string; title?: string; startPath?: string } = {}): Promise<PickedFile | null> {
   if (!isDesktopShell()) return browserFallbackPick(options.accept || '')
   if (fileBrowserRequest.value) return Promise.resolve(null)
@@ -156,13 +170,17 @@ export function pickFile(options: { accept?: string; title?: string; startPath?:
   })
 }
 
-/** Открыть каталог во встроенном проводнике (вместо окна ОС). */
-export function openInLauncherExplorer(path?: string): void {
-  if (!isDesktopShell()) return
-  fileBrowserRequest.value = { mode: 'browse', startPath: path }
+/** открывает каталог во встроенном или системном проводнике */
+export function openInLauncherExplorer(path?: string, reveal?: string): void {
+  // в браузере доступна только виртуальная файловая система
+  if (!isDesktopShell() && !mockFileSystemAvailable) return
+  if (explorerMode.value === 'system' && isDesktopShell()) {
+    void bridge.fsReveal(reveal || path)
+    return
+  }
+  fileBrowserRequest.value = { mode: 'browse', startPath: path, reveal }
 }
 
-/** Выбор нескольких файлов сразу (загрузка файлов в экземпляр). */
 export function pickFiles(options: { accept?: string; title?: string; startPath?: string } = {}): Promise<PickedFile[] | null> {
   if (!isDesktopShell()) {
     return browserFallbackPickMany(options.accept || '')
@@ -174,7 +192,7 @@ export function pickFiles(options: { accept?: string; title?: string; startPath?
   })
 }
 
-/** Выбор папки: путь отдаёт бэкенд, содержимое читается на месте — без выгрузки в интерфейс. */
+/** выбирает папку без передачи её содержимого в интерфейс */
 export function pickDirectory(options: { title?: string; startPath?: string } = {}): Promise<PickedDirectory | null> {
   if (!isDesktopShell()) return Promise.resolve(null)
   if (fileBrowserRequest.value) return Promise.resolve(null)
@@ -184,7 +202,6 @@ export function pickDirectory(options: { title?: string; startPath?: string } = 
   })
 }
 
-/** Готовый ответ для режима выбора папки. */
 export function resolveFileBrowserDirectory(value: PickedDirectory): void {
   const resolve = directoryResolve
   directoryResolve = null
@@ -198,11 +215,17 @@ function browserFallbackPickMany(accept: string): Promise<PickedFile[] | null> {
     input.style.display = 'none'
     input.accept = accept
     input.multiple = true
+    let settled = false
+    const finish = (value: PickedFile[] | null) => {
+      if (settled) return
+      settled = true
+      input.remove()
+      resolve(value)
+    }
     input.addEventListener('change', () => {
       const files = [...(input.files || [])]
-      input.remove()
       if (!files.length) {
-        resolve(null)
+        finish(null)
         return
       }
       Promise.all(files.map((file) => new Promise<PickedFile>((resolveFile) => {
@@ -210,14 +233,14 @@ function browserFallbackPickMany(accept: string): Promise<PickedFile[] | null> {
         reader.onload = () => resolveFile({ fileName: file.name, data: String(reader.result || '').replace(/^data:[^;]*;base64,/, ''), size: file.size })
         reader.onerror = () => resolveFile({ fileName: file.name, data: '', size: 0 })
         reader.readAsDataURL(file)
-      }))).then(resolve)
+      }))).then(finish)
     })
+    input.addEventListener('cancel', () => finish(null))
     document.body.appendChild(input)
     input.click()
   })
 }
 
-/** Вызывается диалогом из App.vue при выборе файла(ов) или закрытии. */
 export function resolveFileBrowser(file: PickedFile | null): void {
   fileBrowserRequest.value = null
   fileBrowserResolve?.(file)

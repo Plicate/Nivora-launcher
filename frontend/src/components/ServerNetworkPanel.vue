@@ -42,7 +42,7 @@ async function syncMapping() {
     const result = await bridge.serverNetworkStatus(props.name)
     if (current === epoch) mapping.value = result.mapping
   } catch {
-    // do not turn a disconnected backend into a claim that the port is closed.
+    // при потере связи с движком не сообщаем, что порт закрыт
   } finally {
     statusBusy.value = false
   }
@@ -191,14 +191,14 @@ onMounted(() => {
 onBeforeUnmount(() => {
   epoch += 1
   if (timer) clearInterval(timer)
-  // navigation away is not a request to close a running server.
+  // уход со страницы не должен закрывать работающий сервер
 })
 </script>
 
 <template>
   <section class="workspace-card network-panel">
     <div class="workspace-card-heading">
-      <div><span class="eyebrow">Публичный доступ · Java TCP</span><h3>Открыть сервер в интернет</h3><span class="muted">Белый IPv4 напрямую или временный UPnP-проброс на роутере. Без VPN и relay.</span></div>
+      <div><h3>Открыть сервер в интернет</h3><span class="muted">Белый IPv4 напрямую или временный UPnP-проброс на роутере. Без VPN и relay.</span></div>
       <span class="tag" :class="{ 'tag--success': mapping.active && !mapping.error }">{{ mapping.active ? (mapping.error ? 'Проброс требует проверки' : 'UPnP-проброс создан') : 'Автопроброс выключен' }}</span>
     </div>
     <div class="network-intro"><Icon name="shield" :size="20" /><p>В интернете сервер доступен посторонним. Используйте доверенное ядро, обновления, <code>online-mode=true</code> и whitelist. Лаунчер не отключает firewall, не открывает RCON и не меняет настройки авторизации.</p></div>

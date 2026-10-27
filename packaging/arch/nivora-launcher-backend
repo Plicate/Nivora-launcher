@@ -1,3 +1,0 @@
-#!/bin/sh
-export PYTHONPATH="/usr/lib/nivora-launcher${PYTHONPATH:+:$PYTHONPATH}"
-exec /usr/bin/python3 -m nivora_launcher.gui_service

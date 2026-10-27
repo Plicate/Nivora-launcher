@@ -1,16 +1,4 @@
 #!/usr/bin/env bash
-# Сборка nivora-turbo — пакетного SHA-256 и скана jar-манифестов
-# (cpp-turbo/nivora-turbo.cpp). Совместим с /bin/bash 3.2 (macOS).
-#
-#   scripts/build_turbo.sh [OUT]
-#
-# Переменные:
-#   CXX              компилятор (по умолчанию g++, на macOS c++);
-#   CXXFLAGS_EXTRA   доп. флаги, например «-arch x86_64» для macOS;
-#   TURBO_TARGET     linux | darwin | windows (по умолчанию — по OUT/хосту).
-# Для windows zlib собирается из исходников статически (скачивается
-# zlib 1.3.1 со сверкой SHA-256, либо берётся из TURBO_ZLIB_SRC).
-# Любая ошибка компиляции или самопроверки — ненулевой код выхода.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -29,7 +17,29 @@ fi
 if [ -z "${CXX:-}" ]; then
   case "$TARGET" in
     darwin) CXX=c++ ;;
-    windows) if [ "$HOST_OS" = windows ]; then CXX=g++; else CXX=x86_64-w64-mingw32-g++-posix; fi ;;
+    windows)
+      if [ "$HOST_OS" = windows ]; then
+        CXX=g++
+      else
+        # сборки для Debian/Ubuntu обычно добавляют суффикс -posix; Arch/MSYS2 нет
+        # вариант win32 использует пул CreateThread
+        CXX=""
+        for candidate in x86_64-w64-mingw32-g++-posix x86_64-w64-mingw32-g++; do
+          command -v "$candidate" >/dev/null 2>&1 || continue
+          CXX="$candidate"
+          if "$candidate" -v </dev/null 2>&1 | grep 'Thread model: posix' >/dev/null; then
+            break
+          fi
+          echo "nivora-turbo: $candidate с win32-потоками — параллельность через CreateThread (posix был бы чуть быстрее)." >&2
+          break
+        done
+        [ -n "$CXX" ] || {
+          echo "nivora-turbo: mingw-w64 g++ не найден." >&2
+          echo "  Arch: pacman -S mingw-w64-gcc; Debian/Ubuntu: apt install g++-mingw-w64-x86-64" >&2
+          exit 1
+        }
+      fi
+      ;;
     *) CXX=g++ ;;
   esac
 fi
@@ -43,8 +53,7 @@ fi
 FLAGS=(-O2 -std=c++17 -pthread -Wall -Wextra)
 [ "${#EXTRA[@]}" -gt 0 ] && FLAGS+=("${EXTRA[@]}")
 
-# SHA-NI: интринсики включаются, только если ЦЕЛЕВАЯ архитектура x86_64
-# (диспетчер CPUID в коде сам решит при старте). Для arm64 — обычный путь.
+# sha-ni компилируется для x86_64; при запуске путь выбирается по CPUID
 predefined="$(echo | "$CXX" "${FLAGS[@]}" -dM -E -x c++ - 2>/dev/null || true)"
 if printf '%s\n' "$predefined" | grep '__x86_64__' >/dev/null; then
   FLAGS+=(-msha -msse4.1 -mssse3)
@@ -53,7 +62,7 @@ fi
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
 LINK=(-lz)
-SOURCES=("$ROOT/cpp-turbo/nivora-turbo.cpp")
+SOURCES=("$ROOT/cpp-turbo/nivora-turbo.cpp" "$ROOT/cpp-turbo/instance_manifest.cpp")
 
 if [ "$TARGET" = windows ]; then
   ZLIB_VERSION=1.3.1
@@ -86,9 +95,11 @@ if [ "$TARGET" = windows ]; then
 fi
 
 mkdir -p "$(dirname "$OUT")"
+# удаляем остатки прошлой сборки по пути вывода
+rm -rf "$OUT"
 "$CXX" "${FLAGS[@]}" "${SOURCES[@]}" -o "$OUT" "${LINK[@]}"
 
-# Самопроверка возможна только для бинарника родной ОС.
+# самопроверка доступна только для бинарника хостовой ОС
 if [ "$TARGET" != "$HOST_OS" ]; then
   echo "nivora-turbo собран (кросс, $TARGET): $OUT"
   exit 0
@@ -103,7 +114,7 @@ case "${CXXFLAGS_EXTRA:-}" in
     ;;
 esac
 
-# Эталонные дайджесты «abc» и пустого файла (FIPS 180-4).
+# контрольные SHA-256 из FIPS 180-4
 ABC_EXPECTED="ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
 EMPTY_EXPECTED="e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 printf 'abc' > "$tmpdir/abc.bin"
@@ -112,7 +123,7 @@ printf 'abc' > "$tmpdir/abc.bin"
 grep -q "^$ABC_EXPECTED" "$tmpdir/out.txt" || { echo "turbo: дайджест abc не совпал" >&2; exit 1; }
 grep -q "^$EMPTY_EXPECTED" "$tmpdir/out.txt" || { echo "turbo: дайджест пустого файла не совпал" >&2; exit 1; }
 
-# scan-jars: fabric- и forge-jar с deflate-манифестами.
+# проверяем чтение сжатых Fabric и Forge манифестов
 PY="$(command -v python3 || command -v python || true)"
 if [ -n "$PY" ]; then
   "$PY" - "$tmpdir" <<'PY'
@@ -129,6 +140,27 @@ PY
     || { echo "turbo: fabric-манифест не прочитан" >&2; exit 1; }
   awk -F '\t' '$1=="forge" && $2=="coolmod" && $3=="Cool Mod" && $4=="1.2.3" {found=1} END {exit !found}' "$tmpdir/scan.txt" \
     || { echo "turbo: forge-манифест не прочитан" >&2; exit 1; }
+
+  # проверяем манифест экземпляра, конфиг и отключённый мод
+  mkdir -p "$tmpdir/instance/mods" "$tmpdir/instance/config" "$tmpdir/instance/versions/1.21.11"
+  cp "$tmpdir/mod.jar" "$tmpdir/instance/mods/"
+  cp "$tmpdir/forge.jar" "$tmpdir/instance/mods/disabled-mod.jar.disabled"
+  printf 'keybindings_version:1\nrenderDistance:12\n' > "$tmpdir/instance/options.txt"
+  printf '{"id":"1.21.11","inheritsFrom":"1.21.11"}' > "$tmpdir/instance/versions/1.21.11/1.21.11.json"
+  printf 'foo=bar\n' > "$tmpdir/instance/config/example.toml"
+  "$OUT" instance-manifest "$tmpdir/instance" > "$tmpdir/manifest.txt"
+  awk -F '\t' '$1=="V" && $2=="version_id" && $3=="1.21.11" {found=1} END {exit !found}' "$tmpdir/manifest.txt" \
+    || { echo "turbo: метаданные версии не прочитаны" >&2; exit 1; }
+  awk -F '\t' '$1=="M" && $2=="mods/mod.jar" && $5=="fabric" && $6=="sodiumextra" && $7=="Sodium Extra" {found=1} END {exit !found}' "$tmpdir/manifest.txt" \
+    || { echo "turbo: мод не попал в манифест" >&2; exit 1; }
+  awk -F '\t' '$1=="M" && $2=="mods/disabled-mod.jar.disabled" && $5=="forge" && $6=="coolmod" {found=1} END {exit !found}' "$tmpdir/manifest.txt" \
+    || { echo "turbo: отключённый мод не попал в манифест" >&2; exit 1; }
+  awk -F '\t' '$1=="C" && $2=="config/example.toml" {found=1} END {exit !found}' "$tmpdir/manifest.txt" \
+    || { echo "turbo: конфиг не попал в манифест" >&2; exit 1; }
+  awk -F '\t' '$1=="O" && $2=="renderDistance" && $3=="12" {found=1} END {exit !found}' "$tmpdir/manifest.txt" \
+    || { echo "turbo: options.txt не прочитан" >&2; exit 1; }
+  [ "$(awk -F '\t' '$1=="M"' "$tmpdir/manifest.txt" | wc -l | tr -d ' ')" = "2" ] \
+    || { echo "turbo: в манифесте должно быть ровно два мода" >&2; exit 1; }
 fi
 
 echo "nivora-turbo собран и сверен: $OUT"

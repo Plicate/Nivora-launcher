@@ -1,7 +1,9 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch, watchEffect } from 'vue'
+import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch, watchEffect } from 'vue'
 import ActivityPanel from './components/ActivityPanel.vue'
 import AppSidebar from './components/AppSidebar.vue'
+import AccountsPage from './components/AccountsPage.vue'
+import SettingsPage from './components/SettingsPage.vue'
 import BrandLogo from './components/BrandLogo.vue'
 import CatalogBadge from './components/CatalogBadge.vue'
 import CatalogDetailsDialog from './components/CatalogDetailsDialog.vue'
@@ -19,28 +21,29 @@ import MemoryField from './components/MemoryField.vue'
 import NumericStepper from './components/NumericStepper.vue'
 import ServerWorkspace from './components/ServerWorkspace.vue'
 import LoaderBadge from './components/LoaderBadge.vue'
+import ModCardMeta from './components/ModCardMeta.vue'
+import BlockIconPicker from './components/BlockIconPicker.vue'
 import PluginCenter from './components/PluginCenter.vue'
 import PluginViewRenderer from './components/PluginViewRenderer.vue'
-import SkinPreview from './components/SkinPreview.vue'
-import SkinEditorDialog from './components/SkinEditorDialog.vue'
-import SkinThumb3D from './components/SkinThumb3D.vue'
-import CapeThumb from './components/CapeThumb.vue'
 import ThemeGallery from './components/ThemeGallery.vue'
 import ThemeStudio from './components/ThemeStudio.vue'
-import { check as checkForAppUpdate } from '@tauri-apps/plugin-updater'
-import { relaunch } from '@tauri-apps/plugin-process'
 import { FRONTEND_BUILD_STAMP, bridge } from './services/bridge'
+import { createCatalogWorkflow } from './services/catalogWorkflow'
+import { chooseAllowedCatalog } from './services/catalogSelection'
+import { shouldOpenActivityAfterSessionStart } from './services/activityVisibility'
+import { LAUNCHER_VERSION } from './version'
+import { composedBlockIcon } from './services/blockIcon'
 import { setLocale, type Locale } from './i18n'
-import { DEFAULT_OVERLAY_SETTINGS, bindGameHotkeys, initOverlayEventBridge, normalizeHotkey, overlayLastError, overlaySelfTest, overlayWaylandMode, overlayWindowRequested, setOverlayOpaqueWindow, setOverlayVisible, setOverlayWaylandMode, toggleOverlay, toggleRecording, unbindGameHotkeys, type OverlaySelfTestStep } from './services/overlay'
+import { DEFAULT_OVERLAY_SETTINGS, bindGameHotkeys, initOverlayEventBridge, normalizeHotkey, overlayLastError, overlayWaylandMode, overlayWindowRequested, setOverlayOpaqueWindow, setOverlayVisible, setOverlayWaylandMode, toggleOverlay, toggleRecording, unbindGameHotkeys } from './services/overlay'
 import { chooseDialog, confirmDialog, promptDialog } from './services/dialogs'
 import { fileBrowserRequest, openInLauncherExplorer, pickFile, pickFiles, resolveFileBrowser, resolveFileBrowserDirectory, resolveFileBrowserMany, type PickedFile } from './services/fileBrowser'
-import { openContextMenu } from './services/contextMenu'
 import ContextMenuHost from './components/ContextMenuHost.vue'
 import FileBrowserDialog from './components/FileBrowserDialog.vue'
 import GlobalSearchDialog from './components/GlobalSearchDialog.vue'
-import { createPluginHostCall } from './services/pluginHost'
+import InstanceCompareDialog from './components/InstanceCompareDialog.vue'
+import AutotuneDialog from './components/AutotuneDialog.vue'
+import { createPluginController } from './services/pluginController'
 import { pluginRuntime } from './services/pluginRuntime'
-import { launcherThemes } from './services/launcherExtensions'
 import { useModalFocus } from './services/modalFocus'
 import { initialFirstRunPhase, readFirstRunExperience, writeFirstRunExperience, type FirstRunExperienceState, type FirstRunPhase } from './services/firstRunExperience'
 import { createWallpaperRenderer, prepareWallpaperForStorage } from './services/wallpaper'
@@ -48,31 +51,27 @@ import DialogHost from './components/DialogHost.vue'
 import AutoRepairDialog from './components/AutoRepairDialog.vue'
 import { diagnoseLaunchFailure, offerAutoRepair } from './services/autoRepair'
 import { nicknameError } from './services/nickname'
-import GameOverlay from './components/GameOverlay.vue'
+import { createModpackWorkflow } from './services/modpackWorkflow'
+import { createThemeManager } from './services/themeManager'
+import { createSettingsWorkflow } from './services/settingsWorkflow'
+const GameOverlay = defineAsyncComponent(() => import('./components/GameOverlay.vue'))
 import type {
-  PluginEventName,
   PluginEventPayloadMap,
-  PluginJsonValue,
   PluginInstanceRef,
-  PluginCommandDefinition,
-  PluginShortcutDefinition,
-  PluginThemeDefinition,
-  PluginThemeContext,
   PluginUiTone,
   PluginUiView,
 } from '../../plugins/api'
-import type { RuntimePluginManifest } from './plugins/runtimeManifest'
 import type {
   AccountInfo,
   SettingsInfo,
   ActivityState,
   AnimationSettings,
-  AnimationStyle,
   AppearanceSettings,
   AppState,
   BedrockRuntimeStatus,
   CatalogSort,
   ExternalInstanceCandidate,
+  InstanceIconBlock,
   InstanceInfo,
   InstanceWorld,
   LauncherProfile,
@@ -89,12 +88,9 @@ import type {
   PluginManifest,
   ProjectType,
   SelectOption,
-  SettingsProfile,
   SystemMetricsSnapshot,
   BackupSchedule,
   CrashReport,
-  SkinInfo,
-  SkinProfile,
   ResourceCatalog,
   ServerCore,
   ServerSnapshot,
@@ -133,59 +129,70 @@ const loaders: Array<{ id: LoaderId; label: string }> = [
   { id: 'quilt', label: 'Quilt' },
 ]
 const loaderOptions: SelectOption[] = loaders.map((loader) => ({ value: loader.id, label: loader.label }))
-
 const defaultColorTokens: Record<string, string> = {
-  accent: '#8b653f',
-  accent_strong: '#c5a274',
-  background: '#191a17',
-  panel: '#20221e',
-  panel_raised: '#282a25',
-  panel_soft: '#30322c',
-  text: '#e9e8de',
-  muted: '#a2a395',
-  quiet: '#c7c7bb',
-  border: '#77796b',
-  danger: '#d58a7d',
-  success: '#9bac78',
-  warning: '#d2ad72',
-  banner_shade: '#191a17',
+  accent: '#3d8bfd',
+  accent_strong: '#6ea8fe',
+  background: '#0f1115',
+  panel: '#15181d',
+  panel_raised: '#1a1e24',
+  panel_soft: '#20242c',
+  text: '#eceff4',
+  muted: '#7d8591',
+  quiet: '#b7beca',
+  border: '#98a2b3',
+  danger: '#e5484d',
+  success: '#46a758',
+  warning: '#e0a63c',
+  banner_shade: '#0f1115',
 }
 
 const defaultRadiusTokens: Record<string, number> = {
-  card: 7,
+  card: 12,
   button: 8,
-  control: 10,
+  control: 8,
 }
 
-const legacyDefaultColorTokens: Record<string, string> = {
-  accent: '#7aa2ff', accent_strong: '#b7c9ff', background: '#080d16', panel: '#101a29',
-  panel_raised: '#142236', panel_soft: '#182941', text: '#f1f5ff', muted: '#8595b0',
-  quiet: '#aebbd1', border: '#92ace2', danger: '#f47f9a', success: '#62d49a',
-  warning: '#f3c76f', banner_shade: '#080d16',
+// старые палитры распознаются при миграции настроек
+const legacyDefaultColorTokenValues: Record<string, string[]> = {
+  accent: ['#8b653f', '#7aa2ff', '#5b8dd9', '#2f7ff6'],
+  accent_strong: ['#c5a274', '#b7c9ff', '#8fb3ea', '#6aa5ff'],
+  background: ['#191a17', '#080d16', '#0b1220', '#0f1218', '#121417'],
+  panel: ['#20221e', '#101a29', '#111a2c', '#151a22', '#1a1d22'],
+  panel_raised: ['#282a25', '#142236', '#16223a', '#1a202a', '#21252c'],
+  panel_soft: ['#30322c', '#182941', '#1a2740', '#1f2632', '#262b33'],
+  text: ['#e9e8de', '#f1f5ff', '#e8edf7', '#e6eaf2', '#f0f3f7'],
+  muted: ['#a2a395', '#8595b0', '#8fa0be', '#8b95a7', '#8a919e'],
+  quiet: ['#c7c7bb', '#aebbd1', '#b9c6de', '#b4bdd0', '#b9c0cd'],
+  border: ['#77796b', '#92ace2', '#94a8cc', '#8b98b0', '#5f6b7d'],
+  danger: ['#d58a7d', '#f47f9a'],
+  success: ['#9bac78', '#62d49a'],
+  warning: ['#d2ad72', '#f3c76f'],
+  banner_shade: ['#191a17', '#080d16', '#0b1220', '#0f1218', '#121417'],
 }
 function migrateDefaultColors(value?: Record<string, string>): Record<string, string> {
   const colors = { ...defaultColorTokens, ...(value || {}) }
-  for (const [key, previous] of Object.entries(legacyDefaultColorTokens)) {
-    if (colors[key]?.toLowerCase() === previous) colors[key] = defaultColorTokens[key]
+  for (const [key, previousValues] of Object.entries(legacyDefaultColorTokenValues)) {
+    const current = colors[key]?.toLowerCase()
+    if (current && previousValues.includes(current)) colors[key] = defaultColorTokens[key]
   }
   return colors
 }
 const lightColorTokens: Record<string, string> = {
   ...defaultColorTokens,
-  accent: '#65764b',
-  accent_strong: '#4e6037',
-  background: '#e9e8df',
-  panel: '#f2f1e9',
-  panel_raised: '#f8f7f0',
-  panel_soft: '#e2e1d7',
-  text: '#25271f',
-  muted: '#686a5e',
-  quiet: '#414338',
-  border: '#77796b',
-  danger: '#a95349',
-  success: '#4f6d3b',
-  warning: '#805a2e',
-  banner_shade: '#e9e8df',
+  accent: '#2f6fdd',
+  accent_strong: '#1f56bd',
+  background: '#f4f6f9',
+  panel: '#ffffff',
+  panel_raised: '#ffffff',
+  panel_soft: '#e9edf3',
+  text: '#1a2230',
+  muted: '#66707f',
+  quiet: '#3d4756',
+  border: '#8b96a8',
+  danger: '#b04a41',
+  success: '#3f7d4e',
+  warning: '#8a6420',
+  banner_shade: '#f4f6f9',
 }
 
 const defaultLauncherProfile: LauncherProfile = {
@@ -206,14 +213,12 @@ const defaultLauncherProfile: LauncherProfile = {
 }
 
 const defaultAnimationSettings: AnimationSettings = {
-  // 'slide' + ~260 мс: раньше дефолт был fade на 140 мс — переключение вкладок
-  // глазом почти не ловилось и выглядело «мгновенной заменой».
   page_style: 'slide',
-  page_duration_ms: 260,
-  surface_duration_ms: 190,
-  surface_stagger_ms: 24,
+  page_duration_ms: 280,
+  surface_duration_ms: 240,
+  surface_stagger_ms: 30,
   page_styles: { instances: '', 'instance-settings': '', accounts: '', mods: '', modpacks: '', plugins: '', themes: '', settings: '' },
-  page_durations_ms: { instances: 260, 'instance-settings': 260, accounts: 260, mods: 260, modpacks: 260, plugins: 260, themes: 260, settings: 260 },
+  page_durations_ms: { instances: 280, 'instance-settings': 280, accounts: 280, mods: 280, modpacks: 280, plugins: 280, themes: 280, settings: 280 },
 }
 
 const initialState: AppState = {
@@ -223,6 +228,8 @@ const initialState: AppState = {
     game_dir: '',
     java_path: '',
     security_profile: 'strict',
+    file_explorer: 'builtin',
+    file_editor: 'builtin',
     security_permissions: ['network:game', 'files:instance', 'desktop:display', 'desktop:audio'],
     memory: '8GiB',
     memory_kib: 8 * 1024 * 1024,
@@ -261,7 +268,7 @@ const initialState: AppState = {
      has_client_id: false,
      developer_mode: false,
      theme: 'dark',
-     active_theme_id: 'midnight-signal',
+     active_theme_id: 'nivora-dark',
     wallpaper_path: '',
     wallpaper_data: '',
     wallpaper_blur: 12,
@@ -325,19 +332,67 @@ const initialState: AppState = {
 const state = reactive<AppState>(initialState)
 const currentView = ref<ViewName>('instances')
 const plugins = ref<PluginManifest[]>([])
-type ActivePluginView = { pluginId: string; pluginName: string; view: PluginUiView }
-type ActivePluginCommand = { pluginId: string; pluginName: string; definition: PluginCommandDefinition }
-type ActivePluginShortcut = { pluginId: string; pluginName: string; definition: PluginShortcutDefinition }
-const pluginViews = ref<ActivePluginView[]>([])
-const pluginCommands = ref<ActivePluginCommand[]>([])
-const pluginShortcuts = ref<ActivePluginShortcut[]>([])
-const pluginEventSubscriptions = new Map<string, Map<string, PluginEventName>>()
-const pluginLogEventInFlight = new Set<string>()
-const pluginLogEventLastSentAt = new Map<string, number>()
-const pluginNotificationToastIds = new Map<string, Map<string, number>>()
-const pluginThemeContributions = new Map<string, Map<string, PluginThemeDefinition>>()
-const runningPluginDigests = new Map<string, string>()
-let pluginRuntimeSyncQueue: Promise<void> = Promise.resolve()
+const pluginController = createPluginController({
+  plugins,
+  settingsDraft: () => settingsDraft,
+  appearanceDraft: () => appearanceDraft,
+  systemDark: () => systemDark.value,
+  selectedInstance: () => selectedInstance.value,
+  showToast,
+  errorMessage,
+  isSafePluginShortcutBinding,
+  confirmDestructive,
+  openActivity,
+  finishActivity,
+  currentToastId: () => toastId.value,
+  dismissCurrentToast: (id) => {
+    if (toastId.value !== id) return
+    if (toastTimer) window.clearTimeout(toastTimer)
+    toastTimer = undefined
+    toastId.value += 1
+    toast.value = ''
+    toastAction.value = null
+  },
+})
+const {
+  pluginViews,
+  githubPluginInstallBusy,
+  pluginCommands,
+  pluginShortcuts,
+  replacePluginList,
+  clearPluginRuntimeState,
+  pluginInstanceRef,
+  notifyPluginBeforeLaunch,
+  notifyPluginAfterExit,
+  notifyPluginCrash,
+  notifyPluginSnapshotCreated,
+  emitPluginEvent,
+  broadcastPluginEvent,
+  schedulePluginRuntimeSync,
+  runPluginAction,
+  runPluginCommand,
+  runPluginShortcut,
+  savePluginConfig,
+  openPluginLink,
+  togglePlugin,
+  updatePluginGrants,
+  allowLocalPluginExecution,
+  pinPluginPublisher,
+  unpinPluginPublisher,
+  setPluginPublisherRevocationAuthority,
+  importPluginRevocations,
+  revokePlugin,
+  unrevokePlugin,
+  installPluginArchive,
+  installGithubPlugin,
+  uninstallPlugin,
+} = pluginController
+
+async function beforeInstanceLaunch(instance: PluginInstanceRef): Promise<void> {
+  attachOverlayForLaunch(String(instance.name || ''))
+  await notifyPluginBeforeLaunch(instance)
+}
+
 const activePluginTabId = ref('')
 const enabledPluginTabs = computed(() => {
   const staticTabs = plugins.value
@@ -363,11 +418,10 @@ watch(enabledPluginTabs, (tabs) => {
   if (activePluginTabId.value && !tabs.some((plugin) => plugin.id === activePluginTabId.value)) setView('plugins')
 })
 watch(plugins, schedulePluginRuntimeSync)
-const githubPluginInstallBusy = ref(false)
 const localThemes = ref<LauncherThemePreset[]>([])
 const themeOperationBusy = ref(false)
 const githubThemeInstallBusy = ref(false)
-const activeThemeId = ref('midnight-signal')
+const activeThemeId = ref('nivora-dark')
 const createInstanceOpen = ref(false)
 const creationKind = ref<'client' | 'bedrock' | 'server'>('client')
 const bedrockCreationStatus = ref<BedrockRuntimeStatus | null>(null)
@@ -377,7 +431,7 @@ const bedrockCreationVersions = ref<Array<{ edition: string; version: string; in
 const bedrockCreationVersionsBusy = ref(false)
 const bedrockCreationVersionsError = ref('')
 const serverCoreDragActive = ref(false)
-// узкое окно (≤760px) переключает сайдбар в режим drawer — состояние открыто.
+// на узком окне сайдбар открывается в выдвижном режиме
 const mobileMenuOpen = ref(false)
 const instanceGroupFilter = ref('all')
 const initializing = ref(true)
@@ -386,7 +440,7 @@ const firstRunPhase = ref<FirstRunPhase | null>(null)
 const firstRunError = ref('')
 const firstRunState = ref<FirstRunExperienceState>({ setupCompleted: false, tourCompleted: false })
 const busy = ref(false)
-// игровая сессия идёт часами: держать для неё общий busy нельзя — кнопки
+// во время игры интерфейс остаётся доступным
 const gameSessionActive = ref(false)
 watch(firstRunPhase, (phase) => {
   mobileMenuOpen.value = phase === 'tour' && window.innerWidth <= 760
@@ -398,16 +452,18 @@ const loadingVersions = ref(false)
 const versionError = ref('')
 const loadingChoices = ref(false)
 const toast = ref('')
-// рассинхрон сборки: интерфейс и Python-бэкенд из разных версий. Из-за
-// подмены только бэкенда «ломаются» случайные экраны (например, «код undefined»).
+// фронтенд и нативное ядро должны быть из одной сборки
 const buildStampMismatch = ref<{ frontend: string; backend: string } | null>(null)
 const toastId = ref(0)
 const toastToneClass = ref('status-dot--green')
+// тост с действием (например, "Открыть директорию" у свежесозданного файла)
+const toastAction = ref<{ label: string; run: () => void } | null>(null)
+const toastDuration = ref(2800)
 const pageTransitionPulse = ref(true)
 const pageScrollMemory = new Map<string, number>()
 const versions = ref<VersionInfo[]>([])
 // порядок манифеста не гарантируется (зеркала отдают по-разному): сортируем
-// сами от новых к старым, чтобы «первая версия» всегда была свежей.
+// сами от новых к старым, чтобы "первая версия" всегда была свежей
 function sortVersionsByRelease(list: VersionInfo[]): VersionInfo[] {
   return [...list].sort((a, b) => {
     const at = Date.parse(a.release_time || '') || 0
@@ -425,6 +481,22 @@ const selectedLoaderVersion = ref('')
 const selectedInstanceName = ref('')
 const activeCatalogId = ref('modrinth')
 const creationName = ref('')
+const creationIcon = ref('')
+const iconBlocks = ref<InstanceIconBlock[]>([])
+const iconBlocksLoading = ref(false)
+
+async function ensureIconBlocks() {
+  if (iconBlocks.value.length || iconBlocksLoading.value) return
+  iconBlocksLoading.value = true
+  try {
+    const result = await bridge.instanceIconBlocks()
+    iconBlocks.value = result.blocks
+  } catch {
+    iconBlocks.value = []
+  } finally {
+    iconBlocksLoading.value = false
+  }
+}
 const serverCreation = reactive({
   display_name: '',
   core: 'paper',
@@ -457,6 +529,7 @@ const accountName = ref('Player')
 const accountNameError = computed(() => (accountName.value ? nicknameError(accountName.value) : ''))
 const modQuery = ref('')
 const modProjectType = ref<ProjectType>('mod')
+const selectedModCategory = ref('')
 const modSortMode = ref<CatalogSort>('relevance')
 const modResults = ref<ModResult[]>([])
 const modSearchPerformed = ref(false)
@@ -466,23 +539,6 @@ const modInstallId = ref('')
 const modAction = ref<'install' | 'remove'>('install')
 const modInstallProgress = ref(0)
 const modInstallDetail = ref('')
-const skinResults = ref<SkinInfo[]>([])
-const skinPanelOpen = ref(false)
-const skinAccountId = ref('')
-const skinProfileData = ref<SkinProfile>()
-const skinProfileLoading = ref(false)
-const skinProfileError = ref('')
-const selectedSkinId = ref('')
-const skinModel = ref<'classic' | 'slim'>('classic')
-// предпросмотр плаща как элитр (как в Prism Launcher).
-const skinElytraPreview = ref(false)
-const currentSkinModel = ref<'classic' | 'slim'>('classic')
-const selectedCapeId = ref('')
-// редактор скинов (Сделать скин): работает с текущим аккаунтом панели скинов.
-const skinEditorOpen = ref(false)
-const capeActionBusy = ref(false)
-let skinProfileRequestId = 0
-const accountMenuId = ref('')
 const pendingDatapack = ref<ModResult>()
 const datapackWorlds = ref<InstanceWorld[]>([])
 const datapackDialogOpen = ref(false)
@@ -504,28 +560,15 @@ const catalogSortOptions: SelectOption[] = [
   { value: 'newest', label: 'Сначала новые' },
   { value: 'updated', label: 'Недавно обновлялись' },
 ]
-const activeRemoteSkin = computed(() => skinProfileData.value?.skins?.find((skin) => skin.state?.toUpperCase() === 'ACTIVE') || skinProfileData.value?.skins?.[0])
-const availableThemes = computed(() => [...launcherThemes, ...localThemes.value])
-const selectedLocalSkin = computed(() => skinResults.value.find((skin) => skin.skin_id === selectedSkinId.value))
-const skinPreviewImage = computed(() => selectedLocalSkin.value?.image || activeRemoteSkin.value?.url || '')
-const activeCape = computed(() => skinProfileData.value?.capes?.find((cape) => cape.state?.toUpperCase() === 'ACTIVE') || skinProfileData.value?.capes?.[0])
-const availableCapes = computed(() => {
-  const capes = skinProfileData.value?.capes || []
-  const active = capes.find((cape) => cape.id ? cape.id === activeCape.value?.id : cape === activeCape.value)
-  return active ? [active, ...capes.filter((cape) => cape !== active)] : capes
-})
-const selectedCape = computed(() => availableCapes.value.find((cape) => cape.id === selectedCapeId.value) || (!selectedCapeId.value ? activeCape.value : undefined))
 const graphicsReport = ref('')
 const systemDark = ref(false)
-const javaValidation = ref('')
 const appShellRef = ref<HTMLElement | null>(null)
 const wallpaperPreviewUrl = ref('')
 const wallpaperProcessedUrl = ref('')
 const wallpaperLoadFailed = ref(false)
 const wallpaperRenderBlur = ref(12)
 let wallpaperResizeTimer: number | undefined
-const sidebarResizeActive = ref(false)
-// дефолтная папка игры для автозаполнения: если бэкенд ещё не отдал settings
+// путь для автозаполнения до загрузки настроек
 const defaultGameDirectory = computed(() => {
   const platform = `${state.system.platform} ${typeof navigator !== 'undefined' ? navigator.platform : ''}`.toLowerCase()
   return platform.includes('win')
@@ -558,6 +601,8 @@ const settingsDraft = reactive({
   minimize_on_launch: false,
   language: null as string | null,
     font_family: 'system',
+  file_explorer: 'builtin' as 'builtin' | 'system',
+  file_editor: 'builtin' as 'builtin' | 'system',
   keep_logs_days: 14,
   telemetry: false,
   telemetry_endpoint: '',
@@ -594,46 +639,10 @@ const settingsDraft = reactive({
   cloud_last_sync: 0,
   cloud_configured: false,
 })
-const settingsSaveState = ref<'saved' | 'dirty' | 'saving' | 'error'>('saved')
-const settingsSaveMessage = ref('Изменения сохранены')
-const updaterBusy = ref(false)
-// язык выбирается первым шагом первоначальной настройки
-const languageOptions: SelectOption[] = [
-  { value: 'ru', label: 'Русский' },
-  { value: 'en', label: 'English' },
-]
-
-function setLanguageFromSettings(value: string): void {
-  const next: Locale = value === 'en' ? 'en' : 'ru'
-  settingsDraft.language = next
-  // применяем сразу — не ждём «Сохранить»: язык видно и без сохранения,
-  // но в settings.json попадает только после сохранения настроек.
-  setLocale(next)
-}
-const updaterStatus = ref('Самообновление не проверялось в этой сессии.')
-const updaterVersion = ref('')
-const updaterNotes = ref('')
-const updaterProgressDownloaded = ref(0)
-const updaterProgressTotal = ref(0)
-// фолбэк: свежий релиз есть на GitHub, но latest.json в релизе нет —
-// тогда обновление ставится вручную со страницы релизов.
-const updaterManualUrl = ref('')
-let pendingAppUpdate: any = null
 const lastLaunchCrash = ref<CrashReport>()
-const hydratingSettings = ref(false)
-const fontFamilyCss = computed(() => {
-  // windows-первичный стек: без явных 'Segoe UI Variable Text'/'Segoe UI'
-  const families: Record<string, string> = {
-    system: "system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI Variable Text', 'Segoe UI', Roboto, sans-serif",
-    inter: "Inter, 'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif",
-    manrope: "Manrope, Inter, 'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif",
-    mono: "'DM Mono', 'Cascadia Mono', 'Cascadia Code', Consolas, ui-monospace, monospace",
-  }
-  return families[settingsDraft.font_family] || families.system
-})
 const appearanceDraft = reactive<AppearanceSettings>({
    theme: 'dark',
-    active_theme_id: 'midnight-signal',
+    active_theme_id: 'nivora-dark',
   wallpaper_path: '',
   wallpaper_data: '',
   wallpaper_blur: 12,
@@ -672,177 +681,95 @@ const activity = reactive<ActivityState>({
 const LAST_INSTANCE_STORAGE_KEY = 'nivora-launcher:last-instance'
 let lastViewSaveRequest = 0
 
-type SettingsDraftSnapshot = {
-  settings: Record<string, unknown>
-  appearance: Record<string, unknown>
-}
-let savedSettingsSnapshot: SettingsDraftSnapshot | undefined
+const {
+  availableThemes,
+  languageOptions,
+  setLanguageFromSettings,
+  fontFamilyCss,
+  settingsSaveState,
+  settingsSaveMessage,
+  beginSettingsHydration,
+  finishSettingsHydration,
+  resolvedGlobalTheme,
+  currentTheme,
+  currentLayout,
+  effectiveColorTokens,
+  effectiveAccent,
+  wallpaperUrl,
+  wallpaperDisplayUrl,
+  accentForeground,
+  sidebarWidth,
+  sidebarHeight,
+  activeLauncherProfile,
+  effectiveAnimationStyle,
+  effectiveAnimationDuration,
+  appStyle,
+  toastThemeStyle,
+  setInstanceLayout,
+  mergeSavedSettingsBaseline,
+  updateSavedSettingsBaseline,
+  settingsProfiles,
+  settingsProfilesLoading,
+  settingsProfileBusy,
+  settingsProfileName,
+  backupDestinationOptions,
+  loadSettingsProfiles,
+  formatDateShort,
+  saveSettingsProfileAs,
+  overwriteSettingsProfile,
+  applySettingsProfile,
+  deleteSettingsProfile,
+  exportSettingsProfile,
+  importSettingsProfile,
+  updateSidebarWidth,
+  stopSidebarResize,
+  startSidebarResize,
+  addLauncherProfile,
+  removeLauncherProfile,
+  saveSettings,
+  addResourceCatalog,
+  removeResourceCatalog,
+  addPluginCatalog,
+  removePluginCatalog,
+  selectActiveCatalog,
+  setSimpleAppearance,
+  setSimpleAccent,
+} = createSettingsWorkflow({
+  settingsDraft,
+  appearanceDraft,
+  state,
+  currentView,
+  systemDark,
+  localThemes,
+  wallpaperPreviewUrl,
+  wallpaperProcessedUrl,
+  memoryValue,
+  memoryUnit,
+  javaSelection,
+  activeCatalogId,
+  modProjectType,
+  busy,
+  persistentViewOptions,
+  shortcutRows,
+  defaultColorTokens,
+  lightColorTokens,
+  defaultLauncherProfile,
+  showToast,
+  errorMessage,
+  memorySetting: () => memorySetting.value,
+  effectiveJavaPath,
+  commitWallpaperBlur,
+  applyState,
+  ensureCatalogForView,
+  broadcastSettingsChanged: (keys) => { void broadcastPluginEvent('settings.changed', { keys }) },
+  syncActiveTheme: () => syncActiveTheme(),
+})
 
-function cloneSettingsValue(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(cloneSettingsValue)
-  if (value && typeof value === 'object') {
-    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, cloneSettingsValue(item)]))
-  }
-  return value
-}
 
-function currentSettingsDraftValues(): SettingsDraftSnapshot {
-  return {
-    settings: { ...settingsDraft, memory: memorySetting.value, java_path: effectiveJavaPath() },
-    appearance: appearanceDraft as unknown as Record<string, unknown>,
-  }
-}
-
-function takeSettingsDraftSnapshot(): SettingsDraftSnapshot {
-  return cloneSettingsValue(currentSettingsDraftValues()) as SettingsDraftSnapshot
-}
-
-function settingsValuesMatch(left: unknown, right: unknown): boolean {
-  if (Object.is(left, right)) return true
-  if (!left || !right || typeof left !== 'object' || typeof right !== 'object') return false
-  if (Array.isArray(left) || Array.isArray(right)) {
-    return Array.isArray(left) && Array.isArray(right) && left.length === right.length && left.every((value, index) => settingsValuesMatch(value, right[index]))
-  }
-  const leftRecord = left as Record<string, unknown>
-  const rightRecord = right as Record<string, unknown>
-  const leftKeys = Object.keys(leftRecord)
-  const rightKeys = Object.keys(rightRecord)
-  return leftKeys.length === rightKeys.length && leftKeys.every((key) => Object.hasOwn(rightRecord, key) && settingsValuesMatch(leftRecord[key], rightRecord[key]))
-}
-
-function refreshSettingsSaveState() {
-  if (!savedSettingsSnapshot || hydratingSettings.value || settingsSaveState.value === 'saving') return
-  const saved = settingsValuesMatch(currentSettingsDraftValues(), savedSettingsSnapshot)
-  settingsSaveState.value = saved ? 'saved' : 'dirty'
-  settingsSaveMessage.value = saved ? 'Изменения сохранены' : 'Есть несохранённые изменения'
-}
-
-let settingsSaveStateTimer: number | undefined
-function scheduleSettingsSaveStateRefresh() {
-  if (settingsSaveStateTimer !== undefined) window.clearTimeout(settingsSaveStateTimer)
-  settingsSaveStateTimer = window.setTimeout(() => {
-    settingsSaveStateTimer = undefined
-    refreshSettingsSaveState()
-  }, 250)
-}
-
-function mergeSavedSettingsBaseline(patch: Record<string, unknown>) {
-  if (!savedSettingsSnapshot) {
-    savedSettingsSnapshot = takeSettingsDraftSnapshot()
-  } else {
-    savedSettingsSnapshot = {
-      ...savedSettingsSnapshot,
-      settings: { ...savedSettingsSnapshot.settings, ...(cloneSettingsValue(patch) as Record<string, unknown>) },
-    }
-  }
-  refreshSettingsSaveState()
-}
-
-function setInstanceLayout(value: string) {
-  const next = value === 'compact' ? 'compact' : 'default'
-  appearanceDraft.instance_layout = next
-  void bridge.saveSettings({ instance_layout: next }).then((result) => {
-    state.settings.instance_layout = result.settings.instance_layout
-    mergeSavedSettingsBaseline({ instance_layout: result.settings.instance_layout })
-  }).catch((error) => showToast(errorMessage(error)))
-}
-
-watch([settingsDraft, appearanceDraft, memoryValue, memoryUnit, javaSelection], scheduleSettingsSaveStateRefresh, { deep: true })
 
 const page = computed(() => activePluginTab.value
   ? { title: activePluginTab.value.label, kicker: 'Вкладка плагина' }
   : views[currentView.value])
-const resolvedGlobalTheme = computed(() => {
-  if (appearanceDraft.theme === 'system') return systemDark.value ? 'dark' : 'light'
-  return appearanceDraft.theme
-})
-const currentTheme = computed(() => {
-  const override = appearanceDraft.page_themes[currentView.value]
-  if (!override || override === 'inherit') return resolvedGlobalTheme.value
-  return override
-})
-const currentLayout = computed(() => appearanceDraft.page_layouts[currentView.value] || 'balanced')
-const effectiveColorTokens = computed<Record<string, string>>(() => {
-  const base = currentTheme.value === 'light' ? lightColorTokens : defaultColorTokens
-  return Object.fromEntries(
-    Object.entries(defaultColorTokens).map(([key, fallback]) => [
-      key,
-      appearanceDraft.color_tokens[key] === fallback ? base[key] : appearanceDraft.color_tokens[key] || base[key],
-    ]),
-  )
-})
-const effectiveAccent = computed(() => effectiveColorTokens.value.accent)
-const wallpaperUrl = computed(() => wallpaperPreviewUrl.value || appearanceDraft.wallpaper_data || (appearanceDraft.wallpaper_path ? bridge.fileUrl(appearanceDraft.wallpaper_path) : ''))
-const wallpaperDisplayUrl = computed(() => wallpaperProcessedUrl.value || wallpaperUrl.value)
-const accentForeground = computed(() => {
-  const hex = effectiveAccent.value.replace('#', '')
-  const red = Number.parseInt(hex.slice(0, 2), 16) || 0
-  const green = Number.parseInt(hex.slice(2, 4), 16) || 0
-  const blue = Number.parseInt(hex.slice(4, 6), 16) || 0
-  return (red * 299 + green * 587 + blue * 114) / 1000 > 154 ? '#080808' : '#ffffff'
-})
-const sidebarWidth = computed(() => {
-  if (appearanceDraft.sidebar_position === 'top' || appearanceDraft.sidebar_position === 'bottom') return 252
-  if (appearanceDraft.sidebar_mode === 'compact') return 72
-  if (appearanceDraft.sidebar_width_mode === 'full') return 300
-  if (appearanceDraft.sidebar_width_mode === 'manual') return Math.min(360, Math.max(168, appearanceDraft.sidebar_width))
-  return 252
-})
-const sidebarHeight = computed(() => {
-  if (appearanceDraft.sidebar_position !== 'top' && appearanceDraft.sidebar_position !== 'bottom') return 0
-  return appearanceDraft.sidebar_mode === 'compact' ? 128 : 184
-})
-const activeLauncherProfile = computed(() => settingsDraft.launcher_profiles.find((profile) => profile.id === settingsDraft.active_launcher_profile_id) || settingsDraft.launcher_profiles[0])
-const effectiveAnimationStyle = computed<AnimationStyle>(() => {
-  if (appearanceDraft.animations === 'off') return 'none'
-  return appearanceDraft.animation_settings.page_styles[currentView.value] || appearanceDraft.animation_settings.page_style
-})
-const effectiveAnimationDuration = computed(() => appearanceDraft.animation_settings.page_durations_ms[currentView.value] || appearanceDraft.animation_settings.page_duration_ms)
-const appStyle = computed<Record<string, string>>(() => ({
-  '--bg': effectiveColorTokens.value.background,
-  '--panel': effectiveColorTokens.value.panel,
-  '--panel-raised': effectiveColorTokens.value.panel_raised,
-  '--panel-soft': effectiveColorTokens.value.panel_soft,
-  '--text': effectiveColorTokens.value.text,
-  '--muted': effectiveColorTokens.value.muted,
-  '--quiet': effectiveColorTokens.value.quiet,
-  '--blue-bright': effectiveColorTokens.value.accent_strong,
-  '--green': effectiveColorTokens.value.success,
-  '--danger': effectiveColorTokens.value.danger,
-  '--warning': effectiveColorTokens.value.warning,
-  '--line': `color-mix(in srgb, ${effectiveColorTokens.value.border} 16%, transparent)`,
-  '--line-strong': `color-mix(in srgb, ${effectiveColorTokens.value.border} 30%, transparent)`,
-  '--accent': effectiveAccent.value,
-  '--accent-foreground': accentForeground.value,
-  '--blue': effectiveAccent.value,
-  '--brand-color': currentTheme.value === 'light' ? '#111214' : '#f4f7ff',
-  '--sidebar-bg': `color-mix(in srgb, ${effectiveColorTokens.value.panel} 92%, ${effectiveColorTokens.value.background})`,
-  '--ui-scale': `${appearanceDraft.ui_scale / 100}`,
-  '--radius': `${appearanceDraft.radius_tokens.card}px`,
-  '--radius-card': `${appearanceDraft.radius_tokens.card}px`,
-  '--radius-button': `${appearanceDraft.radius_tokens.button}px`,
-  '--radius-control': `${appearanceDraft.radius_tokens.control}px`,
-  '--banner-shade': effectiveColorTokens.value.banner_shade,
-  '--wallpaper-opacity': `${appearanceDraft.wallpaper_opacity / 100}`,
-  '--sidebar-width': `${sidebarWidth.value}px`,
-  '--sidebar-height': `${sidebarHeight.value}px`,
-  '--font-family': fontFamilyCss.value,
-  '--page-duration': `${effectiveAnimationDuration.value}ms`,
-  '--surface-duration': `${appearanceDraft.animation_settings.surface_duration_ms}ms`,
-  '--surface-stagger': `${appearanceDraft.animation_settings.surface_stagger_ms}ms`,
-}))
-const toastThemeStyle = computed<Record<string, string>>(() => ({
-  '--text': effectiveColorTokens.value.text,
-  '--muted': effectiveColorTokens.value.muted,
-  '--panel-raised': effectiveColorTokens.value.panel_raised,
-  '--panel-soft': effectiveColorTokens.value.panel_soft,
-  '--line-strong': `color-mix(in srgb, ${effectiveColorTokens.value.border} 30%, transparent)`,
-  '--accent': effectiveAccent.value,
-  '--green': effectiveColorTokens.value.success,
-  '--danger': effectiveColorTokens.value.danger,
-  '--warning': effectiveColorTokens.value.warning,
-}))
-
 type ShellSnapshot = {
   animations: string
   uiScale: number
@@ -976,7 +903,7 @@ const pluginCatalogKindOptions: SelectOption[] = [
   { value: 'modrinth', label: 'Modrinth', meta: 'project_type:plugin' },
   { value: 'spigot', label: 'Spigot', meta: 'Spiget resources API' },
   { value: 'hangar', label: 'Hangar', meta: 'PaperMC catalog' },
-  { value: 'custom', label: 'Custom API', meta: 'Свой HTTPS endpoint' },
+  { value: 'custom', label: 'Совместимый API', meta: 'Свой HTTPS-адрес каталога' },
 ]
 const modInstanceVersion = computed(() => {
   const instance = selectedInstance.value
@@ -995,6 +922,7 @@ const selectedLoaderLabel = computed(
   () => loaders.find((value) => value.id === selectedLoader.value)?.label || selectedLoader.value,
 )
 const modContextLabel = computed(() => {
+  if (currentView.value === 'modpacks') return `${selectedVersion.value} · ${selectedLoaderLabel.value}`
   const instance = selectedInstance.value
   if (instance?.kind === 'server') return `${modInstanceVersion.value} · ${instance.server_core || 'server'}`
   if (modProjectType.value === 'plugin') return `${modInstanceVersion.value} · ${catalogServerCore.value}`
@@ -1045,63 +973,42 @@ const javaChoiceOptions = computed<SelectOption[]>(() => [
 ])
 const graphicsOptions: SelectOption[] = [
   { value: 'auto', label: 'Автоматически', meta: 'Определить драйвер' },
-  { value: 'nvidia', label: 'NVIDIA GLX', meta: 'RTX / proprietary driver' },
-  { value: 'mesa', label: 'Mesa GLX', meta: 'Mesa / AMD / Intel' },
-  { value: 'software', label: 'Software llvmpipe', meta: 'Fallback при GLXBadFBConfig' },
-]
-const jvmPresetOptions: SelectOption[] = [
-  { value: 'none', label: 'Без пресета', meta: 'Аргументы только из профиля' },
-  { value: 'fps', label: 'FPS', meta: 'низкие паузы GC' },
-  { value: 'balanced', label: 'Balanced', meta: 'универсальный вариант' },
-  { value: 'heavy_modpack', label: 'Heavy Modpack', meta: 'Aikar’s' },
-  { value: 'compatibility', label: 'Compatibility', meta: 'старые сборки и моды' },
-  { value: 'streaming', label: 'Streaming', meta: 'стабильные кадры записи' },
-]
-const recordingEncoderOptions: SelectOption[] = [
-  { value: 'auto', label: 'Автоматически', meta: 'NVENC → VAAPI → x264' },
-  { value: 'nvenc', label: 'NVENC', meta: 'Аппаратно, NVIDIA' },
-  { value: 'vaapi', label: 'VAAPI', meta: 'Аппаратно, Intel/AMD' },
-  { value: 'x264', label: 'libx264', meta: 'Процессор, очень быстрый пресет' },
-]
-const recordingContainerOptions: SelectOption[] = [
-  { value: 'mp4', label: 'MP4', meta: 'Универсальный' },
-  { value: 'mkv', label: 'MKV', meta: 'Устойчив к прерываниям' },
-]
-const overlayPositionOptions: SelectOption[] = [
-  { value: 'top-left', label: 'Слева сверху', meta: 'Как в Afterburner' },
-  { value: 'top-right', label: 'Справа сверху', meta: '' },
-  { value: 'bottom-left', label: 'Слева снизу', meta: '' },
-  { value: 'bottom-right', label: 'Справа снизу', meta: '' },
-]
-const systemMetricsDisplayOptions: SelectOption[] = [
-  { value: 'overlay', label: 'Только оверлей', meta: 'По горячей клавише в игре' },
-  { value: 'always', label: 'Постоянно', meta: 'Полоса метрик в верхней панели лаунчера' },
-]
-const versionFilterOptions: SelectOption[] = [
-  { value: 'release', label: 'Релизы', meta: 'Стабильные версии' },
-  { value: 'snapshot', label: 'Снапшоты', meta: 'Недельные сборки и pre/rc' },
-  { value: 'old_beta', label: 'Бета', meta: 'Исторические beta-версии' },
-  { value: 'old_alpha', label: 'Альфа', meta: 'Исторические alpha-версии' },
-  { value: 'all', label: 'Все версии', meta: 'Релизы, снапшоты и alpha/beta' },
-]
-const loginSourceOptions: SelectOption[] = [
-  { value: 'microsoft', label: 'Microsoft OAuth', meta: 'Автоматический device-code вход' },
-  { value: 'disabled', label: 'Отключён', meta: 'Скрыть внешний вход' },
+  { value: 'nvidia', label: 'NVIDIA (GLX)', meta: 'Проприетарный драйвер' },
+  { value: 'mesa', label: 'Mesa (AMD/Intel)', meta: 'Открытый драйвер GLX' },
+  { value: 'software', label: 'Программный рендерер', meta: 'Запасной вариант для несовместимого GLX' },
 ]
 const catalogSourceOptions: SelectOption[] = [
   { value: 'modrinth', label: 'Modrinth API', meta: 'Официальный endpoint по умолчанию' },
   { value: 'custom', label: 'Свой каталог', meta: 'Совместимый API endpoint' },
 ]
-const dataSourceOptions: SelectOption[] = [
-  { value: 'mojang', label: 'Mojang metadata', meta: 'Официальный manifest по умолчанию' },
-  { value: 'custom', label: 'Свой источник', meta: 'Совместимый version manifest' },
-]
 const modProjectOptions: SelectOption[] = [
-  { value: 'mod', label: 'Моды', meta: 'project_type:mod' },
-  { value: 'resourcepack', label: 'Ресурспаки', meta: 'project_type:resourcepack' },
-  { value: 'shader', label: 'Шейдеры', meta: 'project_type:shader' },
-  { value: 'datapack', label: 'Датапаки', meta: 'project_type:datapack' },
-  { value: 'plugin', label: 'Плагины сервера', meta: 'Только server workspace' },
+  { value: 'mod', label: 'Моды', meta: 'Изменения и дополнения игры' },
+  { value: 'resourcepack', label: 'Ресурспаки', meta: 'Текстуры и звуки' },
+  { value: 'shader', label: 'Шейдеры', meta: 'Графические эффекты' },
+  { value: 'datapack', label: 'Датапаки', meta: 'Дополнения к мирам' },
+  { value: 'plugin', label: 'Плагины сервера', meta: 'Для серверного экземпляра' },
+]
+const modCategoryOptions: SelectOption[] = [
+  { value: '', label: 'Все категории' },
+  { value: 'adventure', label: 'Приключения' },
+  { value: 'cursed', label: 'Нестандартные' },
+  { value: 'decoration', label: 'Декор' },
+  { value: 'economy', label: 'Экономика' },
+  { value: 'equipment', label: 'Снаряжение' },
+  { value: 'food', label: 'Еда' },
+  { value: 'game-mechanics', label: 'Игровые механики' },
+  { value: 'library', label: 'Библиотеки' },
+  { value: 'magic', label: 'Магия' },
+  { value: 'management', label: 'Управление' },
+  { value: 'minigame', label: 'Мини-игры' },
+  { value: 'mobs', label: 'Мобы' },
+  { value: 'optimization', label: 'Оптимизация' },
+  { value: 'social', label: 'Социальные' },
+  { value: 'storage', label: 'Хранилища' },
+  { value: 'technology', label: 'Технологии' },
+  { value: 'transportation', label: 'Транспорт' },
+  { value: 'utility', label: 'Инструменты' },
+  { value: 'worldgen', label: 'Карты и генерация мира' },
 ]
 const selectedProjectLabel = computed(() => currentView.value === 'modpacks' ? 'Модпаки' : modProjectOptions.find((option) => option.value === modProjectType.value)?.label || 'Каталог')
 const memoryUnitOptions: SelectOption[] = [
@@ -1140,14 +1047,84 @@ const serverMemorySetting = computed(() => {
   const value = Math.min(serverMemoryMaxValue.value, Math.max(minimum, Number(serverMemoryValue.value) || minimum))
   return `${Number(value.toFixed(serverMemoryDecimals.value))}${serverMemoryUnit.value}`
 })
+const {
+  modPage,
+  modTotal,
+  modHasMore,
+  modPageCount,
+  modPagerPages,
+  catalogSelection,
+  catalogBulkProgress,
+  catalogSelectable,
+  catalogKey,
+  toggleCatalogSelection,
+  selectCatalogPage,
+  clearCatalogSelection,
+  installSelectedMods,
+  goToCatalogPage,
+  searchMods,
+  installMod,
+  installModIntoTarget,
+  removeMod,
+  confirmDatapackInstall,
+} = createCatalogWorkflow({
+  currentView,
+  selectedInstance,
+  selectedInstanceName,
+  modQuery,
+  modProjectType,
+  selectedModCategory,
+  activeCatalogId,
+  activeCatalog,
+  catalogServerCore,
+  selectedVersion,
+  selectedLoader,
+  selectedLoaderLabel,
+  selectedProjectLabel,
+  modInstanceVersion,
+  modSortMode,
+  modResults,
+  modSearchPerformed,
+  modBusy,
+  modError,
+  modInstallId,
+  modAction,
+  modInstallProgress,
+  modInstallDetail,
+  pendingDatapack,
+  datapackWorlds,
+  datapackDialogOpen,
+  datapackWorldId,
+  activity,
+  showToast,
+  openActivity,
+  finishActivity,
+  errorMessage,
+  isCancelled,
+  confirmDestructive,
+  ensureCatalogForView,
+  ensureCompatibleInstanceForCatalog,
+  setView,
+  createModpackInstance: (mod) => createModpackInstance(mod),
+  broadcastPluginEvent,
+  pluginInstanceRef,
+  withUnverifiedDownloadConfirmation: <T>(attempt: (confirmUnverified: boolean) => Promise<T>, prompt: string, cancelMessage: string) =>
+    withUnverifiedDownloadConfirmation(attempt, prompt, cancelMessage),
+})
+
 const toastDurationMs = 2800
+// тост с действием показываем дольше, чтобы пользователь успел его нажать
+const toastActionDurationMs = 7000
 let toastTimer: number | undefined
+let toastTimerStartedAt = 0
+let toastTimerRemaining = 0
 let activityCloseTimer: number | undefined
 let loaderChoiceTimer: number | undefined
-let modSearchTimer: number | undefined
-let modSearchRequestId = 0
 let activityLogTimer: number | undefined
+let activityDismissedForRun = false
 let activityLogPollInFlight = false
+let activityLogRevision = 0
+let activityLogInstanceName = ''
 let microsoftStatusTimer: number | undefined
 let microsoftStatusPollInFlight = false
 let stopBackendEvents: (() => void) | undefined
@@ -1158,15 +1135,10 @@ let startupViewApplied = false
 let userNavigatedDuringBootstrap = false
 
 function clearPluginNotificationToast(toastIdToClear: number) {
-  for (const [pluginId, notifications] of pluginNotificationToastIds) {
-    for (const [notificationId, notificationToastId] of notifications) {
-      if (notificationToastId === toastIdToClear) notifications.delete(notificationId)
-    }
-    if (notifications.size === 0) pluginNotificationToastIds.delete(pluginId)
-  }
+  pluginController.clearNotificationsForToast(toastIdToClear)
 }
 
-// системное уведомление о сбое — только когда окно лаунчера скрыто/свёрнуто.
+// отправляем системное уведомление, только когда окно скрыто
 const launcherHidden = ref(false)
 
 function syncLauncherHidden() {
@@ -1178,12 +1150,15 @@ function notifySystemIfHidden(message: string) {
   void bridge.systemNotify('Nivora Launcher', message).catch(() => undefined)
 }
 
+function inDesktopTauri(): boolean {
+  return typeof window !== 'undefined' && Boolean((window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__)
+}
+
 const overlayMode = overlayWindowRequested()
 let overlayWatchTimer: number | undefined
 let overlayAttachedInstance = ''
 let overlayRecordingBusy = false
-// сколько подряд «игра не running» терпим, прежде чем снимать горячие
-// клавиши (тик вотчера — 3 секунды).
+// число пропусков опроса перед отключением клавиш; интервал опроса 3 секунды
 const OVERLAY_DETACH_AFTER_MISSES = 4
 let overlayMissedPolls = 0
 
@@ -1198,7 +1173,7 @@ function overlayHotkeyLabel(): string {
 const inAppOverlayOpen = ref(false)
 
 async function handleOverlayToggleHotkey() {
-  // wayland-костыль: отдельное окно поверх игры там не поднять (compositor
+  // на Wayland композитор не позволяет вывести отдельное окно поверх игры
   if (overlayWaylandMode()) {
     inAppOverlayOpen.value = !inAppOverlayOpen.value
     return
@@ -1206,33 +1181,13 @@ async function handleOverlayToggleHotkey() {
   const visible = await toggleOverlay()
   if (!visible) {
     syncLauncherHidden()
-    // окно не открылось даже на X11 — не оставляем пользователя без
-    // оверлея: показываем его внутри лаунчера.
+    // если отдельное окно не открылось, показываем оверлей в лаунчере
     inAppOverlayOpen.value = true
     if (overlayLastError()) {
       const message = `Отдельное окно оверлея не открылось (${overlayLastError()}) — оверлей показан поверх лаунчера. Подробный разбор — кнопка «Диагностика оверлея» в Настройках.`
       showToast(message, 'danger')
       notifySystemIfHidden(message)
     }
-  }
-}
-
-const overlaySelfTestReport = ref<OverlaySelfTestStep[]>([])
-const overlaySelfTestBusy = ref(false)
-
-async function runOverlaySelfTest() {
-  if (overlaySelfTestBusy.value) return
-  overlaySelfTestBusy.value = true
-  try {
-    overlaySelfTestReport.value = await overlaySelfTest(overlaySettingsDraft())
-    const failed = overlaySelfTestReport.value.filter((step) => !step.ok).length
-    showToast(failed === 0
-      ? 'Диагностика оверлея: все шаги в порядке. Если окно не видно поверх игры — игре нужен оконный режим (F11).'
-      : `Диагностика оверлея: проблемных шагов — ${failed}. Отчёт ниже в настройках.`, failed === 0 ? 'success' : 'danger')
-  } catch (error) {
-    showToast(`Диагностика оверлея прервалась: ${errorMessage(error)}`, 'danger')
-  } finally {
-    overlaySelfTestBusy.value = false
   }
 }
 
@@ -1254,7 +1209,7 @@ async function attachOverlay(instanceName: string, options: { silent?: boolean }
   overlayAttachedInstance = instanceName
   const failed = await bindGameHotkeys(overlaySettingsDraft(), () => { void handleOverlayToggleHotkey() }, () => { void handleRecordingHotkey() })
   if (failed.length && !options.silent) {
-    // причина «не зарегистрировалась» бывает разной: на нативном Wayland
+    // причина "не зарегистрировалась" бывает разной: на нативном Wayland
     const wayland = overlayWaylandMode()
     showToast(wayland
       ? `Глобальные клавиши (${failed.join(', ')}) не работают в нативной Wayland-сессии. Пока окно лаунчера в фокусе, комбинация работает как обычно; иначе открывайте оверлей кнопкой «Оверлей» в шапке или пунктом в меню значка в трее.`
@@ -1269,8 +1224,7 @@ function attachOverlayForLaunch(instanceName: string) {
   if (overlayMode || !inDesktopTauri()) return
   if (!settingsDraft.overlay_settings.enabled) return
   void attachOverlay(instanceName)
-  // эксклюзивный полноэкранный режим прячет любые topmost-окна — лучше
-  // предупредить один раз, чем пользователь решит, что оверлей сломан.
+  // полноэкранный режим скрывает оверлей, поэтому предупреждаем один раз
   if (!overlayHintShown) {
     overlayHintShown = true
     showToast(`Оверлей готов: ${normalizeHotkey(settingsDraft.overlay_settings.hotkey_overlay, 'Shift+Tab')}. Если игра в полноэкранном режиме — переключите её в оконный (F11 в Minecraft)`)
@@ -1304,20 +1258,19 @@ async function pollOverlaySession() {
       overlayMissedPolls = 0
       if (!overlayAttachedInstance) await attachOverlay(snapshot.instance.name)
     } else {
-      // один «не работает» — ещё не повод отцеплять горячие клавиши:
+      // единичный пропуск не отключает горячие клавиши
       overlayMissedPolls += 1
       if (overlayMissedPolls >= OVERLAY_DETACH_AFTER_MISSES) await detachOverlay()
     }
   } catch {
-    // бэкенд занят долгой операцией — попробуем в следующий тик
-    // (состояние горячих клавиш при этом не трогаем)
+    // повторим опрос позже и сохраним текущее состояние клавиш
   }
 }
 
 function startOverlayWatcher() {
   if (overlayWatchTimer !== undefined) return
   void initOverlayEventBridge(() => { void handleOverlayToggleHotkey() }, () => { inAppOverlayOpen.value = false })
-  // привязываем горячие клавиши сразу, а не «когда начнётся игра»:
+  // привязываем горячие клавиши сразу, а не "когда начнётся игра":
   if (settingsDraft.overlay_settings.enabled) void attachOverlay(overlayAttachedInstance, { silent: true })
   overlayWatchTimer = window.setInterval(() => { void pollOverlaySession() }, 3000)
 }
@@ -1333,8 +1286,7 @@ function stopOverlayWatcher() {
 
 watch(() => settingsDraft.overlay_settings, () => {
   if (overlayMode) return
-  // настройки оверлея поменялись — сразу перерегистрируем клавиши,
-  // даже если игра сейчас не запущена (они живут вместе с лаунчером).
+  // перерегистрируем клавиши сразу после изменения настроек оверлея
   if (settingsDraft.overlay_settings.enabled) {
     void attachOverlay(overlayAttachedInstance, { silent: true })
   } else {
@@ -1343,13 +1295,15 @@ watch(() => settingsDraft.overlay_settings, () => {
   }
 }, { deep: true })
 
-function showToast(message: string, tone: PluginUiTone = 'success') {
+function showToast(message: string, tone: PluginUiTone = 'success', action?: { label: string; run: () => void } | null) {
   if (tone === 'danger') notifySystemIfHidden(message)
   if (!settingsDraft.show_toasts) return
   const previousToastId = toastId.value
   toastId.value += 1
   clearPluginNotificationToast(previousToastId)
   toast.value = message
+  toastAction.value = action || null
+  toastDuration.value = action ? toastActionDurationMs : toastDurationMs
   toastToneClass.value = {
     default: '',
     muted: 'status-dot--muted',
@@ -1359,12 +1313,53 @@ function showToast(message: string, tone: PluginUiTone = 'success') {
   }[tone]
   const currentToastId = toastId.value
   if (toastTimer) window.clearTimeout(toastTimer)
+  toastTimerStartedAt = Date.now()
+  toastTimerRemaining = toastDuration.value
   toastTimer = window.setTimeout(() => {
     if (toastId.value !== currentToastId) return
     toast.value = ''
+    toastAction.value = null
     clearPluginNotificationToast(currentToastId)
     toastTimer = undefined
-  }, toastDurationMs)
+  }, toastTimerRemaining)
+}
+
+// пауза тоста действует, пока курсор находится над ним
+function pauseToastTimer() {
+  if (!toastTimer) return
+  window.clearTimeout(toastTimer)
+  toastTimer = undefined
+  toastTimerRemaining = Math.max(400, toastTimerRemaining - (Date.now() - toastTimerStartedAt))
+}
+
+function resumeToastTimer() {
+  if (toastTimer || !toast.value) return
+  const currentToastId = toastId.value
+  toastTimerStartedAt = Date.now()
+  toastTimer = window.setTimeout(() => {
+    if (toastId.value !== currentToastId) return
+    toast.value = ''
+    toastAction.value = null
+    clearPluginNotificationToast(currentToastId)
+    toastTimer = undefined
+  }, toastTimerRemaining)
+}
+
+function runToastAction() {
+  const action = toastAction.value
+  toastAction.value = null
+  if (!action) return
+  // после действия закрываем тост
+  toastTimerRemaining = 0
+  if (toastTimer) {
+    window.clearTimeout(toastTimer)
+    toastTimer = undefined
+  }
+  const currentToastId = toastId.value
+  toastId.value += 1
+  toast.value = ''
+  clearPluginNotificationToast(currentToastId)
+  action.run()
 }
 
 async function confirmDestructive(message: string, options: Parameters<typeof confirmDialog>[1] = {}): Promise<boolean> {
@@ -1389,7 +1384,7 @@ const wallpaperRenderer = createWallpaperRenderer()
 
 async function renderWallpaper() {
   const next = await wallpaperRenderer.render(wallpaperUrl.value, wallpaperRenderBlur.value)
-  // null — параллельный запрос уже отвечает новее, не мешаем ему
+  // более старый запрос не заменяет результат нового
   if (next !== null) wallpaperProcessedUrl.value = next
 }
 
@@ -1401,483 +1396,71 @@ function scheduleWallpaperRender() {
   }, 120)
 }
 
+// сокращает счётчик загрузок для карточки каталога
+function formatDownloadsCompact(value: unknown): string {
+  const total = Number(value)
+  if (!Number.isFinite(total) || total <= 0) return ''
+  if (total >= 1000000) {
+    const millions = total / 1000000
+    const text = (millions >= 100 ? millions.toFixed(1) : millions.toFixed(2)).replace('.', ',').replace(/,?0+$/, '')
+    return `${text} млн`
+  }
+  return total.toLocaleString('ru-RU')
+}
+
+// число подписок Modrinth показываем как избранное проекта
+function formatLikes(value: unknown): string {
+  const total = Number(value)
+  return Number.isFinite(total) && total > 0 ? total.toLocaleString('ru-RU') : ''
+}
+
 function onModIconError(mod: ModResult) {
   mod.icon_url = ''
 }
 
-async function modpackMenu(event: MouseEvent, mod: ModResult) {
-  openContextMenu(event, [
-    { id: 'details', label: 'Подробности', icon: 'info', action: () => openCatalogDetails(mod) },
-    { id: 'create', label: 'Создать экземпляр', icon: 'plus', action: () => void createModpackInstance(mod) },
-  ], mod.title || mod.name || 'Модпак')
-}
-
-async function chooseModpackFile() {
-  const file = await pickFile({ accept: '.zip,.mrpack', title: 'Архив модпака' })
-  if (file) void importModpackArchive(file)
-}
-
-/** Общий путь импорта архива модпака: и из окна выбора, и из drag-and-drop. */
-async function importModpackArchive(file: { fileName: string; data: string; size: number }) {
-  if (file.size > 512 * 1024 * 1024) {
-    showToast('Архив модпака превышает лимит 512 MiB')
-    return
-  }
-  if (currentView.value === 'modpacks') {
-    await createModpackInstance(undefined, { fileName: file.fileName, data: file.data })
-    return
-  }
-  const instance = selectedInstance.value
-  if (!instance) return
-  modBusy.value = true
-  modInstallDetail.value = 'Читаю архив и проверяю файлы…'
-  openActivity('Импорт модпака', `${file.fileName} · ${instance.name}`, false)
-  try {
-    const preflight = await preflightArchiveModpack({
-      instance_name: instance.name,
-      file_name: file.fileName,
-      data: file.data,
-      game_version: modInstanceVersion.value,
-      loader: instance.loader,
-      loader_version: instance.loader_version,
-    })
-    if (!(await showModpackPreviewDialog(file.fileName, modpackPreviewData(preflight.value.dependencies)))) {
-      throw new Error('Импорт отменён при просмотре списка модов.')
-    }
-    const dependencyIssues = modpackDependencyIssues(preflight.value.dependencies)
-    if (dependencyIssues.length) {
-      const choice = await chooseDialog(
-        'Требования модпака не совпадают с текущим экземпляром',
-        [{ value: 'separate', label: 'Отдельный экземпляр', description: modpackDependencySummary(preflight.value.dependencies) || 'Создать новый профиль под этот модпак' }],
-        {
-          title: 'Конфликт модпака',
-          detail: dependencyIssues.join(' · '),
-          confirmLabel: 'Выбрать',
-        },
-      )
-      if (choice === 'separate') {
-        await createModpackInstance(undefined, { fileName: file.fileName, data: file.data })
-        finishActivity('Импорт перенаправлен в новый экземпляр.')
-        return
-      }
-      throw new Error('Импорт отменён: требования модпака не совпадают с текущим экземпляром.')
-    }
-    const result = await bridge.importModpack({
-      instance_name: instance.name,
-      file_name: file.fileName,
-      data: file.data,
-      game_version: modInstanceVersion.value,
-      loader: instance.loader,
-      loader_version: instance.loader_version,
-      confirm_unverified: preflight.confirmed,
-    })
-    finishActivity('Модпак импортирован.', [`Файлов: ${result.files?.length || 0}`, `Экземпляр: ${instance.name}`])
-    showToast('Модпак импортирован в экземпляр')
-    await searchMods()
-  } catch (error) {
-    activity.logs.push(errorMessage(error))
-    finishActivity(isCancelled(error) ? 'Импорт остановлен.' : 'Импорт модпака остановлен.')
-    if (!isCancelled(error)) showToast(errorMessage(error))
-  } finally {
-    modBusy.value = false
-    modInstallDetail.value = ''
-  }
-}
-
-const modpackPreviewOpen = ref(false)
-const modpackPreviewTitle = ref('')
-const modpackPreviewItems = ref<ModpackModPreviewItem[]>([])
-const modpackPreviewTotal = ref(0)
-const modpackPreviewTruncated = ref(false)
-const modpackPreviewQuery = ref('')
-let modpackPreviewResolver: ((confirmed: boolean) => void) | null = null
-
-const modpackPreviewFiltered = computed(() => {
-  const query = modpackPreviewQuery.value.trim().toLowerCase()
-  if (!query) return modpackPreviewItems.value
-  return modpackPreviewItems.value.filter((item) => item.name.toLowerCase().includes(query))
+const {
+  modpackMenu,
+  chooseModpackFile,
+  importModpackArchive,
+  modpackPreviewOpen,
+  modpackPreviewTitle,
+  modpackPreviewItems,
+  modpackPreviewTotal,
+  modpackPreviewTruncated,
+  modpackPreviewQuery,
+  modpackPreviewFiltered,
+  modpackPreviewSourceLabel,
+  closeModpackPreview,
+  createModpackInstance,
+  withUnverifiedDownloadConfirmation,
+} = createModpackWorkflow({
+  state,
+  currentView,
+  selectedInstance,
+  modBusy,
+  modInstallDetail,
+  modInstanceVersion,
+  selectedVersion,
+  selectedLoader,
+  selectedLoaderVersion,
+  loadingChoices,
+  selectedInstanceName,
+  activeCatalogId,
+  memorySetting,
+  settingsDraft,
+  busy,
+  activity,
+  showToast,
+  openActivity,
+  finishActivity,
+  searchMods,
+  errorMessage,
+  isCancelled,
+  setView,
+  launchExisting,
+  openCatalogDetails,
+  effectiveJavaPath,
 })
-
-const modpackPreviewSourceLabel = (source: string) => ({
-  archive: 'из архива',
-  modrinth: 'Modrinth',
-  curseforge: 'CurseForge',
-  ftb: 'FTB',
-} as Record<string, string>)[source] || source
-
-function closeModpackPreview(confirmed: boolean) {
-  if (!modpackPreviewOpen.value) return
-  modpackPreviewOpen.value = false
-  const resolver = modpackPreviewResolver
-  modpackPreviewResolver = null
-  modpackPreviewQuery.value = ''
-  resolver?.(confirmed)
-}
-
-async function showModpackPreviewDialog(title: string, preview?: ModpackModPreview): Promise<boolean> {
-  const items = preview?.mods || []
-  // пустой список — не блокируем пользователя диалогом без содержания
-  if (!items.length && !(preview?.total || 0)) return true
-  modpackPreviewTitle.value = title
-  modpackPreviewItems.value = items
-  modpackPreviewTotal.value = preview?.total || items.length
-  modpackPreviewTruncated.value = Boolean(preview?.truncated)
-  modpackPreviewOpen.value = true
-  return new Promise((resolve) => {
-    modpackPreviewResolver = resolve
-  })
-}
-
-function inDesktopTauri(): boolean {
-  return typeof window !== 'undefined' && Boolean((window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__)
-}
-
-async function checkRemoteReleaseFallback(): Promise<boolean> {
-  // фолбэк: tauri-апдейтер не нашёл latest.json (пакеты выложены вручную),
-  // но свежий релиз может уже висеть на GitHub — спрашиваем API напрямую.
-  try {
-    const release = await bridge.checkRemoteRelease()
-    if (!release.update_available) return false
-    pendingAppUpdate = null
-    updaterManualUrl.value = release.release_url
-    updaterVersion.value = release.latest_version
-    updaterNotes.value = release.notes || ''
-    updaterStatus.value = `Доступна версия ${release.latest_version}. Автообновление для неё недоступно — скачайте установщик со страницы релизов.`
-    showToast(`Найдена версия ${release.latest_version}`)
-    return true
-  } catch {
-    return false
-  }
-}
-
-async function checkLauncherUpdates(showToastOnNoUpdate = true) {
-  if (!inDesktopTauri()) {
-    if (showToastOnNoUpdate) showToast('Проверка обновлений доступна только в desktop launcher')
-    return false
-  }
-  updaterBusy.value = true
-  updaterProgressDownloaded.value = 0
-  updaterProgressTotal.value = 0
-  try {
-    const update = await checkForAppUpdate()
-    if (!update) {
-      pendingAppUpdate = null
-      updaterVersion.value = ''
-      updaterNotes.value = ''
-      if (await checkRemoteReleaseFallback()) return true
-      updaterManualUrl.value = ''
-      updaterStatus.value = 'Установлена последняя доступная версия.'
-      if (showToastOnNoUpdate) showToast('Обновлений нет')
-      return false
-    }
-    pendingAppUpdate = update
-    updaterManualUrl.value = ''
-    updaterVersion.value = String(update.version || '')
-    updaterNotes.value = String(update.body || '')
-    updaterStatus.value = `Доступна версия ${updaterVersion.value || 'новее текущей'}.`
-    showToast(`Найдена версия ${updaterVersion.value || 'новее текущей'}`)
-    return true
-  } catch (error) {
-    // сборки без настроенного сервера обновлений не должны пугать сырой
-    const raw = errorMessage(error)
-    if (await checkRemoteReleaseFallback()) return true
-    if (/example\.invalid|dns|resolve|failed to fetch|endpoint/i.test(raw)) {
-      updaterStatus.value = 'Самообновление в этой сборке не настроено — свежие версии выходят на странице проекта.'
-      if (showToastOnNoUpdate) showToast('Самообновление недоступно в этой сборке')
-    } else {
-      updaterStatus.value = raw
-      if (showToastOnNoUpdate) showToast(raw)
-    }
-    return false
-  } finally {
-    updaterBusy.value = false
-  }
-}
-
-async function installLauncherUpdate() {
-  if (!pendingAppUpdate) {
-    if (updaterManualUrl.value) {
-      // релиз есть, latest.json нет — ведём на страницу загрузки.
-      if (!(await confirmDialog(`Открыть страницу загрузки версии ${updaterVersion.value || 'новее текущей'}?`, {
-        title: 'Самообновление Nivora Launcher',
-        detail: 'Для этой версии ещё нет автоматического обновления — установщик лежит на странице релизов GitHub.',
-        confirmLabel: 'Открыть страницу',
-      }))) return
-      try {
-        await bridge.openExternal(updaterManualUrl.value)
-      } catch (error) {
-        showToast(errorMessage(error), 'danger')
-      }
-      return
-    }
-    const found = await checkLauncherUpdates(false)
-    if (!found || !pendingAppUpdate) return
-  }
-  const version = updaterVersion.value || 'новая версия'
-  if (!(await confirmDialog(`Установить обновление ${version}?`, {
-    title: 'Самообновление Nivora Launcher',
-    detail: updaterNotes.value || 'После установки приложение перезапустится автоматически.',
-    confirmLabel: 'Установить',
-  }))) return
-  updaterBusy.value = true
-  updaterStatus.value = `Загружаю ${version}…`
-  updaterProgressDownloaded.value = 0
-  updaterProgressTotal.value = 0
-  try {
-    await pendingAppUpdate.downloadAndInstall((event: any) => {
-      const phase = String(event?.event || '')
-      if (phase === 'Started') {
-        updaterProgressTotal.value = Number(event?.data?.contentLength || 0)
-        updaterProgressDownloaded.value = 0
-        updaterStatus.value = `Загрузка ${version} началась.`
-      } else if (phase === 'Progress') {
-        updaterProgressDownloaded.value += Number(event?.data?.chunkLength || 0)
-        updaterStatus.value = updaterProgressTotal.value > 0
-          ? `Скачано ${Math.min(updaterProgressDownloaded.value, updaterProgressTotal.value)} из ${updaterProgressTotal.value} байт.`
-          : 'Скачиваю обновление…'
-      } else if (phase === 'Finished') {
-        updaterStatus.value = 'Пакет обновления скачан, устанавливаю…'
-      }
-    })
-    updaterStatus.value = 'Обновление установлено. Перезапускаю лаунчер…'
-    showToast('Обновление установлено, перезапуск…')
-    await relaunch()
-  } catch (error) {
-    updaterStatus.value = errorMessage(error)
-    showToast(errorMessage(error))
-  } finally {
-    updaterBusy.value = false
-  }
-}
-
-async function withUnverifiedDownloadConfirmation<T>(
-  attempt: (confirmUnverified: boolean) => Promise<T>,
-  prompt: string,
-  cancelMessage: string,
-): Promise<{ value: T; confirmed: boolean }> {
-  try {
-    return { value: await attempt(false), confirmed: false }
-  } catch (error) {
-    if (!errorMessage(error).includes('[unverified-download]')) throw error
-    if (!(await confirmDialog(prompt, { danger: true, confirmLabel: 'Продолжить' }))) throw new Error(cancelMessage)
-    return { value: await attempt(true), confirmed: true }
-  }
-}
-
-async function importModpackWithConfirmation(payload: Parameters<typeof bridge.importModpack>[0]) {
-  return (await withUnverifiedDownloadConfirmation(
-    (confirmUnverified) => bridge.importModpack({ ...payload, confirm_unverified: confirmUnverified }),
-    'В архиве есть внешние файлы без издательского хеша. Размер не подтверждает подлинность. Загрузить их всё равно?',
-    'Импорт отменён; файлы экземпляра не изменены.',
-  )).value
-}
-
-async function preflightArchiveModpack(payload: Parameters<typeof bridge.importModpack>[0]) {
-  return withUnverifiedDownloadConfirmation(
-    (confirmUnverified) => bridge.importModpack({ ...payload, preflight_only: true, confirm_unverified: confirmUnverified }),
-    'В архиве есть внешние файлы без издательского хеша. Размер не подтверждает подлинность. Загрузить их всё равно?',
-    'Импорт отменён; файлы экземпляра не изменены.',
-  )
-}
-
-async function preflightCatalogModpack(payload: Parameters<typeof bridge.modsInstall>[0]) {
-  return withUnverifiedDownloadConfirmation(
-    (confirmUnverified) => bridge.modsInstall({ ...payload, preflight_only: true, confirm_unverified: confirmUnverified }),
-    'Каталог или файлы модпака не предоставили издательский хеш. Размер не подтверждает подлинность. Продолжить загрузку?',
-    'Создание отменено; экземпляр не изменён.',
-  )
-}
-
-async function createModpackInstance(mod?: ModResult, archive?: { fileName: string; data: string }) {
-  const title = mod?.title || mod?.name || 'Modpack'
-  const defaultName = title.replace(/[^\p{L}\p{N}_-]+/gu, '-').replace(/^-+|-+$/g, '').slice(0, 48) || 'Modpack'
-  const name = (await promptDialog('Имя нового экземпляра модпака', { initialValue: defaultName, confirmLabel: 'Создать экземпляр' }))?.trim()
-  if (!name) return
-  if (state.instances.some((value) => value.name === name)) {
-    showToast('Это имя уже занято. Выберите новое имя, чтобы сохранить текущий экземпляр.')
-    return
-  }
-  const version = selectedVersion.value
-  if (!version) {
-    showToast('Не удалось определить версию Minecraft для модпака')
-    return
-  }
-  if (mod?.game_versions?.length && !mod.game_versions.includes(version)) {
-    showToast(`Модпак не поддерживает выбранную версию Minecraft ${version}`)
-    return
-  }
-  if (selectedLoader.value !== 'vanilla' && loadingChoices.value) {
-    showToast('Дождитесь загрузки версий загрузчика')
-    return
-  }
-  busy.value = true
-  openActivity('Создание экземпляра модпака', `${title} · Minecraft ${version}`)
-  let created: InstanceInfo | undefined
-  let createdInstanceName = ''
-  try {
-    let confirmUnverified = false
-    let manifestRequirements = ''
-    let resolvedVersion = version
-    let resolvedLoader = selectedLoader.value
-    let resolvedLoaderVersion = selectedLoaderVersion.value
-    if (archive) {
-      const preflight = await preflightArchiveModpack({
-        instance_name: name,
-        file_name: archive.fileName,
-        data: archive.data,
-        game_version: version,
-        loader: selectedLoader.value,
-        loader_version: selectedLoaderVersion.value,
-      })
-      confirmUnverified = preflight.confirmed
-      manifestRequirements = modpackDependencySummary(preflight.value.dependencies)
-      if (!(await showModpackPreviewDialog(archive.fileName, modpackPreviewData(preflight.value.dependencies)))) {
-        throw new Error('Создание отменено при просмотре списка модов.')
-      }
-      const resolved = await confirmModpackRequirements(title, preflight.value.dependencies, version, selectedLoader.value, selectedLoaderVersion.value)
-      if (!resolved) throw new Error('Создание отменено: требования модпака не применены.')
-      resolvedVersion = resolved.version
-      resolvedLoader = resolved.loader
-      resolvedLoaderVersion = resolved.loaderVersion
-    } else if (mod) {
-      const preflight = await preflightCatalogModpack({
-        project_id: mod.project_id || mod.id || '',
-        instance_name: name,
-        project_type: 'modpack',
-        catalog_id: activeCatalogId.value,
-        version: mod.version,
-        display_name: title,
-        game_version: version,
-        loader: selectedLoader.value,
-        loader_version: selectedLoaderVersion.value,
-      })
-      confirmUnverified = preflight.confirmed
-      manifestRequirements = modpackDependencySummary(preflight.value.dependencies)
-      if (!(await showModpackPreviewDialog(title, modpackPreviewData(preflight.value.dependencies)))) {
-        throw new Error('Создание отменено при просмотре списка модов.')
-      }
-      const resolved = await confirmModpackRequirements(title, preflight.value.dependencies, version, selectedLoader.value, selectedLoaderVersion.value)
-      if (!resolved) throw new Error('Создание отменено: требования модпака не применены.')
-      resolvedVersion = resolved.version
-      resolvedLoader = resolved.loader
-      resolvedLoaderVersion = resolved.loaderVersion
-    }
-    const installed = await bridge.install({
-      version: resolvedVersion,
-      loader: resolvedLoader,
-      loader_version: resolvedLoaderVersion || undefined,
-      instance_name: name,
-      fail_if_exists: true,
-      memory: memorySetting.value,
-      java_path: effectiveJavaPath(),
-    })
-    state.instances = installed.instances
-    createdInstanceName = installed.instances.find((value) => value.path === installed.instance_dir)?.name
-      || installed.instance_dir.split(/[\\/]/).pop()
-      || name
-    created = state.instances.find((value) => value.name === createdInstanceName)
-    selectedInstanceName.value = createdInstanceName
-    if (archive) {
-      await bridge.importModpack({
-        instance_name: createdInstanceName,
-        file_name: archive.fileName,
-        data: archive.data,
-        game_version: resolvedVersion,
-        loader: resolvedLoader,
-        loader_version: resolvedLoaderVersion,
-        confirm_unverified: confirmUnverified,
-      })
-    } else if (mod) {
-      await bridge.modsInstall({
-        project_id: mod.project_id || mod.id || '',
-        instance_name: createdInstanceName,
-        project_type: 'modpack',
-        catalog_id: activeCatalogId.value,
-        version: mod.version,
-        display_name: title,
-        game_version: resolvedVersion,
-        loader: resolvedLoader,
-        loader_version: resolvedLoaderVersion,
-        confirm_unverified: confirmUnverified,
-      })
-    }
-    finishActivity('Экземпляр модпака готов.', [
-      `Профиль: ${name}`,
-      `Minecraft: ${resolvedVersion}`,
-      `Loader: ${resolvedLoader}${resolvedLoaderVersion ? ` ${resolvedLoaderVersion}` : ''}`,
-      ...(manifestRequirements ? [`Требования манифеста: ${manifestRequirements}`] : []),
-    ])
-    showToast('Модпак установлен в отдельный экземпляр')
-    setView('instances')
-  } catch (error) {
-    if (createdInstanceName) {
-      try {
-        state.instances = (await bridge.deleteInstance(createdInstanceName)).instances
-        if (selectedInstanceName.value === createdInstanceName) selectedInstanceName.value = ''
-      } catch (cleanupError) {
-        activity.logs.push(`Не удалось удалить незавершённый экземпляр: ${errorMessage(cleanupError)}`)
-      }
-      created = undefined
-    }
-    activity.logs.push(errorMessage(error))
-    finishActivity(isCancelled(error) ? 'Создание остановлено.' : 'Не удалось создать экземпляр модпака.')
-    if (!isCancelled(error)) showToast(errorMessage(error))
-  } finally {
-    busy.value = false
-  }
-  if (created && settingsDraft.launch_after_install) await launchExisting(created)
-}
-
-function modpackDependencySummary(
-  dependencies?: ModpackDependencyRequirements | Array<Record<string, unknown>>,
-): string {
-  if (!dependencies || Array.isArray(dependencies)) return ''
-  return [
-    dependencies?.minecraft ? `Minecraft ${dependencies.minecraft}` : '',
-    dependencies?.loader ? `${dependencies.loader}${dependencies.loader_version ? ` ${dependencies.loader_version}` : ''}` : '',
-  ].filter(Boolean).join(' · ')
-}
-
-function modpackDependencyIssues(
-  dependencies?: ModpackDependencyRequirements | Array<Record<string, unknown>>,
-): string[] {
-  if (!dependencies || Array.isArray(dependencies) || !Array.isArray(dependencies.issues)) return []
-  return dependencies.issues.filter((value) => typeof value === 'string' && value.trim())
-}
-
-function modpackPreviewData(dependencies?: ModpackDependencyRequirements | Array<Record<string, unknown>>): ModpackModPreview | undefined {
-  if (!dependencies || Array.isArray(dependencies)) return undefined
-  const mods = dependencies.mods
-  return mods && typeof mods === 'object' && Array.isArray(mods.mods) ? mods : undefined
-}
-
-async function confirmModpackRequirements(
-  title: string,
-  dependencies: ModpackDependencyRequirements | Array<Record<string, unknown>> | undefined,
-  fallbackVersion: string,
-  fallbackLoader: LoaderId,
-  fallbackLoaderVersion: string,
-): Promise<{ version: string; loader: LoaderId; loaderVersion: string } | null> {
-  if (!dependencies || Array.isArray(dependencies)) {
-    return { version: fallbackVersion, loader: fallbackLoader, loaderVersion: fallbackLoaderVersion }
-  }
-  const version = dependencies.minecraft || fallbackVersion
-  const loader = (dependencies.loader || fallbackLoader) as LoaderId
-  const loaderVersion = dependencies.loader_version || fallbackLoaderVersion
-  const issues = modpackDependencyIssues(dependencies)
-  const changed = version !== fallbackVersion || loader !== fallbackLoader || loaderVersion !== fallbackLoaderVersion
-  if (!issues.length && !changed) return { version, loader, loaderVersion }
-  const choice = await chooseDialog(
-    'Применить требования модпака?',
-    [{ value: 'apply', label: 'Применить требования', description: modpackDependencySummary(dependencies) || 'Автоматически выбрать совместимый контекст' }],
-    {
-      title: `Требования ${title}`,
-      detail: issues.length ? issues.join(' · ') : 'Модпак просит другой Minecraft или загрузчик. Nivora Launcher может подстроить новый экземпляр автоматически.',
-      confirmLabel: 'Применить',
-    },
-  )
-  return choice === 'apply' ? { version, loader, loaderVersion } : null
-}
 
 function clampMemoryDraft() {
   const max = memoryMaxValue.value
@@ -1934,699 +1517,41 @@ function effectiveJavaPath(): string {
   return javaSelection.value
 }
 
-function replacePluginList(next: PluginManifest[]) {
-  plugins.value = next.map((plugin) => ({
-    ...plugin,
-    permissions: [...(plugin.permissions || [])],
-    requested_permissions: [...(plugin.requested_permissions || [])],
-    granted_permissions: [...(plugin.granted_permissions || [])],
-  }))
-}
 
-function publishPluginView(pluginId: string, pluginName: string, view: PluginUiView) {
-  const key = `${pluginId}:${view.id}`
-  pluginViews.value = [
-    ...pluginViews.value.filter((entry) => `${entry.pluginId}:${entry.view.id}` !== key),
-    { pluginId, pluginName, view },
-  ]
-}
+const {
+  applyTheme,
+  resetAppearance,
+  refreshLocalThemes,
+  saveCurrentTheme,
+  importThemeArchive,
+  deleteLocalTheme,
+  exportLocalTheme,
+  installGithubTheme,
+  themeMatchesSettings,
+  syncActiveTheme,
+} = createThemeManager({
+  state,
+  appearanceDraft,
+  settingsDraft,
+  localThemes,
+  themeOperationBusy,
+  githubThemeInstallBusy,
+  activeThemeId,
+  availableThemes,
+  defaultColorTokens,
+  lightColorTokens,
+  defaultRadiusTokens,
+  defaultAnimationSettings,
+  busy,
+  wallpaperPreviewUrl,
+  wallpaperRenderBlur,
+  showToast,
+  errorMessage,
+  saveSettings,
+  releaseWallpaperPreview,
+})
 
-function registerPluginCommand(pluginId: string, pluginName: string, definition: PluginCommandDefinition) {
-  pluginCommands.value = [
-    ...pluginCommands.value.filter((entry) => entry.pluginId !== pluginId || entry.definition.id !== definition.id),
-    { pluginId, pluginName, definition },
-  ]
-}
-
-function unregisterPluginCommand(pluginId: string, id: string) {
-  pluginCommands.value = pluginCommands.value.filter((entry) => entry.pluginId !== pluginId || entry.definition.id !== id)
-}
-
-function registerPluginShortcut(pluginId: string, pluginName: string, definition: PluginShortcutDefinition) {
-  if (!isSafePluginShortcutBinding(definition.default_key)) {
-    showToast(`${pluginName}: используйте Ctrl, Alt или Meta в сочетании клавиш`, 'warning')
-    return
-  }
-  pluginShortcuts.value = [
-    ...pluginShortcuts.value.filter((entry) => entry.pluginId !== pluginId || entry.definition.id !== definition.id),
-    { pluginId, pluginName, definition },
-  ]
-}
-
-function unregisterPluginShortcut(pluginId: string, id: string) {
-  pluginShortcuts.value = pluginShortcuts.value.filter((entry) => entry.pluginId !== pluginId || entry.definition.id !== id)
-}
-
-function registerPluginTheme(pluginId: string, registrationId: string, definition: PluginThemeDefinition) {
-  const contributions = pluginThemeContributions.get(pluginId) || new Map<string, PluginThemeDefinition>()
-  contributions.set(registrationId, definition)
-  pluginThemeContributions.set(pluginId, contributions)
-}
-
-function unregisterPluginTheme(pluginId: string, registrationId: string) {
-  const contributions = pluginThemeContributions.get(pluginId)
-  contributions?.delete(registrationId)
-  if (contributions?.size === 0) pluginThemeContributions.delete(pluginId)
-}
-
-function removePluginView(pluginId: string, viewId: string): boolean {
-  const previousLength = pluginViews.value.length
-  pluginViews.value = pluginViews.value.filter((entry) => entry.pluginId !== pluginId || entry.view.id !== viewId)
-  return pluginViews.value.length !== previousLength
-}
-
-function clearPluginUiState(pluginId: string) {
-  pluginViews.value = pluginViews.value.filter((entry) => entry.pluginId !== pluginId)
-  pluginCommands.value = pluginCommands.value.filter((entry) => entry.pluginId !== pluginId)
-  pluginShortcuts.value = pluginShortcuts.value.filter((entry) => entry.pluginId !== pluginId)
-  pluginThemeContributions.delete(pluginId)
-}
-
-function clearPluginRuntimeState(pluginId: string) {
-  clearPluginUiState(pluginId)
-  pluginEventSubscriptions.delete(pluginId)
-  pluginLogEventInFlight.delete(pluginId)
-  pluginLogEventLastSentAt.delete(pluginId)
-  pluginNotificationToastIds.delete(pluginId)
-  runningPluginDigests.delete(pluginId)
-}
-
-function pluginInstanceRef(instance = selectedInstance.value): PluginInstanceRef | null {
-  if (!instance) return null
-  return {
-    id: instance.name,
-    name: instance.display_name || instance.name,
-    version: instance.minecraft_version || instance.version_id || undefined,
-    loader: instance.loader,
-  }
-}
-
-function subscribePluginEvent(pluginId: string, listenerId: string, event: PluginEventName) {
-  const subscriptions = pluginEventSubscriptions.get(pluginId) || new Map<string, PluginEventName>()
-  subscriptions.set(listenerId, event)
-  pluginEventSubscriptions.set(pluginId, subscriptions)
-}
-
-function unsubscribePluginEvent(pluginId: string, listenerId: string) {
-  const subscriptions = pluginEventSubscriptions.get(pluginId)
-  subscriptions?.delete(listenerId)
-  if (subscriptions && subscriptions.size === 0) pluginEventSubscriptions.delete(pluginId)
-}
-
-async function emitPluginEvent<K extends PluginEventName>(pluginId: string, event: K, payload: PluginEventPayloadMap[K]) {
-  const subscriptions = pluginEventSubscriptions.get(pluginId)
-  if (!subscriptions || ![...subscriptions.values()].includes(event)) return
-  if (event === 'log.line') {
-    const now = performance.now()
-    if (pluginLogEventInFlight.has(pluginId) || now - (pluginLogEventLastSentAt.get(pluginId) || 0) < 100) return
-    pluginLogEventInFlight.add(pluginId)
-    pluginLogEventLastSentAt.set(pluginId, now)
-  }
-  try {
-    try {
-      await bridge.pluginApiAuthorize(pluginId, 'events:launcher')
-    } catch {
-      await bridge.pluginApiAuthorize(pluginId, 'lifecycle:observe')
-    }
-    await pluginRuntime.emit(pluginId, event, payload)
-  } catch {
-    // grants can be revoked between subscription and event delivery.
-  } finally {
-    if (event === 'log.line') pluginLogEventInFlight.delete(pluginId)
-  }
-}
-
-async function broadcastPluginEvent<K extends PluginEventName>(event: K, payload: PluginEventPayloadMap[K]) {
-  await Promise.all([...pluginEventSubscriptions.keys()].map((pluginId) => emitPluginEvent(pluginId, event, payload)))
-}
-
-function notifyPluginBeforeLaunch(instance: PluginInstanceRef): Promise<void> {
-  return broadcastPluginEvent('instance.beforeLaunch', { instance })
-}
-
-async function beforeInstanceLaunch(instance: PluginInstanceRef): Promise<void> {
-  attachOverlayForLaunch(String(instance.name || ''))
-  await notifyPluginBeforeLaunch(instance)
-}
-
-function notifyPluginAfterExit(instance: PluginInstanceRef, exitCode: number | null): Promise<void> {
-  return broadcastPluginEvent('instance.afterExit', { instance, exit_code: exitCode })
-}
-
-function notifyPluginCrash(instance: PluginInstanceRef, message?: string, exitCode?: number | null): Promise<void> {
-  return broadcastPluginEvent('instance.crash', { instance, message, exit_code: exitCode })
-}
-
-function notifyPluginSnapshotCreated(instance: PluginInstanceRef, snapshot: ServerSnapshot): Promise<void> {
-  return broadcastPluginEvent('snapshot.created', {
-    instance,
-    snapshot_id: snapshot.id,
-    category: snapshot.category,
-    created_at: snapshot.created_at,
-  })
-}
-
-async function reconcilePluginRuntimes() {
-  const eligible = plugins.value.filter((plugin) => ['2', '3'].includes(String(plugin.api_version || '')) && plugin.installed && plugin.execution_allowed)
-  const eligibleIds = new Set(eligible.map((plugin) => plugin.id))
-  for (const pluginId of pluginRuntime.runtimeIds()) {
-    if (eligibleIds.has(pluginId)) continue
-    await pluginRuntime.stop(pluginId)
-    clearPluginRuntimeState(pluginId)
-  }
-
-  for (const plugin of eligible) {
-    const wasRunning = pluginRuntime.runtimeIds().includes(plugin.id)
-    let source: Awaited<ReturnType<typeof bridge.pluginApiSource>>
-    try {
-      source = await bridge.pluginApiSource(plugin.id)
-    } catch (error) {
-      if (wasRunning) {
-        await pluginRuntime.stop(plugin.id)
-        clearPluginRuntimeState(plugin.id)
-      }
-      showToast(`${plugin.name}: ${errorMessage(error)}`)
-      continue
-    }
-
-    const current = plugins.value.find((entry) => entry.id === plugin.id)
-    if (!current?.execution_allowed) continue
-    const isRunning = pluginRuntime.runtimeIds().includes(plugin.id)
-    if (isRunning && runningPluginDigests.get(plugin.id) === source.package_sha256) {
-      if (!current.granted_permissions?.includes('ui:compose')) {
-        clearPluginUiState(plugin.id)
-      }
-      continue
-    }
-    if (isRunning) {
-      await pluginRuntime.stop(plugin.id)
-      clearPluginRuntimeState(plugin.id)
-    }
-
-    try {
-      const manifest = source.manifest as RuntimePluginManifest
-      await pluginRuntime.start(plugin.id, manifest, source.source, {
-        hostCall: createPluginHostCall({
-          pluginId: plugin.id,
-          manifest,
-          selectedInstance: () => pluginInstanceRef(),
-          theme: (): PluginThemeContext => {
-            const currentMode = appearanceDraft.theme === 'system'
-              ? (systemDark.value ? 'dark' : 'light')
-              : appearanceDraft.theme
-            const mode = currentMode === 'glass' ? 'glass' : currentMode === 'light' ? 'light' : 'dark'
-            const tokens: Record<string, string | number> = { ...appearanceDraft.color_tokens }
-            const contributions = pluginThemeContributions.get(plugin.id)
-            if (contributions) {
-              for (const [registrationId, contribution] of contributions) {
-                if (contribution.name) tokens[`plugin.${plugin.id}.${registrationId}.name`] = contribution.name
-                for (const [key, value] of Object.entries(contribution.colors || {})) {
-                  tokens[`plugin.${plugin.id}.${registrationId}.color.${key}`] = value
-                }
-                for (const [key, value] of Object.entries(contribution.tokens || {})) {
-                  tokens[`plugin.${plugin.id}.${registrationId}.token.${key}`] = value
-                }
-              }
-            }
-            return { mode, accent: appearanceDraft.accent_color, tokens }
-          },
-          removeView: (viewId) => removePluginView(plugin.id, viewId),
-          subscribe: (event, listenerId) => subscribePluginEvent(plugin.id, listenerId, event),
-          unsubscribe: (listenerId) => unsubscribePluginEvent(plugin.id, listenerId),
-          registerCommand: (definition) => registerPluginCommand(plugin.id, plugin.name, definition),
-          unregisterCommand: (id) => unregisterPluginCommand(plugin.id, id),
-          registerShortcut: (definition) => registerPluginShortcut(plugin.id, plugin.name, definition),
-          unregisterShortcut: (id) => unregisterPluginShortcut(plugin.id, id),
-          registerTheme: (id, definition) => registerPluginTheme(plugin.id, id, definition),
-          unregisterTheme: (id) => unregisterPluginTheme(plugin.id, id),
-          notify: (title, message, tone: PluginUiTone, id) => {
-            const notificationId = id || `${plugin.id}-notification-${Date.now()}`
-            showToast(`${title}: ${message}`, tone)
-            if (settingsDraft.show_toasts) {
-              const notifications = pluginNotificationToastIds.get(plugin.id) || new Map<string, number>()
-              notifications.set(notificationId, toastId.value)
-              pluginNotificationToastIds.set(plugin.id, notifications)
-            }
-            return notificationId
-          },
-          dismissNotification: (id) => {
-            const notifications = pluginNotificationToastIds.get(plugin.id)
-            const notificationToastId = notifications?.get(id)
-            if (notificationToastId === undefined) return false
-            notifications?.delete(id)
-            if (notifications?.size === 0) pluginNotificationToastIds.delete(plugin.id)
-            if (notificationToastId === toastId.value) {
-              if (toastTimer) window.clearTimeout(toastTimer)
-              toastTimer = undefined
-              toastId.value += 1
-              toast.value = ''
-            }
-            return true
-          },
-        }),
-        onView: (view) => publishPluginView(plugin.id, plugin.name, view),
-        onError: (error) => {
-          showToast(`${plugin.name}: ${error.message}`)
-          queueMicrotask(() => {
-            if (!pluginRuntime.runtimeIds().includes(plugin.id)) clearPluginRuntimeState(plugin.id)
-          })
-        },
-      })
-      runningPluginDigests.set(plugin.id, source.package_sha256)
-      await emitPluginEvent(plugin.id, 'launcher.ready', { version: '1.1.0' })
-      await emitPluginEvent(plugin.id, 'instance.selected', { instance: pluginInstanceRef() })
-    } catch (error) {
-      clearPluginRuntimeState(plugin.id)
-      showToast(`${plugin.name}: ${errorMessage(error)}`)
-    }
-  }
-}
-
-const pluginDevStartedAt = Date.now() * 1000000
-let pluginDevGeneration = ''
-let pluginDevRequests: Record<string, number> = {}
-let pluginDevPollBusy = false
-let pluginDevPollTimer: number | undefined
-async function pollPluginDevelopment() {
-  if (!settingsDraft.developer_mode || pluginDevPollBusy) return
-  pluginDevPollBusy = true
-  try {
-    const next = await bridge.pluginDevChanges()
-    if (!next.enabled || next.generation === pluginDevGeneration) return
-    const initial = !pluginDevGeneration
-    pluginDevGeneration = next.generation
-    const changed = Object.keys(next.requests).filter((id) => next.requests[id] !== pluginDevRequests[id])
-    pluginDevRequests = next.requests
-    if (initial && !changed.some((id) => next.requests[id] >= pluginDevStartedAt)) return
-    // serialize with installs/grant changes; termination clears listeners, views and poll timers.
-    pluginRuntimeSyncQueue = pluginRuntimeSyncQueue.then(async () => {
-      for (const id of changed) { await pluginRuntime.stop(id); clearPluginRuntimeState(id) }
-      await reconcilePluginRuntimes()
-    }).catch((error: unknown) => showToast(errorMessage(error)))
-  } catch (error) { showToast(errorMessage(error)) }
-  finally { pluginDevPollBusy = false }
-}
-
-function schedulePluginRuntimeSync() {
-  pluginRuntimeSyncQueue = pluginRuntimeSyncQueue
-    .then(reconcilePluginRuntimes)
-    .catch((error: unknown) => showToast(errorMessage(error)))
-}
-
-function runPluginAction(payload: { pluginId: string; action: string; input: PluginJsonValue }) {
-  void (async () => {
-    try {
-      await bridge.pluginApiAuthorize(payload.pluginId, 'ui:compose')
-      await pluginRuntime.runAction(payload.pluginId, payload.action, payload.input)
-    } catch (error) {
-      showToast(errorMessage(error))
-    }
-  })()
-}
-
-async function runPluginCommand(payload: { pluginId: string; commandId: string }) {
-  const command = pluginCommands.value.find((entry) => entry.pluginId === payload.pluginId && entry.definition.id === payload.commandId)
-  if (!command) return
-  try {
-    try {
-      await bridge.pluginApiAuthorize(payload.pluginId, 'commands:register')
-    } catch {
-      await bridge.pluginApiAuthorize(payload.pluginId, 'ui:compose')
-    }
-    const arguments_: Record<string, string> = {}
-    for (const argument of command.definition.arguments || []) {
-      let value: string | undefined
-      if (argument.choices?.length) {
-        const choices = argument.choices.map((choice) => ({ value: choice, label: choice }))
-        if (!argument.required) choices.unshift({ value: '', label: 'Пропустить' })
-        value = await chooseDialog(argument.description || argument.name, choices, { title: command.definition.label })
-      } else {
-        value = await promptDialog(argument.description || argument.name, { title: command.definition.label })
-      }
-      if (value === undefined) return
-      if (!value && !argument.required) continue
-      if (!value) {
-        showToast(`Заполните аргумент «${argument.name}» команды «${command.definition.label}»`)
-        return
-      }
-      if (argument.choices?.length && !argument.choices.includes(value)) {
-        showToast(`Недопустимое значение аргумента «${argument.name}»`)
-        return
-      }
-      arguments_[argument.name] = value
-    }
-    await pluginRuntime.runCommand(payload.pluginId, payload.commandId, arguments_)
-  } catch (error) {
-    showToast(`${command.pluginName}: ${errorMessage(error)}`)
-  }
-}
-
-async function runPluginShortcut(shortcut: ActivePluginShortcut) {
-  try {
-    try {
-      await bridge.pluginApiAuthorize(shortcut.pluginId, 'shortcuts:register')
-    } catch {
-      await bridge.pluginApiAuthorize(shortcut.pluginId, 'ui:compose')
-    }
-    await pluginRuntime.runShortcut(shortcut.pluginId, shortcut.definition.id)
-  } catch (error) {
-    showToast(`${shortcut.pluginName}: ${errorMessage(error)}`)
-  }
-}
-
-async function savePluginConfig(payload: { pluginId: string; key: string; value: PluginJsonValue }) {
-  try {
-    await bridge.pluginConfigSet(payload.pluginId, payload.key, payload.value)
-  } catch (error) {
-    showToast(errorMessage(error))
-  }
-}
-
-async function openPluginLink(payload: { pluginId: string; url: string }) {
-  try {
-    await bridge.pluginApiOpenExternal(payload.pluginId, payload.url)
-  } catch (error) {
-    showToast(errorMessage(error))
-  }
-}
-
-async function togglePlugin(plugin: PluginManifest) {
-  try {
-    if (plugin.enabled) {
-      await pluginRuntime.stop(plugin.id)
-      clearPluginRuntimeState(plugin.id)
-    }
-    const result = await bridge.pluginSetEnabled(plugin.id, !plugin.enabled)
-    replacePluginList(result.plugins)
-    if (result.plugin.enabled) void broadcastPluginEvent('plugin.enabled', { plugin_id: plugin.id })
-    showToast(`${plugin.name}: ${result.plugin.enabled ? 'включён' : 'выключен'}`)
-  } catch (error) {
-    showToast(errorMessage(error))
-    schedulePluginRuntimeSync()
-  }
-}
-
-async function updatePluginGrants(payload: { pluginId: string; permissions: PluginManifest['permissions'] }) {
-  try {
-    const result = await bridge.pluginPermissionGrantsSet(payload.pluginId, payload.permissions)
-    replacePluginList(result.plugins)
-    showToast('Разрешения плагина обновлены')
-  } catch (error) {
-    showToast(errorMessage(error))
-  }
-}
-
-async function allowLocalPluginExecution(payload: { pluginId: string; allowed: boolean }) {
-  if (payload.allowed) {
-    const plugin = plugins.value.find((entry) => entry.id === payload.pluginId)
-    if (!plugin || !(await confirmDialog(
-      `Разрешить выполнение неподписанного кода плагина «${plugin.name}» на этом устройстве?`,
-      { danger: true, confirmLabel: 'Разрешить выполнение' },
-    ))) return
-  }
-  try {
-    const result = await bridge.pluginLocalUntrustedExecution(payload.pluginId, payload.allowed)
-    replacePluginList(result.plugins)
-  } catch (error) {
-    showToast(errorMessage(error))
-  }
-}
-
-async function pinPluginPublisher(plugin: PluginManifest) {
-  if (!plugin.publisher_key_id || !plugin.publisher_public_key) return
-  const fingerprint = plugin.publisher_fingerprint || plugin.publisher_key_id
-  if (!(await confirmDialog(
-    `Закрепить ключ издателя ${plugin.publisher_key_id}? Этот ключ будет считаться доверенным для плагинов издателя. Отпечаток: ${fingerprint}`,
-    { danger: true, confirmLabel: 'Закрепить ключ' },
-  ))) return
-  try {
-    const result = await bridge.pluginPublisherPin(plugin.publisher_key_id, plugin.publisher_public_key)
-    replacePluginList(result.plugins)
-    showToast('Ключ издателя закреплён на этом устройстве')
-  } catch (error) {
-    showToast(errorMessage(error))
-  }
-}
-
-async function unpinPluginPublisher(plugin: PluginManifest) {
-  if (!plugin.publisher_key_id) return
-  if (!(await confirmDialog(
-    `Отозвать доверие ко всем плагинам издателя ${plugin.publisher_key_id}?`,
-    { danger: true, confirmLabel: 'Отозвать доверие' },
-  ))) return
-  try {
-    const result = await bridge.pluginPublisherUnpin(plugin.publisher_key_id)
-    replacePluginList(result.plugins)
-    showToast('Доверие к ключу издателя отозвано')
-  } catch (error) {
-    showToast(errorMessage(error))
-  }
-}
-
-async function setPluginPublisherRevocationAuthority(payload: { plugin: PluginManifest; enabled: boolean }) {
-  const keyId = payload.plugin.publisher_key_id
-  if (!keyId) return
-  if (payload.enabled && !(await confirmDialog(
-    `Разрешить ключу ${keyId} подписывать списки отзыва? Такой список может блокировать указанные в нём плагины и издателей. Принимаются только корректно подписанные документы с новой последовательностью.`,
-    { danger: true, confirmLabel: 'Доверять спискам отзыва' },
-  ))) return
-  try {
-    const result = await bridge.pluginPublisherRevocationAuthoritySet(keyId, payload.enabled)
-    replacePluginList(result.plugins)
-    showToast(payload.enabled ? 'Ключу разрешено подписывать списки отзыва' : 'Полномочие ключа отозвано')
-  } catch (error) {
-    showToast(errorMessage(error))
-  }
-}
-
-async function importPluginRevocations(documentJson: string) {
-  try {
-    const result = await bridge.pluginRevocationsImport(documentJson)
-    replacePluginList(result.plugins)
-    showToast(`Импортирован список отзыва №${result.imported.sequence} от ${result.imported.authority_key_id}`)
-  } catch (error) {
-    showToast(errorMessage(error))
-  }
-}
-
-async function revokePlugin(plugin: PluginManifest) {
-  if (!(await confirmDialog(`Заблокировать плагин «${plugin.name}» на этом устройстве?`, { danger: true, confirmLabel: 'Заблокировать' }))) return
-  try {
-    await pluginRuntime.stop(plugin.id)
-    clearPluginRuntimeState(plugin.id)
-    const result = await bridge.pluginLocalRevoke(plugin.id, 'Blocked locally by the user')
-    replacePluginList(result.plugins)
-  } catch (error) {
-    showToast(errorMessage(error))
-  }
-}
-
-async function unrevokePlugin(plugin: PluginManifest) {
-  if (!(await confirmDialog(`Снять локальную блокировку плагина «${plugin.name}»?`, { confirmLabel: 'Разблокировать' }))) return
-  try {
-    const result = await bridge.pluginLocalUnrevoke(plugin.id)
-    replacePluginList(result.plugins)
-  } catch (error) {
-    showToast(errorMessage(error))
-  }
-}
-
-async function installPluginArchive(payload: { name: string; data: string }) {
-  openActivity('Установка плагина', payload.name)
-  try {
-    const result = await bridge.pluginInstall(payload.data, false)
-    replacePluginList(result.plugins)
-    finishActivity(`Плагин «${result.plugin.name}» установлен и выключен. Проверьте разрешения перед включением.`)
-  } catch (error) {
-    finishActivity(errorMessage(error))
-  }
-}
-
-async function installGithubPlugin(payload: { owner: string; repo: string; replace: boolean }) {
-  if (githubPluginInstallBusy.value) return
-  githubPluginInstallBusy.value = true
-  try {
-    openActivity('Проверка архива GitHub', `${payload.owner}/${payload.repo}`)
-    const result = await bridge.githubPluginInstall(payload.owner, payload.repo, payload.replace)
-    replacePluginList(result.plugins)
-    finishActivity(`Архив «${result.plugin.name}» проверен и сохранён · SHA-256 ${result.metadata.sha256}. Код не запускается.`)
-  } catch (error) {
-    finishActivity(errorMessage(error))
-  } finally {
-    githubPluginInstallBusy.value = false
-  }
-}
-
-async function uninstallPlugin(plugin: PluginManifest) {
-  if (!(await confirmDestructive(`Удалить плагин «${plugin.name}» и его данные?`))) return
-  try {
-    await pluginRuntime.stop(plugin.id)
-    clearPluginRuntimeState(plugin.id)
-    const result = await bridge.pluginUninstall(plugin.id)
-    replacePluginList(result.plugins)
-    showToast(`Плагин «${plugin.name}» удалён`)
-  } catch (error) {
-    showToast(errorMessage(error))
-  }
-}
-
-function applyTheme(theme: LauncherThemePreset) {
-  activeThemeId.value = theme.id
-  appearanceDraft.active_theme_id = theme.id
-  appearanceDraft.theme = theme.mode
-  appearanceDraft.accent_color = theme.accent
-  appearanceDraft.sidebar_mode = theme.sidebar_mode
-  appearanceDraft.density = theme.density
-  appearanceDraft.color_tokens = {
-    ...appearanceDraft.color_tokens,
-    accent: theme.accent,
-    accent_strong: theme.accent_strong,
-    background: theme.background,
-    panel: theme.panel,
-    panel_soft: theme.panel_soft,
-  }
-  showToast(`Тема «${theme.name}» применена`)
-  if (!busy.value) void saveSettings()
-}
-
-async function resetAppearance() {
-  if (appearanceDraft.wallpaper_path || appearanceDraft.wallpaper_data || wallpaperPreviewUrl.value) {
-    try {
-      const result = await bridge.clearWallpaper()
-      releaseWallpaperPreview()
-      appearanceDraft.wallpaper_path = result.settings.wallpaper_path
-      appearanceDraft.wallpaper_data = result.settings.wallpaper_data || ''
-      state.settings.wallpaper_path = result.settings.wallpaper_path
-      state.settings.wallpaper_data = result.settings.wallpaper_data || ''
-    } catch (error) {
-      showToast(errorMessage(error))
-    }
-  }
-  activeThemeId.value = 'midnight-signal'
-  appearanceDraft.active_theme_id = 'midnight-signal'
-  appearanceDraft.theme = 'dark'
-  appearanceDraft.accent_color = defaultColorTokens.accent
-  appearanceDraft.color_tokens = { ...defaultColorTokens }
-  appearanceDraft.radius_tokens = { ...defaultRadiusTokens }
-  appearanceDraft.sidebar_position = 'left'
-  appearanceDraft.sidebar_mode = 'adaptive'
-  appearanceDraft.sidebar_width_mode = 'content'
-  appearanceDraft.sidebar_width = 228
-  appearanceDraft.sidebar_floating = false
-  appearanceDraft.sidebar_visibility = 'always'
-  appearanceDraft.animations = 'full'
-  appearanceDraft.animation_settings = {
-    ...defaultAnimationSettings,
-    page_styles: { ...defaultAnimationSettings.page_styles },
-    page_durations_ms: { ...defaultAnimationSettings.page_durations_ms },
-  } as AnimationSettings
-  appearanceDraft.density = 'comfortable'
-  appearanceDraft.ui_scale = 100
-  appearanceDraft.wallpaper_blur = 12
-  appearanceDraft.wallpaper_opacity = 34
-  wallpaperRenderBlur.value = 12
-  appearanceDraft.page_themes = { instances: 'inherit', 'instance-settings': 'inherit', accounts: 'inherit', mods: 'inherit', modpacks: 'inherit', plugins: 'inherit', themes: 'inherit', settings: 'inherit' }
-  appearanceDraft.page_layouts = { instances: 'balanced', 'instance-settings': 'balanced', accounts: 'balanced', mods: 'wide', modpacks: 'wide', plugins: 'wide', themes: 'wide', settings: 'balanced' }
-  appearanceDraft.widget_visibility = { 'instances.workspace': true, 'accounts.status': true, 'mods.context': true }
-  settingsDraft.font_family = 'system'
-  syncActiveTheme()
-  showToast('Оформление сброшено к значениям по умолчанию')
-  if (!busy.value) void saveSettings()
-}
-
-function themeSlug(value: string): string {
-  const transliteration: Record<string, string> = {
-    а: 'a', б: 'b', в: 'v', г: 'g', д: 'd', е: 'e', ё: 'yo', ж: 'zh', з: 'z', и: 'i', й: 'y', к: 'k', л: 'l', м: 'm', н: 'n', о: 'o', п: 'p', р: 'r', с: 's', т: 't', у: 'u', ф: 'f', х: 'kh', ц: 'ts', ч: 'ch', ш: 'sh', щ: 'shch', ъ: '', ы: 'y', ь: '', э: 'e', ю: 'yu', я: 'ya',
-  }
-  const slug = [...value.toLowerCase()].map((char) => transliteration[char] ?? char).join('').normalize('NFKD').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40)
-  return slug || 'local-theme'
-}
-
-function uniqueThemeId(name: string): string {
-  const existing = new Set(availableThemes.value.map((theme) => theme.id))
-  const base = themeSlug(name)
-  let id = base
-  let suffix = 2
-  while (existing.has(id)) {
-    id = `${base.slice(0, 40 - String(suffix).length - 1)}-${suffix}`
-    suffix += 1
-  }
-  return id
-}
-
-async function refreshLocalThemes() {
-  try {
-    localThemes.value = (await bridge.themeList()).themes
-  } catch (error) {
-    showToast(errorMessage(error))
-  }
-}
-
-async function saveCurrentTheme(metadata: ThemeSaveRequest) {
-  themeOperationBusy.value = true
-  const tokens = appearanceDraft.color_tokens
-  const theme = {
-    schema_version: 1 as const,
-    id: uniqueThemeId(metadata.name),
-    name: metadata.name,
-    author: metadata.author,
-    description: metadata.description,
-    mode: appearanceDraft.theme,
-    accent: String(tokens.accent || appearanceDraft.accent_color),
-    accent_strong: String(tokens.accent_strong || defaultColorTokens.accent_strong),
-    background: String(tokens.background || defaultColorTokens.background),
-    panel: String(tokens.panel || defaultColorTokens.panel),
-    panel_soft: String(tokens.panel_soft || defaultColorTokens.panel_soft),
-    density: appearanceDraft.density,
-    sidebar_mode: appearanceDraft.sidebar_mode,
-  }
-  try {
-    const result = await bridge.themeSave(theme, metadata)
-    localThemes.value = result.themes
-    syncActiveTheme()
-    showToast(`Тема «${result.theme.name}» сохранена локально`)
-  } catch (error) {
-    showToast(errorMessage(error))
-  } finally {
-    themeOperationBusy.value = false
-  }
-}
-
-async function importThemeArchive(payload: { name: string; data: string; replace: boolean }) {
-  themeOperationBusy.value = true
-  try {
-    const result = await bridge.themeImport(payload.data, payload.replace)
-    localThemes.value = result.themes
-    showToast(`Тема «${result.theme.name}» импортирована`)
-  } catch (error) {
-    showToast(errorMessage(error))
-  } finally {
-    themeOperationBusy.value = false
-  }
-}
-
-async function deleteLocalTheme(themeId: string) {
-  themeOperationBusy.value = true
-  try {
-    const result = await bridge.themeDelete(themeId)
-    localThemes.value = result.themes
-    if (activeThemeId.value === themeId) {
-      activeThemeId.value = ''
-      appearanceDraft.active_theme_id = ''
-      syncActiveTheme()
-      if (!busy.value) void saveSettings()
-    }
-    showToast('Локальная тема удалена')
-  } catch (error) {
-    showToast(errorMessage(error))
-  } finally {
-    themeOperationBusy.value = false
-  }
-}
-
-// ── Системные метрики в топбаре ─────────────────────────────────────────────
 const topbarSystemMetrics = ref<SystemMetricsSnapshot>()
-// глобальный поиск: Ctrl+K, кнопка в топбаре
 const globalSearchOpen = ref(false)
 
 function openSearchInstance(name: string) {
@@ -2655,11 +1580,9 @@ const topbarTemperature = computed(() => {
 async function pollTopbarMetrics() {
   if (!topbarMetricsVisible.value) return
   try {
-    // game_root нужен Rust-движку, чтобы раздел с игрой точно попал в метрики
-    // дисков (Python раньше читал его из своей конфигурации сам).
+    // каталог игры нужен для метрик её диска
     topbarSystemMetrics.value = await bridge.systemMetrics(false, state.settings.game_dir)
   } catch {
-    // метрики не критичны: тихо ждём следующего тика
   }
 }
 
@@ -2674,235 +1597,21 @@ watch(topbarMetricsVisible, (visible) => {
   }
 }, { immediate: true })
 
-// ── Профили настроек лаунчера ───────────────────────────────────────────────
-const settingsProfiles = ref<SettingsProfile[]>([])
-const settingsProfilesLoading = ref(false)
-const settingsProfileBusy = ref(false)
-const settingsProfileName = ref('')
-const backupDestinationOptions: SelectOption[] = [
-  { value: 'local', label: 'Локально', meta: 'game_dir/backups/<экземпляр>' },
-  { value: 'cloud', label: 'WebDAV', meta: 'Тот же endpoint, что у облака' },
-]
-
-async function loadSettingsProfiles() {
-  settingsProfilesLoading.value = true
-  try {
-    settingsProfiles.value = (await bridge.settingsProfilesList()).profiles
-  } catch {
-    settingsProfiles.value = []
-  } finally {
-    settingsProfilesLoading.value = false
-  }
-}
-
-function formatDateShort(value: number): string {
-  if (!value) return ''
-  return new Date(value > 10_000_000_000 ? value : value * 1000).toLocaleString()
-}
-
-async function saveSettingsProfileAs() {
-  const name = settingsProfileName.value.trim()
-  if (!name) return
-  settingsProfileBusy.value = true
-  try {
-    settingsProfiles.value = (await bridge.settingsProfileSave(name)).profiles
-    settingsProfileName.value = ''
-    showToast(`Профиль «${name}» сохранён`)
-  } catch (error) {
-    showToast(errorMessage(error))
-  } finally {
-    settingsProfileBusy.value = false
-  }
-}
-
-async function overwriteSettingsProfile(name: string) {
-  if (!(await confirmDialog(`Перезаписать профиль «${name}» текущими настройками?`, { confirmLabel: 'Перезаписать' }))) return
-  settingsProfileBusy.value = true
-  try {
-    settingsProfiles.value = (await bridge.settingsProfileSave(name)).profiles
-    showToast(`Профиль «${name}» обновлён`)
-  } catch (error) {
-    showToast(errorMessage(error))
-  } finally {
-    settingsProfileBusy.value = false
-  }
-}
-
-async function applySettingsProfile(name: string) {
-  if (!(await confirmDialog(`Применить профиль «${name}»? Текущие настройки будут заменены.`, { confirmLabel: 'Применить' }))) return
-  settingsProfileBusy.value = true
-  try {
-    const result = await bridge.settingsProfileApply(name)
-    applyState({ instances: state.instances, accounts: state.accounts, settings: result.settings, system: state.system })
-    showToast(`Профиль «${name}» применён (${result.applied.length} параметров)`)
-  } catch (error) {
-    showToast(errorMessage(error))
-  } finally {
-    settingsProfileBusy.value = false
-  }
-}
-
-async function deleteSettingsProfile(name: string) {
-  if (!(await confirmDialog(`Удалить профиль «${name}»?`, { danger: true, confirmLabel: 'Удалить' }))) return
-  settingsProfileBusy.value = true
-  try {
-    settingsProfiles.value = (await bridge.settingsProfileDelete(name)).profiles
-    showToast('Профиль удалён')
-  } catch (error) {
-    showToast(errorMessage(error))
-  } finally {
-    settingsProfileBusy.value = false
-  }
-}
-
-async function exportSettingsProfile(name: string) {
-  settingsProfileBusy.value = true
-  try {
-    const result = await bridge.settingsProfileExport(name)
-    const url = URL.createObjectURL(new Blob([result.json], { type: 'application/json' }))
-    const link = document.createElement('a')
-    link.href = url
-    link.download = result.file_name
-    link.click()
-    window.setTimeout(() => URL.revokeObjectURL(url), 1000)
-    showToast(`Профиль «${result.name}» экспортирован`)
-  } catch (error) {
-    showToast(errorMessage(error))
-  } finally {
-    settingsProfileBusy.value = false
-  }
-}
-
-async function importSettingsProfile() {
-  const input = document.createElement('input')
-  input.type = 'file'
-  input.accept = '.json,application/json'
-  input.onchange = async () => {
-    const file = input.files?.[0]
-    if (!file) return
-    settingsProfileBusy.value = true
-    try {
-      const json = await file.text()
-      settingsProfiles.value = (await bridge.settingsProfileImport(json, file.name.replace(/\.json$/i, ''))).profiles
-      showToast(`Профиль из «${file.name}» импортирован`)
-    } catch (error) {
-      showToast(errorMessage(error))
-    } finally {
-      settingsProfileBusy.value = false
-    }
-  }
-  input.click()
-}
-
-async function exportLocalTheme(themeId: string) {
-  themeOperationBusy.value = true
-  try {
-    const result = await bridge.themeExport(themeId)
-    const binary = atob(result.data)
-    const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0))
-    const url = URL.createObjectURL(new Blob([bytes], { type: 'application/zip' }))
-    const link = document.createElement('a')
-    link.href = url
-    link.download = result.file_name
-    link.click()
-    window.setTimeout(() => URL.revokeObjectURL(url), 1000)
-    showToast(`Архив темы «${themeId}» сохранён`)
-  } catch (error) {
-    showToast(errorMessage(error))
-  } finally {
-    themeOperationBusy.value = false
-  }
-}
-
-async function installGithubTheme(payload: { owner: string; repo: string; replace: boolean }) {
-  if (githubThemeInstallBusy.value) return
-  githubThemeInstallBusy.value = true
-  try {
-    const result = await bridge.githubThemeInstall(payload.owner, payload.repo, payload.replace)
-    localThemes.value = result.themes
-    showToast(`Тема «${result.theme.name}» добавлена из GitHub · SHA-256 ${result.metadata.sha256}`)
-  } catch (error) {
-    showToast(errorMessage(error))
-  } finally {
-    githubThemeInstallBusy.value = false
-  }
-}
-
-function themeMatchesSettings(theme: LauncherThemePreset): boolean {
-  const tokens = appearanceDraft.color_tokens
-  return theme.mode === appearanceDraft.theme
-    && theme.accent.toLowerCase() === appearanceDraft.accent_color.toLowerCase()
-    && theme.accent.toLowerCase() === String(tokens.accent || '').toLowerCase()
-    && theme.accent_strong.toLowerCase() === String(tokens.accent_strong || '').toLowerCase()
-    && theme.background.toLowerCase() === String(tokens.background || '').toLowerCase()
-    && theme.panel.toLowerCase() === String(tokens.panel || '').toLowerCase()
-    && theme.panel_soft.toLowerCase() === String(tokens.panel_soft || '').toLowerCase()
-    && theme.density === appearanceDraft.density
-    && theme.sidebar_mode === appearanceDraft.sidebar_mode
-}
-
-function syncActiveTheme() {
-  const persisted = availableThemes.value.find((theme) => theme.id === appearanceDraft.active_theme_id && themeMatchesSettings(theme))
-  const matching = persisted || availableThemes.value.find((theme) => themeMatchesSettings(theme))
-  activeThemeId.value = matching?.id || ''
-  appearanceDraft.active_theme_id = activeThemeId.value
-}
-
-function selectSkinModel(value: 'classic' | 'slim') {
-  skinModel.value = value
-  currentSkinModel.value = value
-}
-
-function selectSkin(skin: SkinInfo) {
-  selectedSkinId.value = skin.skin_id
-  const model = skin.model === 'slim' ? 'slim' : 'classic'
-  skinModel.value = model
-  currentSkinModel.value = model
-}
-
-function selectCurrentSkin() {
-  selectedSkinId.value = ''
-  const model = activeRemoteSkin.value?.variant?.toUpperCase() === 'SLIM' ? 'slim' : 'classic'
-  skinModel.value = model
-  currentSkinModel.value = model
-}
-
-function updateSidebarWidth(event: PointerEvent) {
-  if (!sidebarResizeActive.value) return
-  const position = appearanceDraft.sidebar_position
-  const next = position === 'right' ? window.innerWidth - event.clientX : event.clientX
-  appearanceDraft.sidebar_width = Math.min(360, Math.max(168, Math.round(next)))
-}
-
-function stopSidebarResize() {
-  if (!sidebarResizeActive.value) return
-  sidebarResizeActive.value = false
-  document.body.style.cursor = ''
-  window.removeEventListener('pointermove', updateSidebarWidth)
-  window.removeEventListener('pointerup', stopSidebarResize)
-}
-
-function startSidebarResize(event: PointerEvent) {
-  if (appearanceDraft.sidebar_width_mode !== 'manual') return
-  event.preventDefault()
-  sidebarResizeActive.value = true
-  document.body.style.cursor = 'col-resize'
-  window.addEventListener('pointermove', updateSidebarWidth)
-  window.addEventListener('pointerup', stopSidebarResize)
-}
-
 function ensureCatalogForView(view: ViewName) {
   if (view !== 'mods' && view !== 'modpacks') return
-  const allowed = view === 'mods' && modProjectType.value === 'plugin'
+  const pluginView = view === 'mods' && modProjectType.value === 'plugin'
+  const allowed = pluginView
     ? settingsDraft.plugin_catalogs.filter((catalog) => catalog.enabled !== false)
     : settingsDraft.resource_catalogs.filter((catalog) => view === 'modpacks'
       ? ['modrinth', 'ftb', 'technic'].includes(catalog.kind)
       : !['ftb', 'technic'].includes(catalog.kind))
   if (!allowed.length) return
-  if (allowed.some((catalog) => catalog.id === activeCatalogId.value)) return
-  activeCatalogId.value = allowed[0].id
-  if (view === 'mods' && modProjectType.value === 'plugin') settingsDraft.active_plugin_catalog_id = allowed[0].id
-  else settingsDraft.active_catalog_id = allowed[0].id
+  const preferredId = pluginView ? settingsDraft.active_plugin_catalog_id : settingsDraft.active_catalog_id
+  const selectedId = chooseAllowedCatalog(allowed.map((catalog) => catalog.id), preferredId, activeCatalogId.value)
+  if (!selectedId) return
+  activeCatalogId.value = selectedId
+  if (pluginView) settingsDraft.active_plugin_catalog_id = selectedId
+  else if (!settingsDraft.resource_catalogs.some((catalog) => catalog.id === settingsDraft.active_catalog_id)) settingsDraft.active_catalog_id = selectedId
 }
 
 function ensureCompatibleInstanceForCatalog() {
@@ -2916,8 +1625,6 @@ function ensureCompatibleInstanceForCatalog() {
 function setView(view: ViewName, pluginTabId = '') {
   if (!startupViewApplied) userNavigatedDuringBootstrap = true
   const changed = currentView.value !== view || activePluginTabId.value !== pluginTabId
-  // прокрутка живёт в .page-scroll: сохраняем позицию уходящей вкладки
-  // и возвращаем сохранённую для новой — как в браузере.
   if (changed) {
     const leaving = appShellRef.value?.querySelector<HTMLElement>('.page-scroll')
     if (leaving) pageScrollMemory.set(currentView.value, leaving.scrollTop)
@@ -3004,12 +1711,7 @@ function isSafePluginShortcutBinding(binding: string): boolean {
 }
 
 function handleGlobalKeydown(event: KeyboardEvent) {
-  if (event.key === 'Escape' && accountMenuId.value) {
-    accountMenuId.value = ''
-    return
-  }
   if (event.defaultPrevented || document.querySelector('.dialog-scrim')) return
-  // глобальный поиск: Ctrl+K / Cmd+K — как в привычных палитрах
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
     event.preventDefault()
     globalSearchOpen.value = true
@@ -3017,7 +1719,6 @@ function handleGlobalKeydown(event: KeyboardEvent) {
   }
   const target = event.target as HTMLElement | null
   const editing = target?.matches('input, textarea, select, [contenteditable="true"]')
-  // резерв для оверлея: глобальный перехват клавиш не работает в
   if (!overlayMode && settingsDraft.overlay_settings.enabled) {
     const overlayHotkey = normalizeHotkey(settingsDraft.overlay_settings.hotkey_overlay, 'Shift+Tab')
     const recordingHotkey = normalizeHotkey(settingsDraft.overlay_settings.hotkey_recording, 'F7')
@@ -3056,7 +1757,7 @@ function handleGlobalKeydown(event: KeyboardEvent) {
     }
   } else if (shortcutMatches(event, shortcuts.toggle_activity)) {
     event.preventDefault()
-    if (!editing || event.ctrlKey || event.metaKey) activity.open = !activity.open
+    if (!editing || event.ctrlKey || event.metaKey) setActivityOpen(!activity.open, true)
   } else if (!editing && !event.repeat) {
     const pluginShortcut = pluginShortcuts.value.find((shortcut) => shortcutMatches(event, shortcut.definition.default_key))
     if (pluginShortcut) {
@@ -3067,27 +1768,22 @@ function handleGlobalKeydown(event: KeyboardEvent) {
 }
 
 function applyState(next: AppState, preserveAppearance = false) {
-  const previousSavedSnapshot = preserveAppearance ? savedSettingsSnapshot : undefined
-  hydratingSettings.value = true
-  const preservedFontFamily = preserveAppearance ? settingsDraft.font_family : ''
+  const settingsHydration = beginSettingsHydration(preserveAppearance)
   Object.assign(state, next)
-  // сверка меток сборки: если в приложение подменили только Python-бэкенд
   const backendStamp = String(next.build_stamp || '')
   if (backendStamp) {
     if (backendStamp !== FRONTEND_BUILD_STAMP) {
       if (!buildStampMismatch.value) {
         buildStampMismatch.value = { frontend: FRONTEND_BUILD_STAMP, backend: backendStamp }
-        showToast(`Части лаунчера собраны из разных версий: интерфейс ${FRONTEND_BUILD_STAMP}, бэкенд ${backendStamp}. Приложение нужно пересобрать целиком.`, 'danger')
+        showToast(`Части лаунчера собраны из разных версий: интерфейс ${FRONTEND_BUILD_STAMP}, нативное ядро ${backendStamp}. Приложение нужно пересобрать целиком.`, 'danger')
       }
     } else {
       buildStampMismatch.value = null
     }
   }
-  // тип сессии решает, как создавать окно оверлея и стоит ли вообще
   const sessionWayland = String(state.system.session || '').toLowerCase() === 'wayland'
   const forcedX11 = String(state.system.gdk_backend || '').toLowerCase() === 'x11'
   setOverlayWaylandMode(sessionWayland && !forcedX11)
-  // обратная сторона форсированного X11: на NVIDIA прозрачное окно
   setOverlayOpaqueWindow(sessionWayland && forcedX11 && state.system.nvidia_smi === true)
   replacePluginList(next.plugins || [])
   Object.assign(settingsDraft, {
@@ -3116,12 +1812,13 @@ function applyState(next: AppState, preserveAppearance = false) {
     minimize_on_launch: next.settings.minimize_on_launch === true,
     language: next.settings.language === 'en' ? 'en' : next.settings.language === 'ru' ? 'ru' : null,
     font_family: next.settings.font_family || 'system',
+    file_explorer: next.settings.file_explorer === 'system' ? 'system' : 'builtin',
+    file_editor: next.settings.file_editor === 'system' ? 'system' : 'builtin',
     keep_logs_days: next.settings.keep_logs_days ?? 14,
     telemetry: next.settings.telemetry === true,
      keyboard_shortcuts: (() => {
       const merged = { ...settingsDraft.keyboard_shortcuts, ...(next.settings.keyboard_shortcuts || {}) } as Record<string, string>
-      // нормализуем и то, что пришло с бэкенда: настройки могли быть
-      // сохранены старой версией со свободным вводом
+      // старые версии разрешали сохранять сочетания в произвольном формате
       for (const row of shortcutRows) merged[row.key] = normalizeHotkey(merged[row.key], row.default)
       return merged
     })(),
@@ -3152,16 +1849,16 @@ function applyState(next: AppState, preserveAppearance = false) {
      cloud_last_sync: next.settings.cloud_last_sync || 0,
      cloud_configured: next.settings.cloud_configured === true,
    })
-   if (preserveAppearance && preservedFontFamily) settingsDraft.font_family = preservedFontFamily
+   if (preserveAppearance && settingsHydration.preservedFontFamily) settingsDraft.font_family = settingsHydration.preservedFontFamily
    if (!preserveAppearance) {
      Object.assign(appearanceDraft, {
        theme: next.settings.theme || 'dark',
-       active_theme_id: next.settings.active_theme_id || 'midnight-signal',
+       active_theme_id: next.settings.active_theme_id || 'nivora-dark',
        wallpaper_path: next.settings.wallpaper_path || '',
        wallpaper_data: next.settings.wallpaper_data || '',
        wallpaper_blur: next.settings.wallpaper_blur,
        wallpaper_opacity: next.settings.wallpaper_opacity,
-        accent_color: next.settings.accent_color === legacyDefaultColorTokens.accent
+        accent_color: legacyDefaultColorTokenValues.accent.includes((next.settings.accent_color || '').toLowerCase())
           ? defaultColorTokens.accent
           : next.settings.accent_color || defaultColorTokens.accent,
        sidebar_position: next.settings.sidebar_position || 'left',
@@ -3174,7 +1871,7 @@ function applyState(next: AppState, preserveAppearance = false) {
         animation_settings: {
           ...defaultAnimationSettings,
           ...(next.settings.animation_settings || {}),
-          // старые настройки хранили явный «fade» для каждой страницы, поэтому
+          // старые настройки могли хранить отдельное значение fade для каждой страницы
           page_styles: (() => {
             const legacyStyles = next.settings.animation_settings?.page_styles || {}
             const merged: Record<string, string> = { ...defaultAnimationSettings.page_styles }
@@ -3203,6 +1900,7 @@ function applyState(next: AppState, preserveAppearance = false) {
      : next.settings.active_catalog_id || next.settings.resource_catalogs?.[0]?.id || 'modrinth'
    if (currentView.value === 'mods' && modProjectType.value === 'plugin') settingsDraft.active_plugin_catalog_id = activeCatalogId.value
    else settingsDraft.active_catalog_id = activeCatalogId.value
+   ensureCatalogForView(currentView.value)
   syncMemoryDraft(next.settings.memory)
   javaSelection.value = next.settings.java_path || 'auto'
   if (next.settings.java_path && !javaOptions.value.some((option) => option.value === next.settings.java_path)) {
@@ -3220,21 +1918,7 @@ function applyState(next: AppState, preserveAppearance = false) {
        selectedVersion.value = selected?.kind === 'server' ? selected.server_core_version || selected.minecraft_version || selected.version_id || selectedVersion.value : selected?.minecraft_version || selected?.version_id || selectedVersion.value
        selectedLoader.value = selected?.loader || selectedLoader.value
     }
-   const nextSavedSnapshot = takeSettingsDraftSnapshot()
-   if (previousSavedSnapshot) {
-     nextSavedSnapshot.appearance = previousSavedSnapshot.appearance
-     nextSavedSnapshot.settings.font_family = previousSavedSnapshot.settings.font_family
-   }
-   savedSettingsSnapshot = nextSavedSnapshot
-   const hasUnsavedSettings = !settingsValuesMatch(currentSettingsDraftValues(), savedSettingsSnapshot)
-   settingsSaveState.value = hasUnsavedSettings ? 'dirty' : 'saved'
-   settingsSaveMessage.value = hasUnsavedSettings ? 'Есть несохранённые изменения' : 'Изменения сохранены'
-   // язык применяется на каждое обновление состояния: и при старте, и после
-   setLocale(settingsDraft.language === 'en' ? 'en' : 'ru')
-   void nextTick(() => {
-     hydratingSettings.value = false
-     refreshSettingsSaveState()
-   })
+   finishSettingsHydration(settingsHydration)
   }
 
 async function refreshBootstrap(preserveAppearance = true) {
@@ -3256,8 +1940,7 @@ async function refreshBootstrap(preserveAppearance = true) {
         ensureCatalogForView(currentView.value)
          ensureCompatibleInstanceForCatalog()
      }
-    // wayland-пользователь должен один раз узнать, почему глобальная
-    // комбинация может не срабатывать, и как открыть оверлей иначе.
+    // уведомляем, что глобальные клавиши недоступны в Wayland
     if (!waylandOverlayHintShown && settingsDraft.overlay_settings.enabled && overlayWaylandMode()) {
       waylandOverlayHintShown = true
       showToast('Wayland-сессия: глобальные клавиши не поддерживаются. Комбинация оверлея работает, пока окно лаунчера в фокусе; также оверлей открывается из меню значка в трее.', 'warning')
@@ -3294,22 +1977,6 @@ async function refreshJavaOptions() {
   }
 }
 
-async function validateJavaPath() {
-  const path = settingsDraft.java_path.trim()
-  if (!path) {
-    javaValidation.value = 'Сначала укажите путь к Java executable.'
-    return
-  }
-  try {
-    const result = await bridge.javaValidate(path)
-    settingsDraft.java_path = result.path
-    javaSelection.value = 'manual'
-    javaValidation.value = `Java ${result.version} найдена и готова к запуску.`
-  } catch (error) {
-    javaValidation.value = errorMessage(error)
-  }
-}
-
 function releaseWallpaperPreview() {
   if (wallpaperPreviewUrl.value.startsWith('blob:')) URL.revokeObjectURL(wallpaperPreviewUrl.value)
   wallpaperPreviewUrl.value = ''
@@ -3333,8 +2000,7 @@ async function importWallpaperFile() {
   const file = await pickFile({ accept: 'image/png,image/jpeg,image/webp', title: 'Изображение для обоев' })
   if (!file) return
   try {
-    // обои готовим один раз при импорте: даунскейл + WebP. Дальше хранится
-    // и гоняется по конвейеру только результат — исходник можно и удалить.
+    // сохраняем уменьшенную копию в WebP, чтобы не хранить исходный файл
     const mime = file.fileName.toLowerCase().endsWith('.png') ? 'image/png' : file.fileName.toLowerCase().endsWith('.webp') ? 'image/webp' : 'image/jpeg'
     const rawUrl = `data:${mime};base64,${file.data}`
     const prepared = await prepareWallpaperForStorage(rawUrl)
@@ -3357,7 +2023,6 @@ async function importWallpaperFile() {
   }
 }
 
-/** Закрытие без выбора: снимаем ожидающие промисы обоих режимов. */
 function onFileBrowserClosed() {
   resolveFileBrowser(null)
   resolveFileBrowserMany(null)
@@ -3428,23 +2093,6 @@ watch([wallpaperUrl, wallpaperRenderBlur], () => {
   void renderWallpaper()
 }, { immediate: true })
 
-watch([modProjectType, selectedInstanceName, currentView, activeCatalogId, selectedVersion], () => {
-  if (currentView.value === 'mods') {
-    ensureCatalogForView(currentView.value)
-    ensureCompatibleInstanceForCatalog()
-  }
-  modSearchRequestId += 1
-  modResults.value = []
-  modError.value = ''
-  modSearchPerformed.value = false
-  if (currentView.value !== 'mods' && currentView.value !== 'modpacks') return
-  if (modSearchTimer) window.clearTimeout(modSearchTimer)
-  modSearchTimer = window.setTimeout(() => {
-    modSearchTimer = undefined
-    void searchMods()
-  }, 220)
-})
-
 watch(memoryUnit, (next, previous) => {
   const kib = Number(memoryValue.value || 1) * memoryMultipliers[previous]
   memoryValue.value = kib / memoryMultipliers[next]
@@ -3457,7 +2105,19 @@ watch(() => serverCreation.core, (next, previous) => {
   if (createInstanceOpen.value && creationKind.value === 'server' && serverCreation.install_mode === 'official' && next !== previous) void refreshServerCoreVersions(next)
 })
 
+function setActivityOpen(open: boolean, manual = false) {
+  if (open) activityDismissedForRun = false
+  else if (manual && gameSessionActive.value) activityDismissedForRun = true
+  activity.open = open
+}
+
+function closeActivityManually() {
+  setActivityOpen(false, true)
+}
+
 function openActivity(title: string, detail: string, visible = true) {
+  if (!gameSessionActive.value) activityDismissedForRun = false
+  stopActivityLogPolling()
   if (activityCloseTimer) window.clearTimeout(activityCloseTimer)
   activityCloseTimer = undefined
   activity.open = visible && settingsDraft.show_activity_panel
@@ -3476,10 +2136,7 @@ function finishActivity(detail: string, logs?: string[]) {
   activity.progress = 100
   activity.busy = false
   activity.cancelling = false
-  if (logs?.length) {
-    if (!activity.logs.length) activity.logs = logs
-    else activity.logs.push(...logs.filter((line) => !activity.logs.includes(line)))
-  }
+  if (logs?.length && !activity.logs.length) activity.logs = logs.slice(-200)
   if (activityCloseTimer) window.clearTimeout(activityCloseTimer)
   activityCloseTimer = window.setTimeout(() => {
     if (!activity.busy) activity.open = false
@@ -3496,18 +2153,24 @@ function onBedrockActivity(payload: { title: string; detail: string; done?: bool
     activity.detail = payload.detail
     return
   }
+  if (gameSessionActive.value && activityDismissedForRun) {
+    activity.title = payload.title
+    activity.detail = payload.detail
+    return
+  }
   openActivity(payload.title, payload.detail)
 }
 
 async function pollActivityLog(instanceName: string) {
   if (activityLogPollInFlight) return
+  const revision = activityLogRevision
   activityLogPollInFlight = true
   try {
     const result = await bridge.instanceLog(instanceName)
-    if (result.lines.length) activity.logs = result.lines.slice(-200)
-    if (result.running) activity.detail = 'Minecraft работает…'
+    if (revision !== activityLogRevision || activityLogInstanceName !== instanceName) return
+    activity.logs = result.lines.slice(-200)
+    if (result.running && activity.busy) activity.detail = 'Minecraft работает…'
   } catch {
-    // the backend response remains the source of the final operation result.
   } finally {
     activityLogPollInFlight = false
   }
@@ -3515,18 +2178,21 @@ async function pollActivityLog(instanceName: string) {
 
 function startActivityLogPolling(instanceName: string) {
   if (activityLogTimer) window.clearInterval(activityLogTimer)
+  activityLogRevision += 1
+  activityLogInstanceName = instanceName
   void pollActivityLog(instanceName)
   activityLogTimer = window.setInterval(() => void pollActivityLog(instanceName), 2500)
 }
 
 function stopActivityLogPolling() {
+  activityLogRevision += 1
+  activityLogInstanceName = ''
   if (activityLogTimer) window.clearInterval(activityLogTimer)
   activityLogTimer = undefined
 }
 
 function applyMicrosoftDeviceCode(code: string, verificationUri: string) {
-  // первоначальная настройка закрывает экран своим слоем: панель активности
-  // за ней не видна, и код входа показываем прямо в карточке визарда.
+  // во время первого запуска код входа показывается в карточке визарда
   if (firstRunPhase.value && firstRunPhase.value !== 'tour') {
     activity.verification_code = code
     activity.verification_uri = verificationUri
@@ -3553,7 +2219,6 @@ async function pollMicrosoftLoginStatus() {
       applyMicrosoftDeviceCode(result.code, result.verification_uri || '')
     }
   } catch {
-    // the login request remains authoritative for the final result.
   } finally {
     microsoftStatusPollInFlight = false
   }
@@ -3576,8 +2241,7 @@ async function cancelActivity() {
   activity.detail = 'Останавливаю операцию…'
   try {
     await bridge.cancelActiveOperations()
-    // не всякая операция реагирует на маркер остановки мгновенно: через
-    // 5 секунд честно сообщаем состояние вместо вечного «Останавливаю…».
+    // если остановка затянулась, через 5 секунд показываем текущее состояние
     window.setTimeout(() => {
       if (activity.busy && activity.cancelling) {
         activity.detail = 'Остановка запрошена — операция завершит текущий шаг сама.'
@@ -3595,7 +2259,7 @@ async function minimizeForLaunch() {
     const { getCurrentWindow } = await import('@tauri-apps/api/window')
     await getCurrentWindow().minimize()
   } catch {
-    // browser preview and older shell builds do not expose a window controller.
+    // предпросмотр и старые сборки не предоставляют контроллер окна
   }
 }
 
@@ -3608,8 +2272,10 @@ function openCreateInstance() {
   bedrockCreationStatus.value = null
   createInstanceOpen.value = true
   creationName.value = ''
+  creationIcon.value = ''
   setView('instances')
   void refreshLoaderChoices()
+  void ensureIconBlocks()
 }
 
 function openCreateBedrock() {
@@ -3739,6 +2405,28 @@ async function installSelected() {
       java_path: effectiveJavaPath(),
     })
     if (result.instances) state.instances = result.instances
+    // сохраняем выбранную иконку в профиль сразу после установки
+    const chosenIcon = iconBlocks.value.find((block) => block.id === creationIcon.value)
+    if (chosenIcon) {
+      const created = state.instances.find((value) => value.name === name)
+      try {
+        const blockUrl = await composedBlockIcon(chosenIcon)
+        const profile = await bridge.updateInstanceProfile({
+          name,
+          display_name: created?.display_name || '',
+          description: created?.description || '',
+          group: created?.group || '',
+          icon_file_name: `${chosenIcon.id}.png`,
+          icon_data: blockUrl.split(',')[1] || '',
+        })
+        if (profile.instance) {
+          const index = state.instances.findIndex((value) => value.name === name)
+          if (index >= 0) state.instances.splice(index, 1, profile.instance)
+        }
+      } catch {
+        // экземпляр уже создан, поэтому сбой иконки не отменяет операцию
+      }
+    }
     selectedInstanceName.value = name
     createInstanceOpen.value = false
     finishActivity('Экземпляр готов к запуску.', [
@@ -3783,8 +2471,7 @@ async function createBedrockInstance() {
       const editionLabel = bedrockCreationEdition.value === 'preview' ? 'Preview ' : ''
       activity.detail = `Загружаю Minecraft ${editionLabel}${bedrockCreationVersion.value}…`
       activity.progress = 35
-      // установка Bedrock идёт в фоновой нити бэкенда и не блокирует
-      // лаунчер; здесь мы лишь опрашиваем её состояние
+      // установка идёт в фоне, здесь обновляется только её статус
       await bridge.bedrockSetupVersion(result.instance.name, bedrockCreationEdition.value, bedrockCreationVersion.value)
       let setup: { requires_login?: boolean; installed?: boolean; failed?: boolean; error_hint?: string; logs_tail?: string[]; current_version?: string; exit_code?: number } = {}
       for (;;) {
@@ -4047,7 +2734,7 @@ function pickFirstRunLanguage(next: Locale): void {
   try {
     window.localStorage.setItem('nivora-language-picked', next)
   } catch {
-    // приватный режим: выбор переживёт сессию через settings.json
+    // сохраняем выбор приватного режима в настройках
   }
   void saveSettings()
   setFirstRunPhase('welcome')
@@ -4116,241 +2803,6 @@ function replayLauncherTour() {
   firstRunPhase.value = 'tour'
 }
 
-function setProfileArguments(profile: LauncherProfile, key: 'jvm_arguments' | 'game_arguments', event: Event) {
-  const value = (event.target as HTMLTextAreaElement).value
-  profile[key] = value.split('\n').map((item) => item.trim()).filter(Boolean)
-}
-
-function addLauncherProfile() {
-  let index = settingsDraft.launcher_profiles.length + 1
-  const profile: LauncherProfile = {
-    ...defaultLauncherProfile,
-    id: `profile-${index}`,
-    name: `Профиль ${index}`,
-    jvm_arguments: [],
-    game_arguments: [],
-  }
-  while (settingsDraft.launcher_profiles.some((item) => item.id === profile.id)) {
-    index += 1
-    profile.id = `profile-${index}`
-    profile.name = `Профиль ${index}`
-  }
-  settingsDraft.launcher_profiles.push(profile)
-  settingsDraft.active_launcher_profile_id = profile.id
-}
-
-function removeLauncherProfile(profileId: string) {
-  if (settingsDraft.launcher_profiles.length <= 1) {
-    showToast('Нельзя удалить последний профиль запуска')
-    return
-  }
-  settingsDraft.launcher_profiles = settingsDraft.launcher_profiles.filter((profile) => profile.id !== profileId)
-  if (settingsDraft.active_launcher_profile_id === profileId) settingsDraft.active_launcher_profile_id = settingsDraft.launcher_profiles[0].id
-}
-
-function settingsValidationError(): string {
-  const integerRules: Array<[string, number, number, number]> = [
-    ['Параллельные загрузки', settingsDraft.max_downloads, 1, 32],
-    ['Обновление metadata', settingsDraft.metadata_refresh_hours, 1, 168],
-    ['Timeout загрузки', settingsDraft.download_timeout_seconds, 5, 120],
-    ['Повторные попытки', settingsDraft.download_retries, 1, 6],
-    ['Хранение логов', settingsDraft.keep_logs_days, 0, 365],
-  ]
-  const invalid = integerRules.find(([, value, min, max]) => !Number.isInteger(value) || value < min || value > max)
-  if (invalid) return `${invalid[0]}: укажите целое число от ${invalid[2]} до ${invalid[3]}.`
-  for (const profile of settingsDraft.launcher_profiles) {
-    if (!/^auto$|^\d+(?:\.\d+)?(?:KiB|MiB|GiB)$/i.test(profile.memory.trim())) return `Профиль «${profile.name}»: память должна быть auto, KiB, MiB или GiB.`
-    if (!Number.isInteger(profile.window_width) || profile.window_width < 320 || profile.window_width > 8192) return `Профиль «${profile.name}»: ширина окна должна быть от 320 до 8192.`
-    if (!Number.isInteger(profile.window_height) || profile.window_height < 240 || profile.window_height > 8192) return `Профиль «${profile.name}»: высота окна должна быть от 240 до 8192.`
-  }
-  return ''
-}
-
-function scrollSettingsSection(id: string) {
-  document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
-}
-
-async function saveSettings(): Promise<boolean> {
-  const validationError = settingsValidationError()
-  if (validationError) {
-    settingsSaveState.value = 'error'
-    settingsSaveMessage.value = validationError
-    showToast(validationError)
-    return false
-  }
-  commitWallpaperBlur()
-  settingsSaveState.value = 'saving'
-  settingsSaveMessage.value = 'Сохраняю изменения…'
-  busy.value = true
-  try {
-    const values: Record<string, unknown> = {
-      game_dir: settingsDraft.game_dir,
-      java_path: effectiveJavaPath(),
-      memory: memorySetting.value,
-      max_downloads: settingsDraft.max_downloads,
-      startup_view: settingsDraft.startup_view,
-      last_view: settingsDraft.last_view,
-      remember_last_view: settingsDraft.remember_last_view,
-      default_version_filter: settingsDraft.default_version_filter,
-      default_loader: settingsDraft.default_loader,
-      default_account_id: settingsDraft.default_account_id,
-      open_last_instance: settingsDraft.open_last_instance,
-      launch_after_install: settingsDraft.launch_after_install,
-      auto_refresh_metadata: settingsDraft.auto_refresh_metadata,
-      metadata_refresh_hours: settingsDraft.metadata_refresh_hours,
-      download_timeout_seconds: settingsDraft.download_timeout_seconds,
-      download_retries: settingsDraft.download_retries,
-      download_source: settingsDraft.download_source,
-      confirm_destructive_actions: settingsDraft.confirm_destructive_actions,
-      auto_repair_enabled: settingsDraft.auto_repair_enabled,
-      auto_repair_muted: [...settingsDraft.auto_repair_muted],
-      show_activity_panel: settingsDraft.show_activity_panel,
-      show_toasts: settingsDraft.show_toasts,
-       minimize_on_launch: settingsDraft.minimize_on_launch,
-        language: settingsDraft.language ?? null,
-        font_family: settingsDraft.font_family,
-      keep_logs_days: settingsDraft.keep_logs_days,
-      telemetry: settingsDraft.telemetry,
-      telemetry_endpoint: settingsDraft.telemetry_endpoint.trim(),
-       graphics_mode: settingsDraft.graphics_mode,
-       keyboard_shortcuts: {
-        ...settingsDraft.keyboard_shortcuts,
-        // общий черновик тоже мог прийти из старых свободных полей —
-        // мусор в значении молча отключал клавишу
-        open_settings: normalizeHotkey(settingsDraft.keyboard_shortcuts.open_settings, 'Ctrl+,'),
-        refresh: normalizeHotkey(settingsDraft.keyboard_shortcuts.refresh, 'Ctrl+R'),
-        new_instance: normalizeHotkey(settingsDraft.keyboard_shortcuts.new_instance, 'Ctrl+N'),
-        focus_search: normalizeHotkey(settingsDraft.keyboard_shortcuts.focus_search, 'Ctrl+K'),
-        toggle_activity: normalizeHotkey(settingsDraft.keyboard_shortcuts.toggle_activity, 'Ctrl+J'),
-      },
-       overlay_settings: {
-        ...settingsDraft.overlay_settings,
-        // черновик мог остаться с мусорной комбинацией со старых версий —
-        // нормализуем до сохранения, иначе оверлей молча не откроется
-        hotkey_overlay: normalizeHotkey(settingsDraft.overlay_settings.hotkey_overlay, 'Shift+Tab'),
-        hotkey_recording: normalizeHotkey(settingsDraft.overlay_settings.hotkey_recording, 'F7'),
-      },
-       backup_schedule: { ...settingsDraft.backup_schedule },
-       launcher_profiles: settingsDraft.launcher_profiles.map((profile) => ({ ...profile, jvm_arguments: [...profile.jvm_arguments], game_arguments: [...profile.game_arguments] })),
-       active_launcher_profile_id: settingsDraft.active_launcher_profile_id,
-       http_proxy: settingsDraft.http_proxy.trim(),
-      developer_mode: settingsDraft.developer_mode,
-      ...appearanceDraft,
-      page_themes: { ...appearanceDraft.page_themes },
-      page_layouts: { ...appearanceDraft.page_layouts },
-      widget_visibility: { ...appearanceDraft.widget_visibility },
-      color_tokens: { ...appearanceDraft.color_tokens },
-      radius_tokens: { ...appearanceDraft.radius_tokens },
-      login_source: settingsDraft.login_source,
-      login_api_url: settingsDraft.login_api_url.trim(),
-      catalog_source: settingsDraft.catalog_source,
-      catalog_api_url: settingsDraft.catalog_api_url.trim(),
-      data_source: settingsDraft.data_source,
-      data_api_url: settingsDraft.data_api_url.trim(),
-      resource_catalogs: settingsDraft.resource_catalogs.map((catalog) => ({ ...catalog })),
-      active_catalog_id: settingsDraft.active_catalog_id,
-      plugin_catalogs: settingsDraft.plugin_catalogs.map((catalog) => ({ ...catalog })),
-      active_plugin_catalog_id: settingsDraft.active_plugin_catalog_id,
-    }
-    const currentSettings = state.settings as unknown as Record<string, unknown>
-    const changedKeys = Object.keys(values).filter((key) => JSON.stringify(values[key]) !== JSON.stringify(currentSettings[key]))
-    const result = await bridge.saveSettings(values)
-    applyState({ instances: state.instances, accounts: state.accounts, settings: result.settings, system: state.system })
-    if (changedKeys.length) void broadcastPluginEvent('settings.changed', { keys: changedKeys })
-    settingsSaveState.value = 'saved'
-    settingsSaveMessage.value = 'Изменения сохранены'
-    showToast('Настройки сохранены')
-    return true
-  } catch (error) {
-    settingsSaveState.value = 'error'
-    settingsSaveMessage.value = errorMessage(error)
-    showToast(errorMessage(error))
-    return false
-  } finally {
-    busy.value = false
-  }
-}
-
-function addResourceCatalog() {
-  let index = settingsDraft.resource_catalogs.length + 1
-  const catalog: ResourceCatalog = {
-    id: `catalog-${index}`,
-    name: `Каталог ${index}`,
-    kind: 'custom',
-    api_url: 'https://example.invalid/modrinth/v2',
-  }
-  while (settingsDraft.resource_catalogs.some((item) => item.id === catalog.id)) catalog.id = `catalog-${++index}`
-  settingsDraft.resource_catalogs.push(catalog)
-  settingsDraft.active_catalog_id = catalog.id
-  activeCatalogId.value = catalog.id
-}
-
-function removeResourceCatalog(catalogId: string) {
-  if (settingsDraft.resource_catalogs.length <= 1) {
-    showToast('Нельзя удалить последний каталог')
-    return
-  }
-  settingsDraft.resource_catalogs = settingsDraft.resource_catalogs.filter((catalog) => catalog.id !== catalogId)
-  if (settingsDraft.active_catalog_id === catalogId) {
-    settingsDraft.active_catalog_id = settingsDraft.resource_catalogs[0].id
-    activeCatalogId.value = settingsDraft.active_catalog_id
-  }
-}
-
-function addPluginCatalog() {
-  let index = settingsDraft.plugin_catalogs.length + 1
-  const catalog = { id: `plugin-catalog-${index}`, name: `Plugin catalog ${index}`, kind: 'custom', api_url: 'https://example.invalid/plugins', enabled: true }
-  while (settingsDraft.plugin_catalogs.some((item) => item.id === catalog.id)) catalog.id = `plugin-catalog-${++index}`
-  settingsDraft.plugin_catalogs.push(catalog)
-  settingsDraft.active_plugin_catalog_id = catalog.id
-}
-
-function removePluginCatalog(catalogId: string) {
-  if (settingsDraft.plugin_catalogs.length <= 1) {
-    showToast('Нельзя удалить последний каталог плагинов')
-    return
-  }
-  settingsDraft.plugin_catalogs = settingsDraft.plugin_catalogs.filter((catalog) => catalog.id !== catalogId)
-  if (settingsDraft.active_plugin_catalog_id === catalogId) settingsDraft.active_plugin_catalog_id = settingsDraft.plugin_catalogs[0].id
-}
-
-async function selectActiveCatalog(catalogId: string) {
-  const pluginCatalogView = currentView.value === 'mods' && modProjectType.value === 'plugin'
-  const allowed = pluginCatalogView
-    ? settingsDraft.plugin_catalogs.filter((catalog) => catalog.enabled !== false)
-    : currentView.value === 'modpacks'
-      ? settingsDraft.resource_catalogs.filter((catalog) => ['modrinth', 'ftb', 'technic'].includes(catalog.kind))
-      : currentView.value === 'mods'
-        ? settingsDraft.resource_catalogs.filter((catalog) => !['ftb', 'technic'].includes(catalog.kind))
-        : settingsDraft.resource_catalogs
-  if (!allowed.some((catalog) => catalog.id === catalogId)) {
-    ensureCatalogForView(currentView.value)
-    showToast('Этот каталог не поддерживает текущий раздел')
-    return
-  }
-  const previous = activeCatalogId.value
-  activeCatalogId.value = catalogId
-  if (pluginCatalogView) settingsDraft.active_plugin_catalog_id = catalogId
-  else settingsDraft.active_catalog_id = catalogId
-  try {
-    const result = await bridge.saveSettings(pluginCatalogView ? { active_plugin_catalog_id: catalogId } : { active_catalog_id: catalogId })
-    state.settings = result.settings
-    const savedCatalogId = pluginCatalogView ? result.settings.active_plugin_catalog_id : result.settings.active_catalog_id
-    if (pluginCatalogView) settingsDraft.active_plugin_catalog_id = savedCatalogId
-    else settingsDraft.active_catalog_id = savedCatalogId
-    activeCatalogId.value = savedCatalogId
-    mergeSavedSettingsBaseline(pluginCatalogView ? { active_plugin_catalog_id: savedCatalogId } : { active_catalog_id: savedCatalogId })
-    void broadcastPluginEvent('settings.changed', { keys: [pluginCatalogView ? 'active_plugin_catalog_id' : 'active_catalog_id'] })
-    showToast('Каталог выбран')
-  } catch (error) {
-    activeCatalogId.value = previous
-    if (pluginCatalogView) settingsDraft.active_plugin_catalog_id = previous
-    else settingsDraft.active_catalog_id = previous
-    refreshSettingsSaveState()
-    showToast(errorMessage(error))
-  }
-}
-
 function selectCatalogInstance(name: string) {
   selectedInstanceName.value = name
   if (selectedInstance.value?.kind === 'server') catalogServerCore.value = selectedInstance.value.server_core || catalogServerCore.value
@@ -4388,6 +2840,7 @@ async function launchBedrockExisting(instance: InstanceInfo) {
     showToast('Bedrock требует аккаунт Microsoft: одиночная игра без входа недоступна, в отличие от Java')
     return
   }
+  activityDismissedForRun = false
   gameSessionActive.value = true
   openActivity('Запуск Minecraft Bedrock', `${instance.display_name || instance.name} · лицензия Microsoft Store`)
   startActivityLogPolling(instance.name)
@@ -4402,8 +2855,6 @@ async function launchBedrockExisting(instance: InstanceInfo) {
     finishActivity(isCancelled(error) ? 'Остановлено пользователем.' : 'Не удалось запустить Bedrock.')
     if (!isCancelled(error)) {
       showToast(errorMessage(error))
-      // если не хватило привязки аккаунта Microsoft — статус в карточке
-      // лицензии обязан подсветиться сразу, а не после ручного захода.
       if (errorMessage(error).includes('Подключить аккаунт')) {
         void bedrockWorkspaceRef.value?.refreshAccountStatus?.()
       }
@@ -4419,17 +2870,7 @@ function applyAutoRepairSettings(next: SettingsInfo) {
   const muted = Array.isArray(next.auto_repair_muted) ? [...next.auto_repair_muted] : []
   state.settings.auto_repair_muted = muted
   settingsDraft.auto_repair_muted = [...muted]
-  if (savedSettingsSnapshot) savedSettingsSnapshot.settings.auto_repair_muted = [...muted]
-  refreshSettingsSaveState()
-}
-
-function autoRepairKindMuted(kind: string): boolean {
-  return settingsDraft.auto_repair_muted.includes(kind)
-}
-
-function toggleAutoRepairKind(kind: string, enabled: boolean) {
-  const rest = settingsDraft.auto_repair_muted.filter((item) => item !== kind)
-  settingsDraft.auto_repair_muted = enabled ? rest : [...rest, kind]
+  updateSavedSettingsBaseline({ auto_repair_muted: [...muted] })
 }
 
 async function relaunchAfterRepair(instanceName: string) {
@@ -4443,19 +2884,17 @@ async function relaunchAfterRepair(instanceName: string) {
   await launchExisting(instance)
 }
 
-// Запуск экземпляра по ярлыку: cold start (--launch-instance) и «вторая
-// копия передаёт цель живому лаунчеру» сходятся сюда.
+// обрабатываем запуск экземпляра из ярлыка
 async function takeShortcutLaunchRequest() {
   try {
     const { name } = await bridge.shortcutTakeLaunchRequest()
     if (name) await launchFromShortcut(name)
   } catch {
-    // ярлык мог быть удалён между кликом и опросом — не критично
+    // ярлык могли удалить, пока выполнялся запрос
   }
 }
 
 async function launchFromShortcut(name: string) {
-  // на холодном старте список экземпляров ещё грузится — ждём bootstrap.
   for (let attempt = 0; attempt < 40 && state.instances.length === 0; attempt += 1) {
     await new Promise((resolve) => window.setTimeout(resolve, 250))
   }
@@ -4465,17 +2904,6 @@ async function launchFromShortcut(name: string) {
     return
   }
   await launchExisting(instance)
-}
-
-function setSimpleAppearance(values: Partial<Pick<typeof appearanceDraft, 'theme' | 'ui_scale' | 'animations'>>) {
-  Object.assign(appearanceDraft, values)
-  if (!busy.value) void saveSettings()
-}
-
-function setSimpleAccent(color: string) {
-  appearanceDraft.accent_color = color
-  appearanceDraft.color_tokens = { ...appearanceDraft.color_tokens, accent: color, accent_strong: color }
-  if (!busy.value) void saveSettings()
 }
 
 async function launchExisting(instance: InstanceInfo) {
@@ -4510,6 +2938,7 @@ async function launchExisting(instance: InstanceInfo) {
     await nextTick()
   }
   await instanceWorkspaceRef.value?.ensureLoaded?.()
+  activityDismissedForRun = false
   gameSessionActive.value = true
   openActivity('Консоль запуска', `${instance.name} · ${instance.minecraft_version || instance.version_id || 'версия не установлена'}`)
   startActivityLogPolling(instance.name)
@@ -4722,6 +3151,23 @@ async function duplicateInstance(instance: InstanceInfo) {
   }
 }
 
+const compareDialogSource = ref('')
+const compareDialogOpen = ref(false)
+const autotuneInstance = ref<InstanceInfo | null>(null)
+
+function openInstanceCompare(instance: InstanceInfo) {
+  compareDialogSource.value = instance.name
+  compareDialogOpen.value = true
+}
+
+function openInstanceAutotune(instance: InstanceInfo) {
+  autotuneInstance.value = instance
+}
+
+async function onAutotuneApplied() {
+  await refreshBootstrap()
+}
+
 function externalImportChoice(candidate: ExternalInstanceCandidate): { value: string; label: string; description: string } {
   const version = candidate.minecraft_version || candidate.version_id || 'версия не определена'
   const loader = candidate.loader && candidate.loader !== 'vanilla' ? candidate.loader : 'vanilla'
@@ -4836,506 +3282,6 @@ async function installFromCatalogDetails(versionId: string) {
   await installMod(project)
 }
 
-function catalogTargetInstance() {
-  const instance = selectedInstance.value
-  return instance && instance.kind === 'client' && instance.game_edition !== 'bedrock' ? instance : null
-}
-
-// ── Постраничный каталог и выбор нескольких проектов ────────────────────
-const CATALOG_PAGE_SIZE = 20
-const CATALOG_MAX_PAGES = 500
-const modPage = ref(0)
-const modTotal = ref<number | null>(null)
-const modHasMore = ref(false)
-const modPageCount = computed(() => {
-  const known = modTotal.value !== null ? Math.ceil(modTotal.value / CATALOG_PAGE_SIZE) : modPage.value + (modHasMore.value ? 2 : 1)
-  return Math.max(1, Math.min(CATALOG_MAX_PAGES, known))
-})
-/** Номера страниц для пагинатора; -1 — разрыв «…». */
-const modPagerPages = computed(() => {
-  const last = modPageCount.value - 1
-  const current = modPage.value
-  const pages = new Set<number>([0, last])
-  for (let page = current - 2; page <= current + 2; page += 1) if (page >= 0 && page <= last) pages.add(page)
-  const sorted = [...pages].sort((left, right) => left - right)
-  const result: number[] = []
-  for (const page of sorted) {
-    if (result.length && page - result[result.length - 1] > 1) result.push(-1)
-    result.push(page)
-  }
-  return result
-})
-const catalogSelection = ref(new Map<string, ModResult>())
-const catalogBulkProgress = ref('')
-const catalogSelectable = computed(() => {
-  const instance = selectedInstance.value
-  if (currentView.value !== 'mods' || !instance) return false
-  if (modProjectType.value === 'modpack' || modProjectType.value === 'datapack') return false
-  if (modProjectType.value === 'plugin') return instance.kind === 'server' && !instance.running
-  return instance.kind === 'client' && instance.game_edition !== 'bedrock'
-})
-
-function catalogKey(mod: ModResult): string {
-  return mod.project_id || mod.id || ''
-}
-
-function toggleCatalogSelection(mod: ModResult) {
-  const key = catalogKey(mod)
-  if (!key) return
-  const next = new Map(catalogSelection.value)
-  if (next.has(key)) next.delete(key)
-  else next.set(key, mod)
-  catalogSelection.value = next
-}
-
-function selectCatalogPage() {
-  const next = new Map(catalogSelection.value)
-  for (const mod of modResults.value) {
-    const key = catalogKey(mod)
-    if (key && !mod.installed) next.set(key, mod)
-  }
-  catalogSelection.value = next
-}
-
-function clearCatalogSelection() {
-  catalogSelection.value = new Map()
-}
-
-async function installSelectedMods() {
-  const targets = [...catalogSelection.value.values()].filter((mod) => !mod.installed)
-  if (!targets.length || modBusy.value || !catalogSelectable.value) return
-  const projectType = modProjectType.value
-  let installed = 0
-  const failed: string[] = []
-  for (const [index, mod] of targets.entries()) {
-    catalogBulkProgress.value = `Устанавливаю ${index + 1} из ${targets.length}: ${mod.title || mod.name || catalogKey(mod)}`
-    const ok = await installModIntoTarget(mod, undefined, projectType, { quiet: true })
-    const key = catalogKey(mod)
-    if (ok) {
-      installed += 1
-      // отметку «установлено» видно и на других страницах выдачи.
-      const visible = modResults.value.find((item) => catalogKey(item) === key)
-      if (visible && visible !== mod) visible.installed = true
-      const next = new Map(catalogSelection.value)
-      next.delete(key)
-      catalogSelection.value = next
-    } else {
-      failed.push(mod.title || mod.name || key)
-    }
-  }
-  catalogBulkProgress.value = ''
-  showToast(failed.length ? `Установлено: ${installed} из ${targets.length}. Не удалось: ${failed.slice(0, 3).join(', ')}${failed.length > 3 ? '…' : ''}` : `Установлено проектов: ${installed}`)
-}
-
-watch([() => selectedInstance.value?.name, modProjectType, activeCatalogId, currentView], () => clearCatalogSelection())
-
-function goToCatalogPage(page: number) {
-  if (page < 0 || page === modPage.value || modBusy.value) return
-  void searchMods(page).then(() => {
-    document.querySelector(`[data-page-view="${currentView.value}"]`)?.scrollIntoView({ block: 'start', behavior: 'smooth' })
-  })
-}
-
-async function searchMods(pageArgument: unknown = 0) {
-  // обработчики шаблона передают сюда событие клика — это «первая страница».
-  const page = typeof pageArgument === 'number' && Number.isFinite(pageArgument) ? Math.max(0, Math.min(CATALOG_MAX_PAGES - 1, Math.floor(pageArgument))) : 0
-  ensureCatalogForView(currentView.value)
-  ensureCompatibleInstanceForCatalog()
-  const requestId = ++modSearchRequestId
-  const projectType: ProjectType = currentView.value === 'modpacks' ? 'modpack' : modProjectType.value === 'modpack' ? 'mod' : modProjectType.value
-  // bedrock-профиль не принимает Java-контент: в модпаках ищем по версии из
-  // селектора, чтобы выбранный Bedrock-экземпляр не ломал каталог.
-  const instanceName = currentView.value === 'mods' ? (selectedInstance.value?.name || '') : (catalogTargetInstance()?.name || '')
-  const searchInstanceName = () => currentView.value === 'mods' ? (selectedInstance.value?.name || '') : (catalogTargetInstance()?.name || '')
-  const targetInstance = catalogTargetInstance()
-  const searchView = currentView.value
-  const searchProjectType = projectType
-  const searchCatalogId = activeCatalogId.value
-  const requiresServer = projectType === 'plugin'
-  if (currentView.value === 'mods' && selectedInstance.value && (requiresServer ? selectedInstance.value.kind !== 'server' : selectedInstance.value.kind === 'server' || selectedInstance.value.game_edition === 'bedrock')) {
-    modResults.value = []
-    modError.value = requiresServer ? 'Выберите серверный экземпляр для каталога плагинов.' : 'Выберите Java-экземпляр для каталога ресурсов.'
-    modSearchPerformed.value = false
-    return
-  }
-  modBusy.value = true
-  modError.value = ''
-  const targetLabel = selectedInstance.value?.name || `${selectedProjectLabel.value} · новый экземпляр`
-  openActivity('Каталог ресурсов', targetLabel, false)
-  try {
-    const result = (
-      await bridge.modsSearch({
-        query: modQuery.value,
-        instance_name: instanceName,
-        game_version: modInstanceVersion.value || selectedVersion.value,
-        loader: targetInstance?.loader || selectedLoader.value,
-        server_core: targetInstance?.server_core || catalogServerCore.value,
-        project_type: projectType,
-        catalog_id: activeCatalogId.value,
-        sort_by: modSortMode.value,
-        page,
-        limit: CATALOG_PAGE_SIZE,
-      })
-    )
-    if (
-      requestId !== modSearchRequestId
-      || searchView !== currentView.value
-      || searchProjectType !== (currentView.value === 'modpacks' ? 'modpack' : modProjectType.value)
-      || searchCatalogId !== activeCatalogId.value
-      || instanceName !== searchInstanceName()
-    ) return
-    modResults.value = result.results
-    modPage.value = result.page ?? page
-    modTotal.value = typeof result.total === 'number' ? result.total : null
-    modHasMore.value = Boolean(result.has_more)
-    modSearchPerformed.value = true
-    finishActivity(modTotal.value !== null ? `Найдено проектов: ${modTotal.value} · страница ${modPage.value + 1} из ${modPageCount.value}` : `Страница ${modPage.value + 1}: проектов ${modResults.value.length}`)
-  } catch (error) {
-    if (requestId !== modSearchRequestId) return
-    modError.value = errorMessage(error)
-    modSearchPerformed.value = true
-    activity.logs.push(errorMessage(error))
-    finishActivity(isCancelled(error) ? 'Поиск остановлен.' : 'Каталог недоступен.')
-    if (!isCancelled(error)) showToast(errorMessage(error))
-  } finally {
-    if (requestId === modSearchRequestId) modBusy.value = false
-  }
-}
-
-watch(modSortMode, () => {
-  if (modSearchPerformed.value && (currentView.value === 'mods' || currentView.value === 'modpacks')) void searchMods()
-})
-
-async function installMod(mod: ModResult) {
-  const projectType: ProjectType = currentView.value === 'modpacks' ? 'modpack' : modProjectType.value
-  if (projectType === 'modpack') {
-    await createModpackInstance(mod)
-    return
-  }
-  if (!selectedInstance.value) {
-    showToast('Сначала выберите экземпляр для установки')
-    setView('instances')
-    return
-  }
-  if (projectType === 'datapack') {
-    try {
-      const details = await bridge.instanceDetails(selectedInstance.value.name)
-      if (!details.worlds.length) {
-        showToast('Сначала создайте хотя бы один мир в этом экземпляре')
-        return
-      }
-      datapackWorlds.value = details.worlds
-      pendingDatapack.value = mod
-      datapackWorldId.value = details.worlds[0].id
-      datapackDialogOpen.value = true
-    } catch (error) {
-      showToast(errorMessage(error))
-    }
-    return
-  }
-  await installModIntoTarget(mod, undefined, projectType)
-}
-
-async function installModIntoTarget(mod: ModResult, worldName?: string, projectType = modProjectType.value, options: { quiet?: boolean } = {}): Promise<boolean> {
-  const instance = selectedInstance.value
-  if (!instance) return false
-  const projectId = mod.project_id || mod.id
-  if (!projectId) return false
-  let succeeded = false
-  modBusy.value = true
-  modInstallId.value = projectId
-  modAction.value = 'install'
-  modInstallProgress.value = 8
-  modInstallDetail.value = 'Подготавливаю загрузку…'
-  datapackDialogOpen.value = false
-  pendingDatapack.value = undefined
-  openActivity('Установка ресурса', `${mod.title || mod.name || projectId} · ${instance.name}`, false)
-  try {
-    let beforeInstallEmitted = false
-    const result = (await withUnverifiedDownloadConfirmation(
-      async (confirmUnverified) => {
-        if (!beforeInstallEmitted) {
-          beforeInstallEmitted = true
-          await broadcastPluginEvent('mods.beforeInstall', {
-            instance: pluginInstanceRef(instance)!,
-            project_id: projectId,
-            source: activeCatalogId.value,
-            version: mod.version,
-          })
-        }
-        return bridge.modsInstall({
-          project_id: projectId,
-          instance_name: instance.name,
-          project_type: projectType,
-          world_name: worldName,
-          catalog_id: activeCatalogId.value,
-          version: mod.version,
-          version_id: mod.version_id,
-          display_name: mod.title || mod.name,
-          confirm_unverified: confirmUnverified,
-        })
-      },
-      'Источник ресурса не предоставил издательский хеш. Размер не подтверждает подлинность. Скачать файл всё равно?',
-      'Установка отменена; файлы экземпляра не изменены.',
-    )).value
-    mod.installed = true
-    mod.file_name = result.file_name || mod.file_name
-    finishActivity('Ресурс установлен.', [`Файл: ${result.file_name}`, `Экземпляр: ${instance.name}`])
-    if (!options.quiet) showToast('Ресурс установлен в экземпляр')
-    succeeded = true
-  } catch (error) {
-    activity.logs.push(errorMessage(error))
-    finishActivity(isCancelled(error) ? 'Установка остановлена.' : 'Установка ресурса остановлена.')
-    if (!isCancelled(error)) showToast(errorMessage(error))
-  } finally {
-    modBusy.value = false
-    modInstallId.value = ''
-    modInstallProgress.value = 0
-    modInstallDetail.value = ''
-  }
-  return succeeded
-}
-
-async function removeMod(mod: ModResult) {
-  const instance = selectedInstance.value
-  const projectId = mod.project_id || mod.id
-  const projectType = modProjectType.value
-  if (!instance || !projectId) {
-    showToast('Сначала выберите экземпляр для удаления')
-    return
-  }
-  if (instance.running) {
-    showToast('Остановите экземпляр или сервер перед удалением ресурса')
-    return
-  }
-  if (projectType === 'plugin' && !mod.file_name) {
-    showToast('Не удалось определить установленный файл плагина. Обновите результаты поиска.')
-    return
-  }
-  if (!(await confirmDestructive(`Удалить ресурс «${mod.title || mod.name || projectId}» из «${instance.name}»?`))) return
-  modBusy.value = true
-  modInstallId.value = projectId
-  modAction.value = 'remove'
-  modInstallProgress.value = 18
-  modInstallDetail.value = 'Удаляю установленные файлы…'
-  openActivity('Удаление ресурса', `${mod.title || mod.name || projectId} · ${instance.name}`, false)
-  try {
-    if (projectType === 'modpack') {
-      showToast('Повторный импорт заменит файлы модпака; отдельное удаление не поддерживается')
-      return
-    }
-    let removed: number
-    if (projectType === 'plugin') {
-      removed = (await bridge.serverPluginRemove(instance.name, mod.file_name || '')).removed ? 1 : 0
-    } else {
-      removed = (await bridge.modsRemove({
-          project_id: projectId,
-          instance_name: instance.name,
-          project_type: projectType,
-          catalog_id: mod.catalog_id || activeCatalogId.value,
-      })).removed
-    }
-    mod.installed = false
-    mod.file_name = ''
-    const target = projectType === 'plugin' ? 'Сервер' : 'Экземпляр'
-    finishActivity('Ресурс удалён.', [`Удалено файлов: ${removed}`, `${target}: ${instance.name}`])
-    showToast(projectType === 'plugin' ? 'Плагин удалён из сервера' : 'Ресурс удалён из экземпляра')
-  } catch (error) {
-    activity.logs.push(errorMessage(error))
-    finishActivity(isCancelled(error) ? 'Удаление остановлено.' : 'Удаление ресурса остановлено.')
-    if (!isCancelled(error)) showToast(errorMessage(error))
-  } finally {
-    modBusy.value = false
-    modInstallId.value = ''
-    modInstallProgress.value = 0
-    modInstallDetail.value = ''
-  }
-}
-
-async function confirmDatapackInstall() {
-  if (!pendingDatapack.value || !datapackWorldId.value) return
-  await installModIntoTarget(pendingDatapack.value, datapackWorldId.value, 'datapack')
-}
-
-async function loadSkins() {
-  try {
-    skinResults.value = (await bridge.skinsList()).skins
-  } catch (error) {
-    showToast(errorMessage(error))
-  }
-}
-
-async function loadSkinProfile(accountId = skinAccountId.value) {
-  if (!accountId) return
-  const requestId = ++skinProfileRequestId
-  skinProfileLoading.value = true
-  skinProfileError.value = ''
-  try {
-    const profile = await bridge.skinProfile(accountId)
-    if (requestId !== skinProfileRequestId || !skinPanelOpen.value || skinAccountId.value !== accountId) return
-    skinProfileData.value = profile
-    selectCurrentSkin()
-    selectedCapeId.value = activeCape.value?.id || ''
-  } catch (error) {
-    if (requestId !== skinProfileRequestId || !skinPanelOpen.value || skinAccountId.value !== accountId) return
-    skinProfileData.value = undefined
-    skinProfileError.value = errorMessage(error)
-    showToast(`Не удалось загрузить профиль Minecraft: ${skinProfileError.value}`)
-  } finally {
-    if (requestId === skinProfileRequestId) skinProfileLoading.value = false
-  }
-}
-
-async function openSkinSettings(account: AccountInfo) {
-  if (account.kind !== 'microsoft') {
-    showToast('Настройка скина доступна только для Microsoft-аккаунта')
-    return
-  }
-  accountMenuId.value = ''
-  skinAccountId.value = account.account_id
-  skinProfileData.value = undefined
-  skinProfileError.value = ''
-  skinProfileLoading.value = false
-  selectedSkinId.value = ''
-  selectedCapeId.value = ''
-  skinModel.value = 'classic'
-  currentSkinModel.value = 'classic'
-  skinPanelOpen.value = true
-  void loadSkins()
-  await loadSkinProfile(account.account_id)
-}
-
-function closeSkinSettings() {
-  skinProfileRequestId += 1
-  skinPanelOpen.value = false
-  skinProfileData.value = undefined
-  skinProfileLoading.value = false
-  skinProfileError.value = ''
-  selectedSkinId.value = ''
-  selectedCapeId.value = ''
-  currentSkinModel.value = 'classic'
-  skinEditorOpen.value = false
-}
-
-function openSkinEditor() {
-  if (!skinAccountId.value) return
-  skinEditorOpen.value = true
-}
-
-const skinEditorAccountName = computed(() => state.accounts.find((account) => account.account_id === skinAccountId.value)?.display_name || 'аккаунт')
-
-async function onSkinEditorSaved() {
-  await loadSkins()
-}
-
-async function onSkinEditorApplied() {
-  await loadSkins()
-  if (skinAccountId.value) await loadSkinProfile(skinAccountId.value)
-}
-
-function closeAccountMenuOnOutside(event: MouseEvent) {
-  if ((event.target as Element).closest?.('.account-menu, .account-actions')) return
-  accountMenuId.value = ''
-}
-
-async function applySelectedSkin(skin: SkinInfo) {
-  if (!skinAccountId.value) return
-  try {
-    await bridge.applySkin(skinAccountId.value, skin.skin_id, skinModel.value)
-    showToast(`Скин «${skin.name}» установлен`)
-    skinProfileData.value = await bridge.skinProfile(skinAccountId.value)
-    selectCurrentSkin()
-  } catch (error) {
-    showToast(errorMessage(error))
-  }
-}
-
-async function resetSkin() {
-  if (!skinAccountId.value) return
-  try {
-    await bridge.clearSkin(skinAccountId.value)
-    showToast('Скин сброшен на стандартный')
-    skinProfileData.value = await bridge.skinProfile(skinAccountId.value)
-    selectCurrentSkin()
-  } catch (error) {
-    showToast(errorMessage(error))
-  }
-}
-
-async function selectCape(capeId: string) {
-  if (!skinAccountId.value || capeActionBusy.value) return
-  if (capeId && !availableCapes.value.some((cape) => cape.id === capeId)) {
-    showToast('Можно выбрать только плащ из профиля Minecraft')
-    return
-  }
-  capeActionBusy.value = true
-  try {
-    if (capeId) await bridge.applyCape(skinAccountId.value, capeId)
-    else await bridge.clearCape(skinAccountId.value)
-    selectedCapeId.value = capeId
-    showToast(capeId ? 'Плащ установлен' : 'Плащ снят')
-    skinProfileData.value = await bridge.skinProfile(skinAccountId.value)
-  } catch (error) {
-    showToast(errorMessage(error))
-  } finally {
-    capeActionBusy.value = false
-  }
-}
-
-function encodeBytes(bytes: Uint8Array): string {
-  let binary = ''
-  const chunkSize = 0x8000
-  for (let index = 0; index < bytes.length; index += chunkSize) {
-    binary += String.fromCharCode(...bytes.subarray(index, index + chunkSize))
-  }
-  return btoa(binary)
-}
-
-async function chooseSkinFile() {
-  const file = await pickFile({ accept: 'image/png', title: 'PNG-файл скина' })
-  if (!file) return
-  try {
-    const result = await bridge.skinsImport(file.fileName, file.data, skinModel.value)
-    skinResults.value.push(result.skin)
-    selectSkin(result.skin)
-    showToast('Скин добавлен в библиотеку')
-  } catch (error) {
-    showToast(errorMessage(error))
-  }
-}
-
-async function accountAction(account: AccountInfo, action: 'default' | 'up' | 'down' | 'delete') {
-  accountMenuId.value = ''
-  try {
-    if (action === 'default') {
-      const result = await bridge.setDefaultAccount(account.account_id)
-      state.accounts = result.accounts
-      selectedAccount.value = 'auto'
-      showToast(`Профиль «${account.display_name}» выбран по умолчанию`)
-    } else if (action === 'up' || action === 'down') {
-      state.accounts = (await bridge.moveAccount(account.account_id, action)).accounts
-      showToast('Порядок профилей обновлён')
-    } else if (await confirmDestructive(`Удалить профиль «${account.display_name}»?`)) {
-      await bridge.deleteAccount(account.account_id)
-      if (skinAccountId.value === account.account_id) closeSkinSettings()
-      await refreshBootstrap()
-      showToast('Аккаунт удалён')
-    }
-  } catch (error) {
-    showToast(errorMessage(error))
-  }
-}
-
-// правый клик по профилю аккаунта — те же действия, что у шестерёнки
-function accountContextMenu(event: MouseEvent, account: AccountInfo) {
-  openContextMenu(event, [
-    { id: 'default', label: 'Сделать по умолчанию', icon: 'star', action: () => void accountAction(account, 'default') },
-    { id: 'up', label: 'Переместить выше', icon: 'arrow-up', action: () => void accountAction(account, 'up') },
-    { id: 'down', label: 'Переместить ниже', icon: 'arrow-down', action: () => void accountAction(account, 'down') },
-    { id: 'delete', label: 'Удалить аккаунт', icon: 'trash', danger: true, action: () => void accountAction(account, 'delete') },
-  ], account.display_name)
-}
-
 function errorMessage(error: unknown): string {
   if (error instanceof Error) return error.message
   if (typeof error === 'string') return error
@@ -5348,12 +3294,10 @@ function errorMessage(error: unknown): string {
 
 onMounted(async () => {
   if (overlayMode) {
-    // отдельное окно оверлея: тяжёлый bootstrap лаунчера не нужен,
-    // gameOverlay сам опрашивает overlay_state.
+    // окну оверлея не нужен bootstrap: GameOverlay сам опрашивает состояние
     document.title = 'Nivora Overlay'
     document.body.classList.add('overlay-mode')
-    // непрозрачный режим (Wayland): вёрстка оверлея полупрозрачна,
-    // без плотного фона она ляжет на белый фон окна
+    // в непрозрачном режиме Wayland нужен плотный фон вместо прозрачной вёрстки
     if (new URLSearchParams(window.location.search).get('opaque') === '1') {
       document.body.classList.add('overlay-mode--opaque')
     }
@@ -5361,8 +3305,7 @@ onMounted(async () => {
   }
   if (inDesktopTauri()) {
     startOverlayWatcher()
-    // крестик главного окна прячет лаунчер в трей (решение в Rust-стороне);
-    // говорим об этом один раз, иначе «исчезнувший» лаунчер выглядит багом.
+    // закрытие прячет лаунчер в трей, поэтому объясняем это один раз
     let trayHintShown = false
     try {
       const { listen } = await import('@tauri-apps/api/event')
@@ -5371,31 +3314,26 @@ onMounted(async () => {
         trayHintShown = true
         void bridge.systemNotify('Nivora Launcher', 'Лаунчер свернулся в трей и продолжает работать — глобальные клавиши и оверлей активны. Полный выход: «Выйти» в меню значка.').catch(() => undefined)
       })
-      // Запуск экземпляра ярлыком при живом лаунчере: вторая копия передаёт
-      // цель событием, Rust-сторона уже проверила имя и подняла окно.
+      // при уже запущенном лаунчере цель приходит отдельным событием
       await listen<{ name: string | null }>('nivora-launch-request', (event) => {
         const name = event.payload?.name
         if (name) void launchFromShortcut(name)
       })
     } catch {
-      // без подсказки тоже проживём
     }
-    // Холодный старт по ярлыку: Rust помнит --launch-instance до первого
-    // опроса, поэтому забираем цель после инициализации интерфейса.
+    // при холодном старте цель ярлыка доступна после инициализации интерфейса
     void takeShortcutLaunchRequest()
   }
   void loadSettingsProfiles()
-  pluginDevPollTimer = window.setInterval(() => { void pollPluginDevelopment() }, 2000)
+  pluginController.startDevelopmentPolling()
   window.addEventListener('keydown', handleGlobalKeydown)
   window.addEventListener('resize', scheduleWallpaperRender)
   window.addEventListener('focus', syncLauncherHidden)
   window.addEventListener('blur', syncLauncherHidden)
   document.addEventListener('visibilitychange', () => {
     syncLauncherHidden()
-    // игрок вернулся из Java-игры (процесс :game) — обновляем статус сессии.
   })
   syncLauncherHidden()
-  document.addEventListener('click', closeAccountMenuOnOutside)
   systemThemeMedia = window.matchMedia('(prefers-color-scheme: dark)')
   systemDark.value = systemThemeMedia.matches
   systemThemeListener = (event) => { systemDark.value = event.matches }
@@ -5418,6 +3356,21 @@ onMounted(async () => {
       if (event.kind === 'status' && event.event === 'workspace-changed' && event.instance_name === selectedInstanceName.value && currentView.value === 'mods' && !catalogInstallInProgress) {
         void searchMods()
       }
+      if (event.kind === 'status' && event.event === 'session-started') {
+        if (event.instance_name === selectedInstanceName.value) {
+          activityLogRevision += 1
+          activity.open = shouldOpenActivityAfterSessionStart(settingsDraft.show_activity_panel, activityDismissedForRun)
+          activity.title = 'Консоль запуска'
+          activity.detail = 'Minecraft работает…'
+          activity.progress = 68
+          activity.busy = true
+          activity.cancelling = false
+          activity.logs = []
+          activity.verification_code = undefined
+          activity.verification_uri = undefined
+        }
+        return
+      }
       if (catalogInstallInProgress && event.kind === 'download') {
         modInstallDetail.value = event.destination || 'Загрузка файла…'
         if (event.total && event.total > 0) modInstallProgress.value = Math.min(96, Math.round(((event.current || 0) * 100) / event.total))
@@ -5435,16 +3388,7 @@ onMounted(async () => {
         finishActivity(event.message || 'Операция завершена.')
         return
       }
-      if (!settingsDraft.show_activity_panel || (!activity.open && event.kind !== 'log')) return
-      if (!activity.busy) return
-      activity.open = true
-      if (event.kind === 'log' && event.line) {
-        activity.title = 'Консоль запуска'
-        activity.detail = 'Minecraft работает…'
-        activity.logs.push(event.line)
-        if (activity.logs.length > 200) activity.logs.splice(0, activity.logs.length - 200)
-        activity.progress = 68
-      }
+      if (event.kind === 'log' || !settingsDraft.show_activity_panel || !activity.busy) return
       if (event.kind === 'download' && event.destination) {
         activity.title = 'Загрузка файлов'
         activity.detail = event.destination
@@ -5478,7 +3422,6 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
-  if (pluginDevPollTimer) window.clearInterval(pluginDevPollTimer)
   if (topbarMetricsTimer !== undefined) window.clearInterval(topbarMetricsTimer)
   stopOverlayWatcher()
   void detachOverlay()
@@ -5491,7 +3434,6 @@ onBeforeUnmount(() => {
   wallpaperRenderer.release()
   stopBackendEvents?.()
   if (loaderChoiceTimer) window.clearTimeout(loaderChoiceTimer)
-  if (modSearchTimer) window.clearTimeout(modSearchTimer)
   if (toastTimer) window.clearTimeout(toastTimer)
   if (activityCloseTimer) window.clearTimeout(activityCloseTimer)
   stopActivityLogPolling()
@@ -5499,44 +3441,53 @@ onBeforeUnmount(() => {
   if (systemThemeMedia && systemThemeListener) systemThemeMedia.removeEventListener('change', systemThemeListener)
   delete document.body.dataset.launcherAnimations
   document.documentElement.style.removeProperty('--ui-scale')
-  document.removeEventListener('click', closeAccountMenuOnOutside)
   stopSidebarResize()
   releaseWallpaperPreview()
   void pluginRuntime.dispose()
-  pluginViews.value = []
-  pluginCommands.value = []
-  pluginShortcuts.value = []
-  pluginEventSubscriptions.clear()
-  pluginLogEventInFlight.clear()
-  pluginLogEventLastSentAt.clear()
-  pluginNotificationToastIds.clear()
-  pluginThemeContributions.clear()
+  pluginController.dispose()
 })
+const settingsPageModel = {
+  accountOptions, activeLauncherProfile, addLauncherProfile, addPluginCatalog, addResourceCatalog, applySettingsProfile, backupDestinationOptions,
+  busy, catalogKindOptions, clampMemoryDraft, defaultGameDirectory, deleteSettingsProfile, downloadSourceOptions, errorMessage,
+  exportSettingsProfile, formatDateShort, formatMemoryLabel, graphicsOptions, graphicsReport, importSettingsProfile, javaChoiceOptions,
+  javaSelection, languageOptions, loadGraphicsDiagnostics, loaderOptions, memoryMaxValue, memoryTotalLabel, memoryUnit,
+  memoryUnitOptions, memoryValue, openGameFolder, openPluginLink, overwriteSettingsProfile, persistentViewOptions, pluginCatalogKindOptions,
+  refreshBootstrap, refreshJavaOptions, removeLauncherProfile, removePluginCatalog, removeResourceCatalog, replayLauncherTour, resourceCatalogOptions,
+  runPluginAction, savePluginConfig, saveSettings, saveSettingsProfileAs, selectActiveCatalog, setLanguageFromSettings, setView,
+  settingsDraft, settingsProfileBusy, settingsProfileName, settingsProfiles, settingsProfilesLoading, settingsSaveMessage, settingsSaveState,
+  settingsSectionViews, shortcutRows, showToast, state,
+}
 </script>
 
 <template>
   <GameOverlay v-if="overlayMode || inAppOverlayOpen" />
   <DialogHost v-else />
   <ContextMenuHost />
+  <Transition name="modal">
   <FileBrowserDialog
     v-if="fileBrowserRequest"
     :request="fileBrowserRequest"
+    :editor-mode="settingsDraft.file_editor"
     @close="onFileBrowserClosed"
     @chosen="resolveFileBrowser"
     @chosen-many="resolveFileBrowserMany"
     @chosen-directory="resolveFileBrowserDirectory"
+    @toast="showToast"
   />
+  </Transition>
+  <Transition name="dialog">
   <GlobalSearchDialog
     v-if="globalSearchOpen"
     @close="globalSearchOpen = false"
     @open-instance="openSearchInstance"
     @open-path="openSearchFolder"
   />
+  </Transition>
   <AutoRepairDialog v-if="!overlayMode" @toast="showToast" @settings="applyAutoRepairSettings" @repaired="refreshBootstrap()" @relaunch="relaunchAfterRepair" @login="loginMicrosoft()" />
   <div v-if="!overlayMode" ref="appShellRef" class="app-shell">
         <div v-if="buildStampMismatch" class="build-mismatch-banner" role="alert">
           <Icon name="info" :size="16" />
-          <span>Части лаунчера собраны из разных версий: интерфейс {{ buildStampMismatch.frontend }}, Python-бэкенд — {{ buildStampMismatch.backend }}. Подменён только бэкенд: часть экранов (Bedrock, оверлей и др.) работает непредсказуемо. Пересоберите приложение целиком: <code>cd frontend &amp;&amp; npm install &amp;&amp; npm run tauri build</code></span>
+          <span>Части лаунчера собраны из разных версий: интерфейс {{ buildStampMismatch.frontend }}, нативное ядро {{ buildStampMismatch.backend }}. При несовпадении версий некоторые экраны (Bedrock, оверлей и другие) могут работать неправильно. Пересоберите приложение целиком: <code>cd frontend &amp;&amp; npm install &amp;&amp; npm run tauri build</code></span>
           <button class="icon-button" type="button" aria-label="Скрыть предупреждение" @click="buildStampMismatch = null">
             <Icon name="close" :size="14" />
           </button>
@@ -5575,7 +3526,7 @@ onBeforeUnmount(() => {
           <Icon name="instances" :size="20" />
         </button>
         <div class="page-heading">
-          <span class="eyebrow">{{ page.kicker }}</span>
+
           <h1>{{ page.title }}</h1>
         </div>
         <div class="topbar-actions">
@@ -5595,7 +3546,7 @@ onBeforeUnmount(() => {
           <button class="icon-button" type="button" aria-label="Обновить данные" @click="() => { void refreshBootstrap() }">
             <Icon name="refresh" :size="18" />
           </button>
-          <button v-if="settingsDraft.show_activity_panel" class="activity-trigger" type="button" @click="activity.open = !activity.open">
+          <button v-if="settingsDraft.show_activity_panel" class="activity-trigger" type="button" @click="setActivityOpen(!activity.open, true)">
             <span class="status-dot" :class="{ 'status-dot--busy': activity.busy }" />
             <span>{{ activity.busy ? 'В работе' : 'Готово' }}</span>
           </button>
@@ -5605,10 +3556,10 @@ onBeforeUnmount(() => {
        <div class="page-scroll">
            <div class="page-transition" :class="{ 'page-transition--animate': pageTransitionPulse }">
                <section data-page-view="instances" class="page-content">
-                <div class="section-intro library-intro"><div><span class="eyebrow">Библиотека</span><h2>Экземпляры</h2><p>Профили игры и серверы Minecraft.</p></div><div class="section-intro-actions"><button class="button button--quiet" type="button" :disabled="externalImportBusy" @click="importExternalInstances"><Icon name="upload" :size="16" />{{ externalImportScanning ? 'Ищу источники…' : 'Импорт' }}</button><button class="button button--outline" type="button" @click="openCreateServer"><Icon name="server" :size="16" />Новый сервер</button><button class="button button--accent" type="button" @click="openCreateInstance"><Icon name="plus" :size="16" />Новый экземпляр</button></div></div>
+                <div class="section-intro library-intro"><div><h2>Экземпляры</h2><p>Профили игры и серверы Minecraft.</p></div><div class="section-intro-actions"><button class="button button--quiet" type="button" :disabled="externalImportBusy" @click="importExternalInstances"><Icon name="upload" :size="16" />{{ externalImportScanning ? 'Ищу источники…' : 'Импорт' }}</button><button class="button button--outline" type="button" @click="openCreateServer"><Icon name="server" :size="16" />Новый сервер</button><button class="button button--accent" type="button" @click="openCreateInstance"><Icon name="plus" :size="16" />Новый экземпляр</button></div></div>
                 <div v-if="homeWidgetViews.length" class="plugin-home-widgets">
                   <article v-for="entry in homeWidgetViews" :key="`${entry.pluginId}:${entry.view.id}`" class="plugin-home-widget panel">
-                    <div class="panel-heading"><div><span class="eyebrow">Плагин</span><h2>{{ entry.view.title }}</h2></div><span class="tag">{{ entry.pluginName }}</span></div>
+                    <div class="panel-heading"><div><h2>{{ entry.view.title }}</h2></div><span class="tag">{{ entry.pluginName }}</span></div>
                     <PluginViewRenderer
                       :view="entry.view"
                       @action="(payload) => runPluginAction({ pluginId: entry.pluginId, ...payload })"
@@ -5617,9 +3568,10 @@ onBeforeUnmount(() => {
                     />
                   </article>
                 </div>
+              <Transition name="instance-create">
               <section v-if="createInstanceOpen" class="panel launch-panel instance-create-panel">
                <div class="panel-heading">
-                  <div><span class="eyebrow">Новый профиль</span><h2>{{ creationKind === 'server' ? 'Создать сервер' : creationKind === 'bedrock' ? 'Создать Bedrock-профиль' : 'Создать экземпляр' }}</h2></div>
+                  <div><h2>{{ creationKind === 'server' ? 'Создать сервер' : creationKind === 'bedrock' ? 'Создать Bedrock-профиль' : 'Создать экземпляр' }}</h2></div>
                   <button class="icon-button" type="button" aria-label="Закрыть" @click="closeCreateInstance"><Icon name="close" :size="17" /></button>
                 </div>
                 <div class="creation-mode-switch"><button class="button button--small" :class="creationKind === 'client' ? 'button--accent' : 'button--quiet'" type="button" @click="openCreateInstance">Java</button><button class="button button--small" :class="creationKind === 'bedrock' ? 'button--accent' : 'button--quiet'" type="button" @click="openCreateBedrock">Bedrock</button><button class="button button--small" :class="creationKind === 'server' ? 'button--accent' : 'button--quiet'" type="button" @click="openCreateServer">Server workspace</button></div>
@@ -5637,6 +3589,10 @@ onBeforeUnmount(() => {
                 <div v-if="creationKind === 'client' && selectedLoader !== 'vanilla'" class="choice-row">
                  <span class="choice-label">Версия {{ selectedLoaderLabel }}</span>
                  <CustomSelect v-model="selectedLoaderVersion" :options="loaderVersionOptions" :disabled="loadingChoices" />
+                </div>
+                <div v-if="creationKind === 'client'" class="field field--wide">
+                  <span>Иконка экземпляра</span>
+                  <BlockIconPicker v-model="creationIcon" :blocks="iconBlocks" :loading="iconBlocksLoading" />
                 </div>
                  </div>
                 <div v-if="creationKind === 'bedrock'" class="bedrock-create-form">
@@ -5672,6 +3628,7 @@ onBeforeUnmount(() => {
                      <button class="button button--accent" type="button" :disabled="busy || (creationKind === 'bedrock' && (!bedrockCreationStatus || !bedrockCreationStatus.supported))" @click="installSelected"><Icon :name="creationKind === 'server' ? (serverCreation.install_mode === 'official' ? 'download' : 'server') : creationKind === 'bedrock' ? 'archive' : 'download'" :size="16" />{{ creationKind === 'server' ? 'Создать сервер' : creationKind === 'bedrock' ? (bedrockCreationVersion ? 'Создать и установить' : 'Создать профиль') : 'Создать и установить' }}</button>
                </div>
              </section>
+              </Transition>
                <InstanceGroups
                   :instances="state.instances"
                   :groups="state.settings.instance_groups"
@@ -5693,94 +3650,46 @@ onBeforeUnmount(() => {
                 @stop="stopExisting"
                 @settings="openInstance"
                 @duplicate="duplicateInstance"
+                @compare="openInstanceCompare"
                 @delete-instance="deleteInstance"
               />
               </section>
 
                 <section data-page-view="instance-settings" class="page-content instance-workspace-page">
                   <div class="section-intro">
-                    <div><span class="eyebrow">Профиль игры</span><h2>{{ selectedInstance?.display_name || selectedInstance?.name || 'Рабочая область экземпляра' }}</h2><p>{{ selectedInstance?.game_edition === 'bedrock' ? 'Отдельный профиль Bedrock: версия игры, показатели ресурсов, файлы и контент.' : 'Полноэкранная рабочая область: консоль, ресурсы, файлы и настройки профиля.' }}</p></div>
+                    <div><h2>{{ selectedInstance?.display_name || selectedInstance?.name || 'Рабочая область экземпляра' }}</h2><p>{{ selectedInstance ? [selectedInstance.kind === 'server' ? (selectedInstance.server_core || 'Сервер') : selectedInstance.game_edition === 'bedrock' ? 'Bedrock Edition' : (selectedInstance.loader || 'Vanilla'), selectedInstance.minecraft_version || selectedInstance.version_id || ''].filter(Boolean).join(' · ') : '' }}</p></div>
                     <button class="button button--outline" type="button" @click="setView('instances')"><Icon name="arrow-left" :size="15" />К экземплярам</button>
                   </div>
-                   <ServerWorkspace v-if="currentView === 'instance-settings' && selectedInstance?.kind === 'server'" ref="serverWorkspaceRef" :key="`workspace-server-${selectedInstance.name}`" :instance="selectedInstance" :plugin-catalogs="state.settings.plugin_catalogs" :server-cores="state.server_cores" :focus-tab="instanceWorkspaceFocus" :confirm-destructive="settingsDraft.confirm_destructive_actions" :snapshot-created="notifyPluginSnapshotCreated" @toast="showToast" @changed="refreshBootstrap" />
-                     <BedrockWorkspace v-else-if="currentView === 'instance-settings' && selectedInstance?.game_edition === 'bedrock'" ref="bedrockWorkspaceRef" :key="`workspace-bedrock-${selectedInstance.name}`" :instance="selectedInstance" :busy="busy" :focus-tab="instanceWorkspaceFocus" :confirm-destructive="settingsDraft.confirm_destructive_actions" @launch="launchExisting(selectedInstance)" @stop="stopExisting(selectedInstance)" @toast="showToast" @changed="refreshBootstrap" @activity="onBedrockActivity" />
-                     <InstanceWorkspace v-else-if="currentView === 'instance-settings' && selectedInstance" ref="instanceWorkspaceRef" :key="`workspace-client-${selectedInstance.name}`" :instance="selectedInstance" :account="selectedAccount" :account-info="effectiveAccount" :focus-tab="instanceWorkspaceFocus" :confirm-destructive="settingsDraft.confirm_destructive_actions" :before-launch="beforeInstanceLaunch" :after-exit="notifyPluginAfterExit" :crash="notifyPluginCrash" :initial-crash="lastLaunchCrash" :snapshot-created="notifyPluginSnapshotCreated" @toast="showToast" @browse-mods="setView('mods')" @changed="refreshBootstrap" @groups-changed="state.settings.instance_groups = $event" />
+                   <ServerWorkspace v-if="currentView === 'instance-settings' && selectedInstance?.kind === 'server'" ref="serverWorkspaceRef" :key="`workspace-server-${selectedInstance.name}`" :instance="selectedInstance" :plugin-catalogs="state.settings.plugin_catalogs" :server-cores="state.server_cores" :focus-tab="instanceWorkspaceFocus" :confirm-destructive="settingsDraft.confirm_destructive_actions" :file-editor-mode="settingsDraft.file_editor" :snapshot-created="notifyPluginSnapshotCreated" @toast="showToast" @changed="refreshBootstrap" />
+                     <BedrockWorkspace v-else-if="currentView === 'instance-settings' && selectedInstance?.game_edition === 'bedrock'" ref="bedrockWorkspaceRef" :key="`workspace-bedrock-${selectedInstance.name}`" :instance="selectedInstance" :busy="busy" :focus-tab="instanceWorkspaceFocus" :confirm-destructive="settingsDraft.confirm_destructive_actions" :file-editor-mode="settingsDraft.file_editor" @launch="launchExisting(selectedInstance)" @stop="stopExisting(selectedInstance)" @toast="showToast" @changed="refreshBootstrap" @activity="onBedrockActivity" />
+                     <InstanceWorkspace v-else-if="currentView === 'instance-settings' && selectedInstance" ref="instanceWorkspaceRef" :key="`workspace-client-${selectedInstance.name}`" :instance="selectedInstance" :account="selectedAccount" :account-info="effectiveAccount" :focus-tab="instanceWorkspaceFocus" :confirm-destructive="settingsDraft.confirm_destructive_actions" :file-editor-mode="settingsDraft.file_editor" :before-launch="beforeInstanceLaunch" :after-exit="notifyPluginAfterExit" :crash="notifyPluginCrash" :initial-crash="lastLaunchCrash" :snapshot-created="notifyPluginSnapshotCreated" @toast="showToast" @browse-mods="setView('mods')" @changed="refreshBootstrap" @groups-changed="state.settings.instance_groups = $event" @autotune="openInstanceAutotune(selectedInstance!)" />
                  <div v-else class="empty-card"><span class="empty-orb empty-orb--large"><Icon name="settings" :size="28" /></span><h3>Экземпляр не выбран</h3><p>Вернитесь к списку экземпляров и откройте настройки нужного профиля.</p><button class="button button--accent" type="button" @click="setView('instances')">Открыть экземпляры</button></div>
               </section>
 
-               <section data-page-view="accounts" class="page-content">
-              <div class="section-intro"><div><span class="eyebrow">Профили доступа</span><h2>Аккаунты</h2><p>Выбирайте, от чьего имени будет запускаться игра.</p></div><span class="account-login-buttons"><button class="button button--outline" type="button" :disabled="loginBusy || state.settings.login_source !== 'microsoft' || !state.settings.has_client_id" @click="loginMicrosoft"><Icon name="accounts" :size="17" />Войти через Microsoft</button><button class="button button--outline" type="button" :disabled="elyLoginBusy" @click="openElyLogin"><Icon name="accounts" :size="17" />Войти через ely.by</button></span></div>
-             <div class="account-layout"><section class="panel account-panel"><div class="panel-heading"><div><span class="eyebrow">Подключённые</span><h2>Профили</h2></div><span class="count-badge">{{ state.accounts.length }}</span></div><p v-if="!state.settings.has_client_id" class="inline-error">Microsoft-вход не настроен в этой сборке. Вводить ID в настройках не нужно; для входа понадобится сборка с настроенным Microsoft OAuth.</p><div v-if="state.accounts.length" class="account-list"><article v-for="account in state.accounts" :key="account.account_id" class="account-row" @contextmenu.prevent="accountContextMenu($event, account)"><span class="avatar avatar--blue">{{ account.display_name.slice(0, 1).toUpperCase() }}</span><div class="account-copy"><strong>{{ account.display_name }} <span v-if="account.is_default" class="default-mark">по умолчанию</span></strong><span>{{ account.kind === 'microsoft' ? 'Microsoft account' : account.kind === 'ely' ? 'Аккаунт ely.by' : 'Offline debug account' }}</span></div><span class="account-status"><i />{{ account.kind === 'microsoft' || account.kind === 'ely' ? 'Подключён' : 'Локальный' }}</span><div class="account-actions"><button class="icon-button" type="button" aria-label="Настройки профиля" @click="accountMenuId = accountMenuId === account.account_id ? '' : account.account_id"><Icon name="settings" :size="16" /></button><div v-if="accountMenuId === account.account_id" class="account-menu"><button type="button" :disabled="account.kind !== 'microsoft'" @click="openSkinSettings(account)"><Icon name="skin" :size="14" />Настроить скин</button><button type="button" @click="accountAction(account, 'default')"><Icon name="star" :size="14" />Сделать по умолчанию</button><button type="button" @click="accountAction(account, 'up')"><Icon name="arrow-up" :size="14" />Переместить выше</button><button type="button" @click="accountAction(account, 'down')"><Icon name="arrow-down" :size="14" />Переместить ниже</button><button class="account-menu-danger" type="button" @click="accountAction(account, 'delete')"><Icon name="trash" :size="14" />Удалить аккаунт</button></div></div></article></div><div v-else class="empty-mini empty-mini--roomy"><span class="empty-orb"><Icon name="accounts" :size="19" /></span><strong>Аккаунтов пока нет</strong><span>Создайте локальный аккаунт или войдите через Microsoft.</span></div></section><section class="panel create-account-panel"><span class="eyebrow">Быстрое создание</span><h2>Локальный профиль</h2><p>Подходит для одиночного тестирования и разработки модпаков. Онлайн-серверы недоступны.</p><label class="field"><span>Имя игрока <small>3–16 символов: латиница, цифры и _</small></span><input v-model="accountName" maxlength="16" placeholder="Player" autocomplete="nickname" spellcheck="false" :aria-invalid="Boolean(accountNameError)" :class="{ 'input--invalid': accountNameError }" @keydown.enter.prevent="createOfflineAccount" /></label><p v-if="accountNameError" class="inline-error" role="alert">{{ accountNameError }}</p><button class="button button--accent button--large" type="button" :disabled="busy || Boolean(nicknameError(accountName))" @click="createOfflineAccount"><Icon name="plus" :size="18" />Создать offline-профиль</button></section></div>
-             <section v-if="skinPanelOpen && skinAccountId" class="panel skin-settings-panel">
-               <div class="panel-heading">
-                 <div><span class="eyebrow">MICROSOFT PROFILE</span><h2>Настройка скина</h2><p>Профиль: {{ state.accounts.find((account) => account.account_id === skinAccountId)?.display_name }}</p></div>
-                 <button class="icon-button" type="button" aria-label="Закрыть" @click="closeSkinSettings"><Icon name="close" :size="17" /></button>
-                </div>
-                <div v-if="skinProfileLoading" class="skin-profile-status" role="status"><span class="skin-profile-spinner" />Загружаю скины и плащи из профиля Minecraft…</div>
-                <div v-else-if="skinProfileError" class="skin-profile-status skin-profile-status--error" role="alert"><span>Не удалось получить профиль: {{ skinProfileError }}</span><button class="button button--quiet" type="button" @click="loadSkinProfile()"><Icon name="refresh" :size="14" />Повторить</button></div>
-                <div class="skin-settings-layout">
-                  <div class="skin-preview-3d"><SkinPreview v-if="currentView === 'accounts'" :image="skinPreviewImage" :model="currentSkinModel" :cape="Boolean(selectedCape?.url)" :cape-image="selectedCape?.url || ''" :elytra="skinElytraPreview" /><span class="muted">{{ skinProfileLoading ? 'Загружаю профиль Minecraft…' : selectedLocalSkin ? 'Предпросмотр выбранного скина' : activeRemoteSkin ? 'Текущий скин Minecraft' : 'Активный скин не задан' }} · {{ currentSkinModel === 'slim' ? 'стройные руки' : 'широкие руки' }}</span></div>
-                  <div class="skin-controls">
-                     <div class="field"><span>Модель рук</span><div class="segmented-control"><button type="button" :class="{ active: skinModel === 'classic' }" @click="selectSkinModel('classic')">Широкие</button><button type="button" :class="{ active: skinModel === 'slim' }" @click="selectSkinModel('slim')">Стройные</button></div></div>
-                     <label class="workspace-check skin-elytra-toggle"><input v-model="skinElytraPreview" type="checkbox" :disabled="!selectedCape?.url" /><span><strong>Предпросмотр элитр</strong><small>{{ selectedCape?.url ? 'Показать текстуру плаща на крыльях элитр' : 'Выберите плащ, чтобы увидеть элитры' }}</small></span></label>
-                     <div v-if="selectedCape?.url" class="skin-cape-front"><CapeThumb :image="selectedCape.url" /><span><strong>{{ selectedCape.name || selectedCape.alias || 'Плащ' }}</strong><small>Лицевая сторона плаща</small></span></div>
-                  </div>
-                </div>
-                <div class="skin-library">
-                  <div class="skin-library-heading"><div><h3>Скины</h3><p>Текущий скин аккаунта и локальная библиотека.</p></div></div>
-                  <div class="skin-library-grid">
-                    <button v-if="activeRemoteSkin" class="skin-library-item skin-library-account-item" :class="{ active: !selectedSkinId }" type="button" @click="selectCurrentSkin">
-                      <span v-if="activeRemoteSkin.url" class="skin-library-model"><SkinThumb3D :image="activeRemoteSkin.url" :model="activeRemoteSkin.variant?.toUpperCase() === 'SLIM' ? 'slim' : 'classic'" :cape-image="activeCape?.url || ''" /></span>
-                      <span v-else class="skin-library-avatar-placeholder"><Icon name="skin" :size="18" /></span>
-                      <span>{{ skinProfileData?.name || 'Текущий скин' }}</span>
-                      <small>Профиль Minecraft · {{ activeRemoteSkin.variant?.toUpperCase() === 'SLIM' ? 'стройные руки' : 'широкие руки' }}</small>
-                      <span class="skin-library-current-badge">Экипирован</span>
-                    </button>
-                    <div v-for="skin in skinResults" :key="skin.skin_id" class="skin-library-item" :class="{ active: selectedSkinId === skin.skin_id }" @click="selectSkin(skin)">
-                      <span v-if="skin.image" class="skin-library-model"><SkinThumb3D :image="skin.image" :model="skin.model === 'slim' ? 'slim' : 'classic'" /></span>
-                      <span v-else class="skin-library-avatar-placeholder"><Icon name="skin" :size="18" /></span>
-                      <span>{{ skin.name }}</span>
-                      <small>{{ skin.model === 'slim' ? 'стройные' : 'широкие' }}</small>
-                      <button v-if="selectedSkinId === skin.skin_id" class="button button--small button--accent" type="button" @click.stop="applySelectedSkin(skin)">Установить</button>
-                    </div>
-                  </div>
-                  <div v-if="skinProfileData && !activeRemoteSkin && !skinResults.length" class="empty-mini"><Icon name="skin" :size="18" /><span>В профиле нет активного скина. Библиотека скинов пуста.</span></div>
-                  <div v-else-if="skinProfileData && !activeRemoteSkin" class="empty-mini"><Icon name="skin" :size="18" /><span>В профиле Minecraft нет активного скина.</span></div>
-                </div>
-                <div class="skin-cape-library">
-                  <div class="skin-library-heading"><div><h3>Плащи аккаунта</h3><p>Показываются плащи из профиля Minecraft. Если Mojang не вернул идентификатор плаща, его можно только просмотреть.</p></div><span class="skin-cape-count">{{ availableCapes.length }}</span></div>
-                  <div v-if="availableCapes.length" class="skin-cape-grid">
-                    <button v-for="cape in availableCapes" :key="cape.id || `${cape.alias || cape.name || 'cape'}-${cape.url || cape.state || ''}`" class="skin-cape-card" :class="{ active: (cape.id && selectedCapeId === cape.id) || (!cape.id && selectedCape === cape) }" type="button" :disabled="capeActionBusy || !cape.id" @click="selectCape(cape.id || '')">
-                      <span class="skin-cape-art"><CapeThumb v-if="cape.url" :image="cape.url" /><Icon v-else name="skin" :size="20" /></span>
-                      <span class="skin-cape-name">{{ cape.name || cape.alias || 'Плащ Minecraft' }}</span>
-                      <small>{{ !cape.id ? 'Только предпросмотр' : selectedCapeId === cape.id ? 'Выбран' : cape.state?.toUpperCase() === 'ACTIVE' ? 'Надет в Minecraft' : 'Доступен в профиле' }}</small>
-                    </button>
-                    <button class="skin-cape-card skin-cape-card--none" :class="{ active: !selectedCapeId }" type="button" :disabled="capeActionBusy" @click="selectCape('')">
-                      <span class="skin-cape-art"><Icon name="close" :size="20" /></span>
-                      <span class="skin-cape-name">Без плаща</span>
-                      <small>{{ selectedCapeId ? 'Снять текущий плащ' : 'Сейчас не надет' }}</small>
-                    </button>
-                  </div>
-                  <div v-else-if="skinProfileData" class="empty-mini"><Icon name="skin" :size="18" /><span>В профиле Minecraft пока нет доступных плащей.</span></div>
-                </div>
-                              <div class="skin-panel-actions"><button class="button button--accent" type="button" @click="openSkinEditor"><Icon name="edit" :size="15" />Сделать скин</button><button class="button button--quiet" type="button" @click="openSkinsFolderBrowser"><Icon name="folder" :size="15" />Открыть папку со скинами</button><button class="button button--outline" type="button" @click="chooseSkinFile"><Icon name="upload" :size="15" />Импортировать файл скина</button><button class="button button--quiet" type="button" @click="resetSkin"><Icon name="refresh" :size="15" />Сбросить скин</button></div>
-             </section>
-             <SkinEditorDialog
-               v-if="skinEditorOpen && skinAccountId"
-               :account-id="skinAccountId"
-               :account-name="skinEditorAccountName"
-               :skins="skinResults"
-               :current-image="skinPreviewImage"
-               :current-model="currentSkinModel"
-               @close="skinEditorOpen = false"
-               @toast="(message, kind) => showToast(message, kind)"
-               @saved="() => void onSkinEditorSaved()"
-               @applied="() => void onSkinEditorApplied()"
-             />
-           </section>
+               <AccountsPage
+                 :accounts="state.accounts"
+                 :has-client-id="state.settings.has_client_id"
+                 :current-view="currentView"
+                 :busy="busy"
+                 :login-busy="loginBusy"
+                 :login-enabled="state.settings.login_source === 'microsoft' && state.settings.has_client_id"
+                 :ely-login-busy="elyLoginBusy"
+                 v-model:account-name="accountName"
+                 :account-name-error="accountNameError"
+                 :confirm-destructive="confirmDestructive"
+                 :refresh-bootstrap="refreshBootstrap"
+                 :error-message="errorMessage"
+                 :show-toast="showToast"
+                 :open-skins-folder-browser="openSkinsFolderBrowser"
+                 @update:accounts="state.accounts = $event"
+                 @select-account="selectedAccount = $event"
+                 @create-offline-account="createOfflineAccount"
+                 @login-microsoft="loginMicrosoft"
+                 @login-ely="openElyLogin"
+               />
 
                <section data-page-view="mods" class="page-content">
-                   <div class="section-intro"><div><span class="eyebrow">Ресурсы экземпляра</span><h2>Каталог</h2><p>{{ modProjectType === 'plugin' ? 'Найдите плагины по версии Minecraft и совместимому server core. Установка доступна только после выбора сервера.' : 'Найдите моды, ресурспаки, шейдеры или датапаки по версии и loader. Установка доступна внутри выбранного профиля.' }}</p></div><div class="catalog-header-controls"><CustomSelect :model-value="activeCatalogId" :options="catalogPickerOptions" @update:model-value="selectActiveCatalog" /><CatalogBadge :kind="activeCatalog?.kind" :name="activeCatalog?.name" /></div></div>
+                   <div class="section-intro"><div><h2>Каталог</h2><p>{{ modProjectType === 'plugin' ? 'Найдите плагины по версии Minecraft и совместимому server core. Установка доступна только после выбора сервера.' : 'Найдите моды, ресурспаки, шейдеры или датапаки по версии и loader. Установка доступна внутри выбранного профиля.' }}</p></div><div class="catalog-header-controls"><CustomSelect :model-value="activeCatalogId" :options="catalogPickerOptions" @update:model-value="selectActiveCatalog" /></div></div>
                <section class="panel search-panel">
                  <div class="catalog-instance-picker">
                    <span>Экземпляр для каталога</span>
@@ -5788,7 +3697,7 @@ onBeforeUnmount(() => {
                  </div>
                   <div v-if="!selectedInstance" class="catalog-independent-fields">
                     <div class="field"><span>Версия Minecraft</span><CustomSelect v-model="selectedVersion" :options="versionOptions" /></div>
-                    <div v-if="modProjectType !== 'plugin'" class="field"><span>Loader</span><CustomSelect v-model="selectedLoader" :options="loaderOptions" /></div>
+                    <div v-if="modProjectType !== 'plugin'" class="field"><span>Загрузчик</span><CustomSelect v-model="selectedLoader" :options="loaderOptions" /></div>
                     <div v-else class="field"><span>Server core</span><CustomSelect v-model="catalogServerCore" :options="catalogServerCoreOptions" /></div>
                   </div>
                   <div class="search-bar">
@@ -5800,6 +3709,7 @@ onBeforeUnmount(() => {
                    {{ modBusy ? 'Загружаю…' : (modQuery.trim() ? 'Найти' : 'Показать всё') }}
                  </button>
                </div>
+                 <div v-if="activeCatalog?.kind === 'modrinth' && modProjectType === 'mod'" class="catalog-category-filter catalog-filter"><span>Категория Modrinth</span><CustomSelect v-model="selectedModCategory" :options="modCategoryOptions" /></div>
                  <div v-if="selectedInstance && appearanceDraft.widget_visibility['mods.context'] !== false" class="search-context">
                   <span>{{ selectedProjectLabel }} · {{ selectedInstance.name }}</span>
                   <span class="context-divider" />
@@ -5824,10 +3734,11 @@ onBeforeUnmount(() => {
                   <label v-if="catalogSelectable && !mod.installed" class="mod-card-select" :title="catalogSelection.has(catalogKey(mod)) ? 'Убрать из выбранных' : 'Выбрать для установки'"><input type="checkbox" :checked="catalogSelection.has(catalogKey(mod))" :disabled="modBusy" :aria-label="`Выбрать ${mod.title || mod.name}`" @change="toggleCatalogSelection(mod)" /></label>
                   <div class="mod-icon"><img v-if="mod.icon_url" :src="mod.icon_url" alt="" @error="onModIconError(mod)" /><Icon v-else name="mods" :size="24" /></div>
                  <div class="mod-card-copy">
-                   <h3>{{ mod.title || mod.name }}</h3>
+                   <h3>{{ mod.title || mod.name }}<span v-if="mod.author" class="mod-card-author"> by {{ mod.author }}</span></h3>
                    <p>{{ mod.description || 'Описание не предоставлено.' }}</p>
+                   <ModCardMeta :mod="mod" />
                     <div class="mod-card-footer">
-                       <span class="mod-downloads">{{ mod.downloads ? `${mod.downloads.toLocaleString()} загрузок` : 'Проект' }}</span>
+                       <span class="mod-card-stats"><span class="mod-stat" :title="mod.downloads ? `${mod.downloads.toLocaleString('ru-RU')} загрузок` : undefined"><Icon name="arrow-down-to-line" :size="12" />{{ formatDownloadsCompact(mod.downloads) || '0' }}</span><span v-if="formatLikes(mod.follows)" class="mod-stat mod-stat--likes" :title="`${formatLikes(mod.follows)} в избранном`"><Icon name="thumbs-up" :size="12" />{{ formatLikes(mod.follows) }}</span></span>
                        <span v-if="modInstallId === (mod.project_id || mod.id)" class="mod-install-status" aria-live="polite"><span class="status-dot status-dot--busy" />{{ modInstallDetail || 'Загрузка…' }} <strong>{{ modInstallProgress }}%</strong></span>
                        <button class="button button--small button--quiet" type="button" :aria-label="`Подробности: ${mod.title || mod.name}`" @click="openCatalogDetails(mod)"><Icon name="info" :size="14" />Информация</button>
                           <button class="button button--small mod-install-button" :class="mod.installed ? 'button--danger' : 'button--accent'" type="button" :disabled="modBusy || !selectedInstance || (modProjectType !== 'modpack' && selectedInstance.game_edition === 'bedrock') || (mod.installed && selectedInstance.running) || (modProjectType === 'plugin' && selectedInstance.running) || (modProjectType === 'modpack' && mod.installed)" :aria-busy="modInstallId === (mod.project_id || mod.id)" @click="modProjectType === 'modpack' ? installMod(mod) : (mod.installed ? removeMod(mod) : installMod(mod))"><Icon :name="modProjectType === 'modpack' && mod.installed ? 'check' : mod.installed ? 'trash' : 'download'" :size="14" />{{ modInstallId === (mod.project_id || mod.id) ? (modAction === 'remove' ? 'Удаляю…' : 'Установка…') : (modProjectType === 'modpack' ? (mod.installed ? 'Установлено' : 'Установить модпак') : (mod.installed ? 'Удалить' : (selectedInstance?.game_edition === 'bedrock' ? 'Выберите Java-экземпляр' : selectedInstance ? 'Установить' : 'Выберите экземпляр'))) }}</button>
@@ -5838,22 +3749,22 @@ onBeforeUnmount(() => {
              <nav v-if="modResults.length && (modPage > 0 || modHasMore)" class="catalog-pager" aria-label="Страницы каталога"><button class="button button--small button--quiet" type="button" :disabled="modBusy || modPage === 0" @click="goToCatalogPage(modPage - 1)">‹ Назад</button><template v-for="(item, index) in modPagerPages" :key="`page-${index}-${item}`"><span v-if="item < 0" class="catalog-pager-info">…</span><button v-else class="button button--small catalog-pager-page" :class="item === modPage ? 'button--accent' : 'button--quiet'" type="button" :disabled="modBusy" :aria-current="item === modPage ? 'page' : undefined" @click="goToCatalogPage(item)">{{ item + 1 }}</button></template><button class="button button--small button--quiet" type="button" :disabled="modBusy || !modHasMore" @click="goToCatalogPage(modPage + 1)">Вперёд ›</button><span class="catalog-pager-info">{{ modTotal !== null ? `Найдено: ${modTotal.toLocaleString()}` : `Страница ${modPage + 1}` }}</span></nav>
              <div v-if="!modResults.length" class="empty-card empty-card--short">
                <span class="empty-orb empty-orb--large"><Icon name="search" :size="27" /></span>
-                <h3>{{ modError ? 'Каталог недоступен' : modBusy ? 'Ищу проекты…' : !selectedInstance ? 'Выберите экземпляр' : !modSearchPerformed ? 'Начните поиск' : 'Ничего не найдено' }}</h3>
-                 <p>{{ modError || (modBusy ? 'Подбираю совместимые проекты для выбранной версии.' : !selectedInstance ? 'Каталог будет искать и устанавливать файлы в контекст выбранного экземпляра.' : !modSearchPerformed ? 'Введите название проекта или нажмите «Показать всё».' : 'Попробуйте изменить запрос или выбрать другой тип ресурса.') }}</p>
+                <h3>{{ modError ? 'Каталог недоступен' : modBusy ? 'Ищу проекты…' : currentView === 'mods' && !selectedInstance && !modSearchPerformed ? 'Выберите экземпляр' : !modSearchPerformed ? 'Начните поиск' : 'Ничего не найдено' }}</h3>
+                 <p>{{ modError || (modBusy ? 'Подбираю совместимые проекты для выбранной версии.' : currentView === 'mods' && !selectedInstance && !modSearchPerformed ? 'Можно просматривать каталог без экземпляра, но установить проект получится только в выбранный профиль.' : !modSearchPerformed ? 'Введите название проекта или нажмите «Показать всё».' : 'Попробуйте изменить запрос или выбрать другой тип ресурса.') }}</p>
               </div>
             </section>
 
                <section data-page-view="modpacks" class="page-content">
-                 <div class="section-intro"><div><span class="eyebrow">Готовые сборки</span><h2>Модпаки</h2><p>Каждая установка создаёт отдельный клиентский экземпляр. FTB, Technic и Modrinth не смешиваются с каталогом обычных ресурсов.</p></div><div class="catalog-header-controls"><CustomSelect :model-value="activeCatalogId" :options="catalogPickerOptions" @update:model-value="selectActiveCatalog" /><CatalogBadge :kind="activeCatalog?.kind" :name="activeCatalog?.name" /></div></div>
+                 <div class="section-intro"><div><h2>Модпаки</h2><p>Каждая установка создаёт отдельный клиентский экземпляр. FTB, Technic и Modrinth не смешиваются с каталогом обычных ресурсов.</p></div><div class="catalog-header-controls"><CustomSelect :model-value="activeCatalogId" :options="catalogPickerOptions" @update:model-value="selectActiveCatalog" /></div></div>
                  <section class="panel search-panel">
                    <div class="catalog-filters catalog-filters--modpack"><div class="catalog-filter"><span>Версия нового экземпляра</span><CustomSelect v-model="selectedVersion" :options="versionOptions" /></div><div class="catalog-filter"><span>Загрузчик нового экземпляра</span><CustomSelect v-model="selectedLoader" :options="loaderOptions" /></div></div>
                    <div v-if="selectedLoader !== 'vanilla'" class="catalog-filter"><span>Версия {{ selectedLoaderLabel }} для нового экземпляра</span><CustomSelect v-model="selectedLoaderVersion" :options="loaderVersionOptions" :disabled="loadingChoices" /></div>
                    <p v-else class="field-help">Vanilla не использует отдельную версию загрузчика.</p>
-                    <div class="search-bar"><Icon name="search" :size="19" /><input v-model="modQuery" placeholder="Например, Create или Better MC" @keyup.enter="searchMods" /><CustomSelect v-model="modSortMode" :options="catalogSortOptions" /><button class="button button--outline" type="button" :disabled="busy || modBusy" @click="chooseModpackFile"><Icon name="upload" :size="14" />Импортировать архив</button><button class="button button--accent" type="button" :disabled="modBusy" @click="searchMods">{{ modBusy ? 'Загружаю…' : (modQuery.trim() ? 'Найти' : 'Показать всё') }}</button></div>
+                    <div class="search-bar"><Icon name="search" :size="19" /><input v-model="modQuery" placeholder="Например, Create или Better MC" @keyup.enter="searchMods" /><CustomSelect v-if="activeCatalog?.kind === 'modrinth'" v-model="modSortMode" :options="catalogSortOptions" /><button class="button button--outline" type="button" :disabled="busy || modBusy" @click="chooseModpackFile"><Icon name="upload" :size="14" />Импортировать архив</button><button class="button button--accent" type="button" :disabled="modBusy" @click="searchMods">{{ modBusy ? 'Загружаю…' : (modQuery.trim() ? 'Найти' : 'Показать всё') }}</button></div>
                    <div class="search-context"><span>Новый экземпляр</span><span class="context-divider" /><span>{{ modContextLabel }}</span><span class="context-divider" /><span>Источник: {{ activeCatalog?.name || 'Modrinth' }}</span></div>
                   <p v-if="modError" class="inline-error">{{ modError }}</p>
                 </section>
-                  <div v-if="modResults.length" class="mod-grid"><article v-for="mod in modResults" :key="mod.project_id || mod.id" class="mod-card" @contextmenu="modpackMenu($event, mod)"><div class="mod-icon"><img v-if="mod.icon_url" :src="mod.icon_url" alt="" @error="onModIconError(mod)" /><Icon v-else name="archive" :size="24" /></div><div class="mod-card-copy"><h3>{{ mod.title || mod.name }}</h3><p>{{ mod.description || 'Описание не предоставлено.' }}</p><div class="mod-card-footer"><span class="mod-downloads">{{ mod.downloads ? `${mod.downloads.toLocaleString()} загрузок` : 'Модпак' }}</span><button class="button button--small button--quiet" type="button" :aria-label="`Подробности: ${mod.title || mod.name}`" @click="openCatalogDetails(mod)"><Icon name="info" :size="14" />Информация</button><button class="button button--small button--accent mod-install-button" type="button" :disabled="busy || modBusy || (selectedLoader !== 'vanilla' && loadingChoices)" @click="createModpackInstance(mod)"><Icon name="plus" :size="14" />Создать экземпляр</button></div></div></article></div>
+                  <div v-if="modResults.length" class="mod-grid"><article v-for="mod in modResults" :key="mod.project_id || mod.id" class="mod-card" @contextmenu="modpackMenu($event, mod)"><div class="mod-icon"><img v-if="mod.icon_url" :src="mod.icon_url" alt="" @error="onModIconError(mod)" /><Icon v-else name="archive" :size="24" /></div><div class="mod-card-copy"><h3>{{ mod.title || mod.name }}<span v-if="mod.author" class="mod-card-author"> by {{ mod.author }}</span></h3><p>{{ mod.description || 'Описание не предоставлено.' }}</p><ModCardMeta :mod="mod" /><div class="mod-card-footer"><span class="mod-card-stats"><span class="mod-stat" :title="mod.downloads ? `${mod.downloads.toLocaleString('ru-RU')} загрузок` : undefined"><Icon name="arrow-down-to-line" :size="12" />{{ formatDownloadsCompact(mod.downloads) || '0' }}</span><span v-if="formatLikes(mod.follows)" class="mod-stat mod-stat--likes" :title="`${formatLikes(mod.follows)} в избранном`"><Icon name="thumbs-up" :size="12" />{{ formatLikes(mod.follows) }}</span></span><button class="button button--small button--quiet" type="button" :aria-label="`Подробности: ${mod.title || mod.name}`" @click="openCatalogDetails(mod)"><Icon name="info" :size="14" />Информация</button><button class="button button--small button--accent mod-install-button" type="button" :disabled="busy || modBusy || (selectedLoader !== 'vanilla' && loadingChoices)" @click="createModpackInstance(mod)"><Icon name="plus" :size="14" />Создать экземпляр</button></div></div></article></div>
                 <nav v-if="modResults.length && (modPage > 0 || modHasMore)" class="catalog-pager" aria-label="Страницы каталога"><button class="button button--small button--quiet" type="button" :disabled="modBusy || modPage === 0" @click="goToCatalogPage(modPage - 1)">‹ Назад</button><template v-for="(item, index) in modPagerPages" :key="`page-${index}-${item}`"><span v-if="item < 0" class="catalog-pager-info">…</span><button v-else class="button button--small catalog-pager-page" :class="item === modPage ? 'button--accent' : 'button--quiet'" type="button" :disabled="modBusy" :aria-current="item === modPage ? 'page' : undefined" @click="goToCatalogPage(item)">{{ item + 1 }}</button></template><button class="button button--small button--quiet" type="button" :disabled="modBusy || !modHasMore" @click="goToCatalogPage(modPage + 1)">Вперёд ›</button><span class="catalog-pager-info">{{ modTotal !== null ? `Найдено: ${modTotal.toLocaleString()}` : `Страница ${modPage + 1}` }}</span></nav>
                 <div v-if="!modResults.length" class="empty-card empty-card--short"><span class="empty-orb empty-orb--large"><Icon name="archive" :size="27" /></span><h3>{{ modError ? 'Каталог недоступен' : modBusy ? 'Ищу модпаки…' : !modSearchPerformed ? 'Начните поиск' : 'Ничего не найдено' }}</h3><p>{{ modError || (modBusy ? 'Подбираю сборки для выбранной версии.' : !modSearchPerformed ? 'Введите название сборки или нажмите «Показать всё».' : 'Попробуйте другой запрос или источник.') }}</p></div>
               </section>
@@ -5861,7 +3772,7 @@ onBeforeUnmount(() => {
               <section data-page-view="plugins" class="page-content">
                 <section v-if="activeRuntimeTab" class="panel">
                   <div class="panel-heading">
-                    <div><span class="eyebrow">Вкладка плагина</span><h2>{{ activeRuntimeTab.view.title }}</h2><p>{{ activeRuntimeTab.view.description || `Живая страница плагина ${activeRuntimeTab.pluginName}.` }}</p></div>
+                    <div><h2>{{ activeRuntimeTab.view.title }}</h2><p>{{ activeRuntimeTab.view.description || `Живая страница плагина ${activeRuntimeTab.pluginName}.` }}</p></div>
                     <button class="button button--outline" type="button" @click="setView('plugins')">К плагинам</button>
                   </div>
                   <div class="diagnostic-note"><Icon name="plug" :size="16" /><span>Страница построена декларативными компонентами UI v2 в изолированном QuickJS; HTML плагина не выполняется.</span></div>
@@ -5875,7 +3786,7 @@ onBeforeUnmount(() => {
                 </section>
                 <section v-else-if="activePluginTab" class="panel">
                   <div class="panel-heading">
-                    <div><span class="eyebrow">Декларативная вкладка</span><h2>{{ activePluginTab.label }}</h2><p>{{ activePluginTab.description || `Вкладка плагина ${activePluginTab.name}.` }}</p></div>
+                    <div><h2>{{ activePluginTab.label }}</h2><p>{{ activePluginTab.description || `Вкладка плагина ${activePluginTab.name}.` }}</p></div>
                     <button class="button button--outline" type="button" @click="setView('plugins')">К плагинам</button>
                   </div>
                   <div class="diagnostic-note"><Icon name="lock" :size="16" /><span>Вкладка создана из метаданных manifest. Файл entrypoint плагина не запускается.</span></div>
@@ -5911,6 +3822,7 @@ onBeforeUnmount(() => {
 
               <section data-page-view="themes" class="page-content">
 
+                <ThemeStudio
                  :appearance="appearanceDraft"
                  :tokens="effectiveColorTokens"
                  :theme="currentTheme"
@@ -5947,379 +3859,17 @@ onBeforeUnmount(() => {
                />
              </section>
 
-             <section data-page-view="settings" class="page-content settings-page">
-               <div class="section-intro">
-                 <div>
-                   <span class="eyebrow">Параметры лаунчера</span>
-                   <h2>Настройки</h2>
-                   <p>Пути, память, источники и резервная копия файлов настраиваются здесь.</p>
-                 </div>
-                 <div class="section-intro-actions">
-                   <button class="button button--outline" type="button" @click="replayLauncherTour"><Icon name="refresh" :size="15" />Повторить экскурсию</button>
-                   <button class="button button--outline" type="button" @click="setView('themes')"><Icon name="palette" :size="15" />Центр настройки тем</button>
-                 </div>
-               </div>
-               <div class="settings-save-bar" :class="`settings-save-bar--${settingsSaveState}`">
-                 <div class="settings-save-copy"><span class="status-dot" :class="{ 'status-dot--green': settingsSaveState === 'saved', 'status-dot--busy': settingsSaveState === 'saving' }" /><div><strong>{{ settingsSaveState === 'saving' ? 'Сохраняю настройки' : settingsSaveState === 'error' ? 'Нужно исправление' : settingsSaveState === 'dirty' ? 'Есть несохранённые изменения' : 'Настройки сохранены' }}</strong><small>{{ settingsSaveMessage }}</small></div></div>
-                 <button class="button button--accent" type="button" :disabled="busy" @click="void saveSettings()"><Icon name="check" :size="15" />{{ settingsSaveState === 'saving' ? 'Сохраняю…' : 'Сохранить изменения' }}</button>
-               </div>
-               <nav class="settings-section-nav" aria-label="Разделы настроек">
-                  <button type="button" @click="scrollSettingsSection('settings-system')">Среда запуска</button>
-                 <button type="button" @click="scrollSettingsSection('settings-behavior')">Поведение</button>
-                 <button type="button" @click="scrollSettingsSection('settings-auto-repair')">Авто-починка</button>
-                 <button type="button" @click="scrollSettingsSection('settings-hotkeys')">Горячие клавиши</button>
-                 <button type="button" @click="scrollSettingsSection('settings-overlay')">Оверлей</button>
-                 <button type="button" @click="scrollSettingsSection('settings-metrics')">Метрики</button>
-                 <button type="button" @click="scrollSettingsSection('settings-sources')">Источники</button>
-                 <button type="button" @click="scrollSettingsSection('settings-profiles')">Профили запуска</button>
-                 <button type="button" @click="scrollSettingsSection('settings-catalogs')">Каталоги</button>
-                 <button type="button" @click="scrollSettingsSection('settings-cloud')">Облако</button>
-               </nav>
-               <!-- Плитки настроек раскладываются колонками (masonry): короткие
-                    плитки встают под длинными, без пустых дыр справа. Каждая
-                    плитка — одна тема, а не «всё подряд в одной карточке». -->
-               <div class="settings-masonry">
-                 <section id="settings-system" class="panel settings-card">
-                   <div class="panel-heading"><div><span class="eyebrow">Система</span><h2>Среда запуска</h2></div></div>
-                   <div class="settings-form">
-                     <div class="field"><span>Язык интерфейса</span><CustomSelect :model-value="settingsDraft.language ?? 'ru'" :options="languageOptions" @update:model-value="setLanguageFromSettings" /></div>
-                     <label class="field"><span>Папка игры</span><input v-model="settingsDraft.game_dir" :placeholder="defaultGameDirectory" /></label>
-                     <div class="field">
-                       <span>Java runtime <button class="text-button" type="button" @click="refreshJavaOptions">Обновить список</button></span>
-                       <CustomSelect v-model="javaSelection" :options="javaChoiceOptions" />
-                     </div>
-                     <div class="field"><span>Параллельные загрузки</span><NumericStepper v-model="settingsDraft.max_downloads" :min="1" :max="32" aria-label="Параллельные загрузки" /></div>
-                     <label v-if="javaSelection === 'manual'" class="field field--wide">
-                       <span>Путь к Java executable <small>можно указать JDK/JRE или бинарник</small></span>
-                       <input v-model="settingsDraft.java_path" placeholder="/usr/lib/jvm/.../bin/java" />
-                       <div class="java-path-actions"><button class="button button--small button--quiet" type="button" @click="validateJavaPath">Проверить Java</button><span v-if="javaValidation" class="field-help">{{ javaValidation }}</span></div>
-                     </label>
-                     <div class="field field--wide memory-control">
-                       <span>Память JVM <small>максимум {{ memoryTotalLabel }}</small></span>
-                       <div class="memory-input-row">
-                         <NumericStepper :model-value="memoryValue" :min="1" :max="memoryMaxValue || 8192" :step="memoryUnit === 'GiB' ? 1 : 128" :decimals="memoryUnit === 'GiB' ? 2 : 0" aria-label="Память JVM" @update:model-value="memoryValue = $event; clampMemoryDraft()" />
-                         <CustomSelect v-model="memoryUnit" :options="memoryUnitOptions" />
-                       </div>
-                       <small class="field-help">До {{ memoryMaxValue || '—' }} {{ memoryUnit }} · рекомендуем {{ formatMemoryLabel(state.settings.memory_recommended_kib) }}</small>
-                     </div>
-                     <label class="field field--wide"><span>Прокси <small>HTTP/HTTPS или SOCKS5, если сеть блокирует каталоги</small></span><input v-model="settingsDraft.http_proxy" placeholder="http://127.0.0.1:порт или socks5://127.0.0.1:1080" /><small class="field-help">SOCKS5 резолвит имена на стороне прокси; авторизация socks5://user:pass@host:port поддерживается.</small></label>
-                     <div class="field field--wide">
-                       <span>Graphics / GLX</span>
-                       <CustomSelect v-model="settingsDraft.graphics_mode" :options="graphicsOptions" />
-                       <small class="field-help">Auto включает NVIDIA PRIME, если nvidia-smi видит видеокарту; иначе используется системный GLX. Экземпляры с Auto наследуют эту настройку.</small>
-                     </div>
-                     <div class="diagnostic-note">
-                       <span class="status-dot" :class="{ 'status-dot--green': state.system.nvidia_smi }" />
-                       <span>{{ state.system.session }} · {{ state.system.display }} · {{ state.system.nvidia_smi ? 'nvidia-smi найден' : 'nvidia-smi не найден' }}</span>
-                       <button class="text-button" type="button" @click="loadGraphicsDiagnostics">Проверить GLX</button>
-                     </div>
-                     <pre v-if="graphicsReport" class="diagnostic-output">{{ graphicsReport }}</pre>
-                   </div>
-                 </section>
-
-                 <section id="settings-behavior" class="panel settings-card">
-                   <div class="panel-heading"><div><span class="eyebrow">Поведение</span><h2>Запуск и интерфейс</h2></div></div>
-                   <div class="settings-form">
-                     <div class="field"><span>Экран при запуске</span><CustomSelect v-model="settingsDraft.startup_view" :options="persistentViewOptions" /></div>
-                     <div class="field"><span>Последний экран</span><CustomSelect v-model="settingsDraft.last_view" :options="persistentViewOptions" /></div>
-                     <div class="field"><span>Версии по умолчанию</span><CustomSelect v-model="settingsDraft.default_version_filter" :options="versionFilterOptions" /></div>
-                     <div class="field"><span>Loader по умолчанию</span><CustomSelect v-model="settingsDraft.default_loader" :options="loaderOptions" /></div>
-                     <div class="field field--wide"><span>Аккаунт по умолчанию</span><CustomSelect v-model="settingsDraft.default_account_id" :options="accountOptions" /></div>
-                     <div class="settings-toggle-grid">
-                       <label class="workspace-check"><input v-model="settingsDraft.remember_last_view" type="checkbox" /><span><strong>Запоминать экран</strong><small>Возвращаться на последний открытый раздел</small></span></label>
-                       <label class="workspace-check"><input v-model="settingsDraft.open_last_instance" type="checkbox" /><span><strong>Открывать последний экземпляр</strong><small>Сохранять рабочий контекст выбранного профиля</small></span></label>
-                       <label class="workspace-check"><input v-model="settingsDraft.launch_after_install" type="checkbox" /><span><strong>Запускать после установки</strong><small>Автоматически открыть готовый экземпляр</small></span></label>
-                       <label class="workspace-check"><input v-model="settingsDraft.minimize_on_launch" type="checkbox" /><span><strong>Сворачивать при запуске</strong><small>Скрыть окно лаунчера после старта игры</small></span></label>
-                       <label class="workspace-check"><input v-model="settingsDraft.confirm_destructive_actions" type="checkbox" /><span><strong>Подтверждать опасные действия</strong><small>Удаление экземпляров, ресурсов, плагинов и аккаунтов</small></span></label>
-                       <label class="workspace-check"><input v-model="settingsDraft.show_activity_panel" type="checkbox" /><span><strong>Показывать панель активности</strong><small>Логи, прогресс и отмена операций</small></span></label>
-                       <label class="workspace-check"><input v-model="settingsDraft.show_toasts" type="checkbox" /><span><strong>Показывать уведомления</strong><small>Короткие сообщения о результате действий</small></span></label>
-                     </div>
-                   </div>
-                 </section>
-
-                 <section id="settings-auto-repair" class="panel settings-card">
-                   <div class="panel-heading"><div><span class="eyebrow">После краша</span><h2>Авто-починка</h2></div></div>
-                   <div class="settings-form">
-                     <p class="field-help field--wide">Если игра упала или не запустилась, лаунчер разберёт лог, отчёт о краше и папку mods и предложит способ починки. Ничего не меняется без вашего согласия.</p>
-                     <div class="settings-toggle-grid">
-                       <label class="workspace-check"><input v-model="settingsDraft.auto_repair_enabled" type="checkbox" /><span><strong>Предлагать починку после краша</strong><small>Показывать окно с проблемой и вариантами исправления</small></span></label>
-                     </div>
-                     <div class="field field--wide auto-repair-kinds">
-                       <span>Какие проблемы предлагать чинить <small>Снятые галочки — то, для чего нажали «Больше не показывать»</small></span>
-                       <div class="settings-toggle-grid">
-                         <label v-for="kind in state.settings.auto_repair_kinds || []" :key="kind.id" class="workspace-check"><input type="checkbox" :checked="!autoRepairKindMuted(kind.id)" :disabled="!settingsDraft.auto_repair_enabled" @change="toggleAutoRepairKind(kind.id, ($event.target as HTMLInputElement).checked)" /><span><strong>{{ kind.title }}</strong></span></label>
-                       </div>
-                       <button v-if="settingsDraft.auto_repair_muted.length" class="button button--small button--outline" type="button" @click="settingsDraft.auto_repair_muted = []"><Icon name="undo" :size="13" />Снова показывать всё</button>
-                     </div>
-                   </div>
-                 </section>
-
-                 <section id="settings-downloads" class="panel settings-card">
-                   <div class="panel-heading"><div><span class="eyebrow">Сеть и журналы</span><h2>Загрузки и metadata</h2></div></div>
-                   <div class="settings-form">
-                     <div class="field"><span>Обновление metadata, часы</span><NumericStepper v-model="settingsDraft.metadata_refresh_hours" :min="1" :max="168" aria-label="Обновление metadata" /></div>
-                     <div class="field"><span>Timeout загрузки, секунд</span><NumericStepper v-model="settingsDraft.download_timeout_seconds" :min="5" :max="120" aria-label="Timeout загрузки" /></div>
-                     <div class="field field--wide"><span>Источник файлов Minecraft <small>Mojang, Forge, NeoForge, Fabric, Quilt</small></span><CustomSelect v-model="settingsDraft.download_source" :options="downloadSourceOptions" /><small class="field-help">Если официальный сервер не отвечает или обрывает загрузку, файл берётся с зеркала. Подлинность всех файлов проверяется по хешам.</small></div>
-                     <div class="field"><span>Повторные попытки загрузки</span><NumericStepper v-model="settingsDraft.download_retries" :min="1" :max="6" aria-label="Повторные попытки загрузки" /></div>
-                     <div class="field"><span>Хранить логи, дней <small>0 = без лимита</small></span><NumericStepper v-model="settingsDraft.keep_logs_days" :min="0" :max="365" aria-label="Хранение логов" /></div>
-                     <div class="settings-toggle-grid">
-                       <label class="workspace-check"><input v-model="settingsDraft.auto_refresh_metadata" type="checkbox" /><span><strong>Обновлять metadata автоматически</strong><small>Проверять версии при открытии лаунчера</small></span></label>
-                     </div>
-                   </div>
-                 </section>
-
-                 <section id="settings-updates" class="panel settings-card">
-                   <div class="panel-heading"><div><span class="eyebrow">Обновления</span><h2>Самообновление</h2></div></div>
-                   <div class="settings-form">
-                     <div class="diagnostic-note diagnostic-note--stacked">
-                       <span class="status-dot" :class="{ 'status-dot--busy': updaterBusy, 'status-dot--green': !updaterBusy && updaterVersion }" />
-                       <div>
-                         <div>{{ updaterStatus }}</div>
-                         <small v-if="updaterVersion">К установке: {{ updaterVersion }}</small>
-                         <small v-if="updaterProgressTotal">{{ updaterProgressDownloaded }} / {{ updaterProgressTotal }} байт</small>
-                       </div>
-                     </div>
-                     <div class="settings-inline-actions">
-                       <button class="button button--small button--quiet" type="button" :disabled="updaterBusy" @click="void checkLauncherUpdates()"><Icon name="refresh" :size="14" />{{ updaterBusy ? 'Проверяю…' : 'Проверить обновления' }}</button>
-                       <button class="button button--small button--accent" type="button" :disabled="updaterBusy || !updaterVersion" @click="void installLauncherUpdate()"><Icon name="download" :size="14" />{{ updaterManualUrl ? 'Открыть страницу' : 'Установить' }}</button>
-                     </div>
-                     <small v-if="updaterNotes" class="field-help">{{ updaterNotes }}</small>
-                   </div>
-                 </section>
-
-                 <section id="settings-privacy" class="panel settings-card">
-                   <div class="panel-heading"><div><span class="eyebrow">Приватность</span><h2>Телеметрия</h2></div></div>
-                   <div class="settings-form">
-                     <div class="settings-toggle-grid">
-                       <label class="workspace-check"><input v-model="settingsDraft.telemetry" type="checkbox" /><span><strong>Телеметрия</strong><small>Выключено по умолчанию</small></span></label>
-                     </div>
-                     <label class="field field--wide"><span>Crash-report endpoint <small>Sentry-compatible webhook или self-hosted collector</small></span><input v-model="settingsDraft.telemetry_endpoint" :disabled="!settingsDraft.telemetry" placeholder="https://errors.example.com/api/nivora-launcher/crash" /><small class="field-help">Отправляется только при включённой телеметрии и только для падений/неуспешных завершений Minecraft.</small></label>
-                   </div>
-                 </section>
-
-                 <section id="settings-hotkeys" class="panel settings-card">
-                   <div class="panel-heading"><div><span class="eyebrow">Управление</span><h2>Горячие клавиши</h2></div></div>
-                   <div class="settings-form">
-                     <!-- Общие клавиши — тем же рекордером, что и клавиши оверлея:
-                          свободный текст молча ломал клавиши. -->
-                     <div class="hotkey-grid">
-                       <label v-for="shortcut in shortcutRows" :key="shortcut.key" class="field"><span>{{ shortcut.label }}</span><HotkeyInput v-model="settingsDraft.keyboard_shortcuts[shortcut.key]" :default-hint="`по умолчанию ${shortcut.default}`" /></label>
-                     </div>
-                     <small class="field-help">Кликните по полю и нажмите нужную комбинацию — ввести текст руками нельзя.</small>
-                   </div>
-                 </section>
-
-                 <section id="settings-backups" class="panel settings-card">
-                   <div class="panel-heading"><div><span class="eyebrow">Миры</span><h2>Резервные копии по умолчанию</h2></div></div>
-                   <div class="settings-form">
-                     <div class="settings-toggle-grid">
-                       <label class="workspace-check"><input v-model="settingsDraft.backup_schedule.enabled" type="checkbox" /><span><strong>Копировать миры по расписанию</strong><small>Расписание для всех экземпляров; в экземпляре можно переопределить</small></span></label>
-                     </div>
-                     <div class="field"><span>Интервал, часов</span><NumericStepper v-model="settingsDraft.backup_schedule.interval_hours" :min="1" :max="720" :disabled="!settingsDraft.backup_schedule.enabled" aria-label="Интервал копий" /></div>
-                     <div class="field"><span>Хранить копий</span><NumericStepper v-model="settingsDraft.backup_schedule.keep" :min="1" :max="50" :disabled="!settingsDraft.backup_schedule.enabled" aria-label="Количество копий" /></div>
-                     <div class="field field--wide"><span>Куда</span><CustomSelect v-model="settingsDraft.backup_schedule.destination" :options="backupDestinationOptions" :disabled="!settingsDraft.backup_schedule.enabled" /></div>
-                     <small class="field-help">Копируется только игровое содержимое (saves/ или world*), запущенные экземпляры пропускаются и копируются на следующем цикле. WebDAV использует облачный endpoint из раздела облака.</small>
-                   </div>
-                 </section>
-
-                 <section id="settings-presets" class="panel settings-card">
-                   <div class="panel-heading"><div><span class="eyebrow">Пресеты</span><h2>Профили настроек</h2></div></div>
-                   <div class="settings-form">
-                     <div class="settings-profiles">
-                       <div v-for="profile in settingsProfiles" :key="profile.name" class="settings-profile-row">
-                         <span><strong>{{ profile.name }}</strong><small>{{ profile.key_count }} параметров · {{ profile.updated_at ? formatDateShort(profile.updated_at) : '—' }}</small></span>
-                         <span>
-                           <button class="button button--small button--quiet" type="button" :disabled="settingsProfileBusy" @click="applySettingsProfile(profile.name)">Применить</button>
-                           <button class="button button--small button--quiet" type="button" :disabled="settingsProfileBusy" @click="overwriteSettingsProfile(profile.name)">Обновить</button>
-                           <button class="button button--small button--quiet" type="button" :disabled="settingsProfileBusy" @click="exportSettingsProfile(profile.name)">Экспорт</button>
-                           <button class="icon-button" type="button" aria-label="Удалить профиль" :disabled="settingsProfileBusy" @click="deleteSettingsProfile(profile.name)"><Icon name="trash" :size="14" /></button>
-                         </span>
-                       </div>
-                       <span v-if="!settingsProfiles.length && !settingsProfilesLoading" class="muted">Профилей пока нет — сохраните текущие настройки как пресет.</span>
-                       <span v-if="settingsProfilesLoading" class="muted">Загружаю…</span>
-                       <div class="settings-profile-actions">
-                         <input v-model="settingsProfileName" class="settings-profile-name" placeholder="Имя профиля" maxlength="48" />
-                         <button class="button button--small button--accent" type="button" :disabled="settingsProfileBusy || !settingsProfileName.trim()" @click="saveSettingsProfileAs">{{ settingsProfileBusy ? 'Работаю…' : 'Сохранить пресет' }}</button>
-                         <button class="button button--small button--outline" type="button" :disabled="settingsProfileBusy" @click="importSettingsProfile">Импорт YML</button>
-                       </div>
-                       <small class="field-help">Пресет — снимок всех настроек лаунчера, кроме папки игры и client_id: внешность, сеть, профили запуска. Экспорт отдаёт JSON-файл, импорт принимает его же.</small>
-                     </div>
-                   </div>
-                 </section>
-
-                 <section id="settings-overlay" class="panel settings-card">
-                   <div class="panel-heading"><div><span class="eyebrow">В игре</span><h2>Игровой оверлей и запись</h2></div></div>
-                   <div class="settings-form">
-                     <div class="settings-toggle-grid">
-                       <label class="workspace-check"><input v-model="settingsDraft.overlay_settings.enabled" type="checkbox" /><span><strong>Оверлей в игре</strong><small>{{ settingsDraft.overlay_settings.hotkey_overlay }} открывает оверлей поверх Minecraft</small></span></label>
-                       <label class="workspace-check"><input v-model="settingsDraft.overlay_settings.show_mods" type="checkbox" :disabled="!settingsDraft.overlay_settings.enabled" /><span><strong>Виджет модов</strong><small>Список модов экземпляра в оверлее</small></span></label>
-                       <label class="workspace-check"><input v-model="settingsDraft.overlay_settings.show_metrics" type="checkbox" :disabled="!settingsDraft.overlay_settings.enabled" /><span><strong>Виджет метрик</strong><small>CPU, RAM и диск игры</small></span></label>
-                       <label class="workspace-check"><input v-model="settingsDraft.overlay_settings.recording_audio" type="checkbox" :disabled="!settingsDraft.overlay_settings.enabled" /><span><strong>Записывать звук</strong><small>Системный звук через PulseAudio</small></span></label>
-                     </div>
-                     <div class="hotkey-grid">
-                       <label class="field"><span>Клавиша оверлея</span><HotkeyInput v-model="settingsDraft.overlay_settings.hotkey_overlay" :disabled="!settingsDraft.overlay_settings.enabled" default-hint="по умолчанию Shift+Tab" /></label>
-                       <label class="field"><span>Клавиша записи</span><HotkeyInput v-model="settingsDraft.overlay_settings.hotkey_recording" :disabled="!settingsDraft.overlay_settings.enabled" default-hint="по умолчанию F7" /></label>
-                     </div>
-                     <div class="field"><span>Кодировщик</span><CustomSelect v-model="settingsDraft.overlay_settings.recording_encoder" :options="recordingEncoderOptions" :disabled="!settingsDraft.overlay_settings.enabled" /></div>
-                     <div class="field"><span>Контейнер</span><CustomSelect v-model="settingsDraft.overlay_settings.recording_container" :options="recordingContainerOptions" :disabled="!settingsDraft.overlay_settings.enabled" /></div>
-                     <div class="field"><span>FPS записи</span><NumericStepper v-model="settingsDraft.overlay_settings.recording_fps" :min="15" :max="120" :disabled="!settingsDraft.overlay_settings.enabled" aria-label="FPS записи" /></div>
-                     <div class="field"><span>Качество <small>CRF/CQ: меньше — лучше</small></span><NumericStepper v-model="settingsDraft.overlay_settings.recording_quality" :min="15" :max="35" :disabled="!settingsDraft.overlay_settings.enabled" aria-label="Качество записи" /></div>
-                     <!-- Диагностика оверлея: пошаговый отчёт вместо «не открывается». -->
-                     <div class="overlay-selftest">
-                       <button class="button button--small button--outline" type="button" :disabled="overlaySelfTestBusy || !settingsDraft.overlay_settings.enabled" @click="() => { void runOverlaySelfTest() }"><Icon name="info" :size="14" />{{ overlaySelfTestBusy ? 'Проверяю…' : 'Диагностика оверлея' }}</button>
-                       <pre v-if="overlaySelfTestReport.length" class="selftest-report">{{ overlaySelfTestReport.map((step) => `${step.ok ? '✓' : '✗'} ${step.name} — ${step.detail}`).join('\n') }}</pre>
-                     </div>
-                     <small class="field-help">Глобальные клавиши не работают в нативных Wayland-сессиях (в пакетной сборке лаунчер работает через XWayland — там клавиши работают) и в эксклюзивном полноэкранном режиме игры: там оверлей открывается кнопкой «Оверлей» в шапке и пунктом «Игровой оверлей» в меню значка Nivora в трее.</small>
-                   </div>
-                 </section>
-
-                 <section id="settings-metrics" class="panel settings-card">
-                   <div class="panel-heading"><div><span class="eyebrow">Оверлей</span><h2>Системные метрики и виджеты</h2></div></div>
-                   <div class="settings-form">
-                     <div class="settings-toggle-grid">
-                       <label class="workspace-check"><input v-model="settingsDraft.overlay_settings.show_system_metrics" type="checkbox" :disabled="!settingsDraft.overlay_settings.enabled" /><span><strong>Системные метрики</strong><small>CPU, GPU, RAM, диски и температуры</small></span></label>
-                       <label class="workspace-check"><input v-model="settingsDraft.overlay_settings.metrics_cpu" type="checkbox" :disabled="!settingsDraft.overlay_settings.enabled || !settingsDraft.overlay_settings.show_system_metrics" /><span><strong>CPU</strong><small>Загрузка процессора</small></span></label>
-                       <label class="workspace-check"><input v-model="settingsDraft.overlay_settings.metrics_ram" type="checkbox" :disabled="!settingsDraft.overlay_settings.enabled || !settingsDraft.overlay_settings.show_system_metrics" /><span><strong>RAM</strong><small>Занятая память</small></span></label>
-                       <label class="workspace-check"><input v-model="settingsDraft.overlay_settings.metrics_gpu" type="checkbox" :disabled="!settingsDraft.overlay_settings.enabled || !settingsDraft.overlay_settings.show_system_metrics" /><span><strong>GPU</strong><small>NVIDIA через nvidia-smi</small></span></label>
-                       <label class="workspace-check"><input v-model="settingsDraft.overlay_settings.metrics_disk" type="checkbox" :disabled="!settingsDraft.overlay_settings.enabled || !settingsDraft.overlay_settings.show_system_metrics" /><span><strong>Диски</strong><small>Заполнение разделов</small></span></label>
-                       <label class="workspace-check"><input v-model="settingsDraft.overlay_settings.metrics_temperatures" type="checkbox" :disabled="!settingsDraft.overlay_settings.enabled || !settingsDraft.overlay_settings.show_system_metrics" /><span><strong>Температуры</strong><small>Linux hwmon, NVIDIA</small></span></label>
-                       <label class="workspace-check"><input v-model="settingsDraft.overlay_settings.show_clock" type="checkbox" :disabled="!settingsDraft.overlay_settings.enabled" /><span><strong>Часы</strong><small>Текущее время в оверлее</small></span></label>
-                       <label class="workspace-check"><input v-model="settingsDraft.overlay_settings.show_chat" type="checkbox" :disabled="!settingsDraft.overlay_settings.enabled" /><span><strong>Быстрый чат сервера</strong><small>Команды и хвост консоли</small></span></label>
-                       <label class="workspace-check"><input v-model="settingsDraft.overlay_settings.compact" type="checkbox" :disabled="!settingsDraft.overlay_settings.enabled" /><span><strong>Компактный режим</strong><small>Меньше отступов</small></span></label>
-                     </div>
-                     <div class="field"><span>Позиция оверлея</span><CustomSelect v-model="settingsDraft.overlay_settings.position" :options="overlayPositionOptions" :disabled="!settingsDraft.overlay_settings.enabled" /></div>
-                     <div class="field"><span>Метрики вне игры</span><CustomSelect v-model="settingsDraft.overlay_settings.system_metrics_display" :options="systemMetricsDisplayOptions" /></div>
-                     <div class="field"><span>Масштаб, %</span><NumericStepper v-model="settingsDraft.overlay_settings.scale" :min="80" :max="130" :disabled="!settingsDraft.overlay_settings.enabled" aria-label="Масштаб оверлея" /></div>
-                     <div class="field"><span>Непрозрачность, %</span><NumericStepper v-model="settingsDraft.overlay_settings.opacity" :min="60" :max="100" :disabled="!settingsDraft.overlay_settings.enabled" aria-label="Непрозрачность оверлея" /></div>
-                     <small class="field-help">Метрики вне игры: «Постоянно» показывает CPU, RAM, GPU и температуры в верхней панели лаунчера, «Только оверлей» — лишь по горячей клавише. Датчики и GPU зависят от системы: чего нет — не показываем.</small>
-                   </div>
-                 </section>
-
-                 <section id="settings-sources" class="panel settings-card">
-                   <div class="panel-heading"><div><span class="eyebrow">Интеграции</span><h2>Вход и данные версий</h2></div></div>
-                   <div class="settings-form">
-                     <div class="automatic-integration"><span class="status-dot" :class="{ 'status-dot--green': settingsDraft.login_source === 'microsoft' && state.settings.has_client_id }" /><div><strong>Microsoft OAuth</strong><span>{{ settingsDraft.login_source !== 'microsoft' ? 'Внешний вход отключён.' : state.settings.has_client_id ? 'Public client ID настроен в сборке; вручную вводить его не нужно.' : 'В этой сборке нет настроенного client ID; он должен поставляться вместе с лаунчером.' }}</span></div></div>
-                     <div class="field"><span>Источник входа</span><CustomSelect v-model="settingsDraft.login_source" :options="loginSourceOptions" /></div>
-                     <div class="field"><span>Источник данных</span><CustomSelect v-model="settingsDraft.data_source" :options="dataSourceOptions" /></div>
-                     <label class="field field--wide"><span>Login API URL <small>база device-code и token endpoint</small></span><input v-model="settingsDraft.login_api_url" placeholder="https://login.microsoftonline.com/consumers/oauth2/v2.0" /></label>
-                     <label class="field field--wide"><span>Data API URL <small>{{ settingsDraft.data_source === 'custom' ? 'совместимый version manifest' : 'официальный Mojang manifest по умолчанию' }}</small></span><input v-model="settingsDraft.data_api_url" placeholder="https://piston-meta.mojang.com/mc/game/version_manifest_v2.json" /></label>
-                     <div class="settings-toggle-grid">
-                       <label class="workspace-check"><input v-model="settingsDraft.developer_mode" type="checkbox" /><span><strong>Режим разработчика</strong><small>Разрешает нестандартные HTTPS endpoint. Не включайте на рабочем аккаунте: токены OAuth могут уйти на указанный адрес.</small></span></label>
-                     </div>
-                     <div class="security-note"><Icon name="info" :size="18" /><span>Для распространения лаунчер должен содержать собственный Azure public-client ID. Это публичная настройка сборки, а не секрет и не поле для пользователя.</span></div>
-                   </div>
-                 </section>
-
-                 <section v-if="settingsSectionViews.length" id="settings-plugins" class="panel settings-card">
-                   <div class="panel-heading"><div><span class="eyebrow">Плагины</span><h2>Настройки плагинов</h2></div></div>
-                   <div class="plugin-settings-sections">
-                     <article v-for="entry in settingsSectionViews" :key="`${entry.pluginId}:${entry.view.id}`" class="plugin-settings-section">
-                       <div class="workspace-card-heading"><div><h3>{{ entry.view.title }}</h3><span class="muted">{{ entry.pluginName }} · UI v2</span></div></div>
-                       <PluginViewRenderer
-                         :view="entry.view"
-                         @action="(payload) => runPluginAction({ pluginId: entry.pluginId, ...payload })"
-                         @config="(payload) => void savePluginConfig({ pluginId: entry.pluginId, key: payload.key, value: payload.value })"
-                         @open-link="(url) => void openPluginLink({ pluginId: entry.pluginId, url })"
-                       />
-                     </article>
-                   </div>
-                 </section>
-               </div>
-
-               <section id="settings-profiles" class="panel settings-card settings-card--wide">
-                 <div class="panel-heading">
-                   <div><span class="eyebrow">Профили запуска</span><h2>Параметры игры</h2><p>Сохраните отдельные наборы памяти, Java, графики, окна и аргументов. Активный профиль применяется к кнопке «Играть».</p></div>
-                   <button class="button button--small button--outline" type="button" @click="addLauncherProfile"><Icon name="plus" :size="14" />Новый профиль</button>
-                 </div>
-                 <div class="launcher-profile-toolbar">
-                   <div class="field"><span>Активный профиль <small>{{ activeLauncherProfile?.name || 'не выбран' }}</small></span><CustomSelect v-model="settingsDraft.active_launcher_profile_id" :options="settingsDraft.launcher_profiles.map((profile) => ({ value: profile.id, label: profile.name, meta: `${profile.memory} · ${profile.graphics_mode}` }))" /></div>
-                 </div>
-                 <div class="launcher-profile-list">
-                   <article v-for="profile in settingsDraft.launcher_profiles" :key="profile.id" class="launcher-profile-card" :class="{ 'launcher-profile-card--active': profile.id === settingsDraft.active_launcher_profile_id }">
-                     <div class="launcher-profile-heading"><div><span class="profile-active-dot" :class="{ 'profile-active-dot--on': profile.id === settingsDraft.active_launcher_profile_id }" /><strong>{{ profile.name }}</strong><small>{{ profile.id }}</small></div><div class="launcher-profile-actions"><button class="button button--small button--quiet" type="button" @click="settingsDraft.active_launcher_profile_id = profile.id">Использовать</button><button v-if="settingsDraft.launcher_profiles.length > 1" class="icon-button" type="button" aria-label="Удалить профиль запуска" @click="removeLauncherProfile(profile.id)"><Icon name="trash" :size="15" /></button></div></div>
-                     <div class="field-grid">
-                       <label class="field"><span>Название</span><input v-model="profile.name" maxlength="80" /></label>
-                       <div class="field"><span>Память JVM</span><MemoryField v-model="profile.memory" :max-kib="state.settings.memory_total_kib" /></div>
-                       <label class="field"><span>Java executable</span><input v-model="profile.java_path" placeholder="Пусто = системная Java" /></label>
-                       <div class="field"><span>Графика</span><CustomSelect v-model="profile.graphics_mode" :options="graphicsOptions" /></div>
-                       <div class="field"><span>Аккаунт</span><CustomSelect v-model="profile.account_id" :options="accountOptions" /></div>
-                       <div class="field"><span>Ширина окна</span><NumericStepper v-model="profile.window_width" :min="320" :max="8192" aria-label="Ширина окна" /></div>
-                       <div class="field"><span>Высота окна</span><NumericStepper v-model="profile.window_height" :min="240" :max="8192" aria-label="Высота окна" /></div>
-                       <label class="workspace-check"><input v-model="profile.fullscreen" type="checkbox" /><span><strong>Полноэкранный режим</strong><small>Добавляет --fullscreen к запуску.</small></span></label>
-                       <label class="field"><span>Quick Play: мир</span><input v-model="profile.quick_play_world" placeholder="Имя сохранения" /></label>
-                       <label class="field"><span>Quick Play: сервер</span><input v-model="profile.quick_play_server" placeholder="host:port" /></label>
-                       <div class="field field--wide"><span>JVM-пресет оптимизации</span>
-                         <CustomSelect :model-value="profile.jvm_preset ?? 'none'" :options="jvmPresetOptions" @update:model-value="profile.jvm_preset = $event === 'none' ? undefined : $event" />
-                       </div>
-                       <label class="field field--wide"><span>Дополнительные JVM-аргументы <small>по одному на строку</small></span><textarea :value="profile.jvm_arguments.join('\n')" rows="2" @input="setProfileArguments(profile, 'jvm_arguments', $event)" /></label>
-                       <label class="field field--wide"><span>Дополнительные game-аргументы <small>по одному на строку</small></span><textarea :value="profile.game_arguments.join('\n')" rows="2" @input="setProfileArguments(profile, 'game_arguments', $event)" /></label>
-                     </div>
-                   </article>
-                 </div>
-               </section>
-
-               <section id="settings-catalogs" class="panel settings-card settings-card--wide">
-                 <div class="panel-heading"><div><span class="eyebrow">Интеграции</span><h2>Каталоги</h2></div></div>
-                 <div class="settings-catalog-columns">
-                   <div class="settings-catalog-block">
-                     <div class="source-divider"><span>Каталоги ресурсов</span><i /></div>
-                     <div class="resource-catalog-toolbar">
-                       <div class="field"><span>Активный каталог <small>используется в поиске и установке</small></span><CustomSelect v-model="settingsDraft.active_catalog_id" :options="resourceCatalogOptions" @update:model-value="selectActiveCatalog" /></div>
-                       <button class="button button--small button--outline" type="button" @click="addResourceCatalog"><Icon name="plus" :size="14" />Добавить каталог</button>
-                     </div>
-                     <div class="resource-catalog-list">
-                       <article v-for="catalog in settingsDraft.resource_catalogs" :key="catalog.id" class="resource-catalog-row">
-                         <div class="field"><span class="field-heading-with-icon"><span>Название</span><CatalogBadge :kind="catalog.kind" compact /></span><input v-model="catalog.name" maxlength="60" /></div>
-                         <div class="field"><span>Тип</span><CustomSelect v-model="catalog.kind" :options="catalogKindOptions" /></div>
-                         <div class="field resource-catalog-url"><span>API URL <small>только HTTPS</small></span><input v-model="catalog.api_url" placeholder="https://api.modrinth.com/v2" /></div>
-                         <button class="icon-button" type="button" aria-label="Удалить каталог" @click="removeResourceCatalog(catalog.id)"><Icon name="trash" :size="15" /></button>
-                       </article>
-                     </div>
-                   </div>
-                   <div class="settings-catalog-block">
-                     <div class="source-divider"><span>Каталоги плагинов серверов</span><i /></div>
-                     <div class="resource-catalog-toolbar"><div class="field"><span>Активный каталог <small>используется в server workspace</small></span><CustomSelect v-model="settingsDraft.active_plugin_catalog_id" :options="settingsDraft.plugin_catalogs.map((catalog) => ({ value: catalog.id, label: catalog.name, meta: catalog.kind }))" /></div><button class="button button--small button--outline" type="button" @click="addPluginCatalog"><Icon name="plus" :size="14" />Добавить каталог</button></div>
-                     <div class="resource-catalog-list">
-                       <article v-for="catalog in settingsDraft.plugin_catalogs" :key="catalog.id" class="resource-catalog-row">
-                         <div class="field"><span>Название</span><input v-model="catalog.name" maxlength="80" /></div>
-                         <div class="field"><span>Тип</span><CustomSelect v-model="catalog.kind" :options="pluginCatalogKindOptions" /></div>
-                         <div class="field resource-catalog-url"><span>API URL <small>только HTTPS</small></span><input v-model="catalog.api_url" placeholder="https://api.modrinth.com/v2" /></div>
-                         <label class="workspace-check"><input v-model="catalog.enabled" type="checkbox" /><span>Вкл.</span></label>
-                         <button class="icon-button" type="button" aria-label="Удалить каталог плагинов" @click="removePluginCatalog(catalog.id)"><Icon name="trash" :size="15" /></button>
-                       </article>
-                     </div>
-                   </div>
-                 </div>
-               </section>
-
-               <div id="settings-cloud" class="settings-cloud-anchor">
-                 <CloudStoragePanel
-                   :url="settingsDraft.cloud_url"
-                   :username="settingsDraft.cloud_username"
-                   :remote-path="settingsDraft.cloud_remote_path"
-                   :include-accounts="settingsDraft.cloud_include_accounts"
-                   @saved="Object.assign(settingsDraft, $event)"
-                   @toast="showToast"
-                   @changed="refreshBootstrap"
-                 />
-               </div>
-               <section class="panel paths-panel">
-                 <div class="path-line"><span>Платформа</span><strong>{{ state.system.platform }} · {{ state.system.machine }}</strong></div>
-                 <div class="path-line"><span>Движок</span><strong>{{ state.system.python || 'подключение…' }}</strong></div>
-                 <button class="button button--quiet" type="button" @click="openGameFolder"><Icon name="folder" :size="16" />Открыть папку игры</button>
-               </section>
-             </section>
+             <SettingsPage :model="settingsPageModel" />
           </div>
         </div>
        </main>
 
- Кандидаты — языки, для которых есть
-            словарь (см. src/i18n.ts). -->
 
+              <Transition name="modal">
               <div v-if="elyLoginOpen" class="modal-scrim" role="presentation" @click.self="elyLoginOpen = false"><section class="modal-card ely-login-card" role="dialog" aria-modal="true" aria-labelledby="ely-login-title">
         <div class="panel-heading">
           <div>
-            <span class="eyebrow">ELY.BY</span>
+
             <h2 id="ely-login-title">Вход через ely.by</h2>
             <p>Аккаунт альтернативного сервиса: одиночная игра и серверы с авторизацией ely.by.</p>
           </div>
@@ -6334,11 +3884,15 @@ onBeforeUnmount(() => {
           <button class="button button--accent" type="button" :disabled="elyLoginBusy || !elyUsername.trim() || !elyPassword" @click="loginEly"><Icon name="check" :size="15" />{{ elyLoginBusy ? 'Вхожу…' : 'Войти' }}</button>
         </div>
       </section></div>
-      <div v-if="datapackDialogOpen" class="modal-scrim" role="presentation" @click.self="closeDatapackDialog"><section ref="datapackDialogElement" class="modal-card" role="dialog" tabindex="-1" aria-modal="true" aria-labelledby="datapack-dialog-title" @keydown="handleDatapackDialogKeydown"><div class="panel-heading"><div><span class="eyebrow">DATAPACK INSTALL</span><h2 id="datapack-dialog-title">Выберите мир</h2><p>{{ pendingDatapack?.title || pendingDatapack?.name }}</p></div><button class="icon-button" type="button" aria-label="Закрыть" @click="closeDatapackDialog"><Icon name="close" :size="17" /></button></div><div class="datapack-world-list"><label v-for="world in datapackWorlds" :key="world.id" class="datapack-world-option" :class="{ 'datapack-world-option--active': datapackWorldId === world.id }"><input v-model="datapackWorldId" type="radio" :value="world.id" /><span class="world-icon world-icon--empty"><img v-if="world.icon" :src="world.icon" alt="" /><Icon v-else name="instances" :size="16" /></span><span><strong>{{ world.name }}</strong><small>{{ world.id }}</small></span></label></div><div class="modal-actions"><button class="button button--quiet" type="button" @click="closeDatapackDialog">Отмена</button><button class="button button--accent" type="button" :disabled="modBusy || !datapackWorldId" @click="confirmDatapackInstall"><Icon name="download" :size="15" />Установить в мир</button></div></section></div>
+      </Transition>
+      <Transition name="modal">
+      <div v-if="datapackDialogOpen" class="modal-scrim" role="presentation" @click.self="closeDatapackDialog"><section ref="datapackDialogElement" class="modal-card" role="dialog" tabindex="-1" aria-modal="true" aria-labelledby="datapack-dialog-title" @keydown="handleDatapackDialogKeydown"><div class="panel-heading"><div><h2 id="datapack-dialog-title">Выберите мир</h2><p>{{ pendingDatapack?.title || pendingDatapack?.name }}</p></div><button class="icon-button" type="button" aria-label="Закрыть" @click="closeDatapackDialog"><Icon name="close" :size="17" /></button></div><div class="datapack-world-list"><label v-for="world in datapackWorlds" :key="world.id" class="datapack-world-option" :class="{ 'datapack-world-option--active': datapackWorldId === world.id }"><input v-model="datapackWorldId" type="radio" :value="world.id" /><span class="world-icon world-icon--empty"><img v-if="world.icon" :src="world.icon" alt="" /><Icon v-else name="instances" :size="16" /></span><span><strong>{{ world.name }}</strong><small>{{ world.id }}</small></span></label></div><div class="modal-actions"><button class="button button--quiet" type="button" @click="closeDatapackDialog">Отмена</button><button class="button button--accent" type="button" :disabled="modBusy || !datapackWorldId" @click="confirmDatapackInstall"><Icon name="download" :size="15" />Установить в мир</button></div></section></div>
+      </Transition>
+      <Transition name="modal">
               <div v-if="modpackPreviewOpen" class="modal-scrim" role="presentation" @click.self="closeModpackPreview(false)"><section class="modal-card modpack-preview-card" role="dialog" aria-modal="true" aria-labelledby="modpack-preview-title">
                 <div class="panel-heading">
                   <div>
-                    <span class="eyebrow">MODPACK PREVIEW</span>
+
                     <h2 id="modpack-preview-title">Моды в модпаке</h2>
                     <p>{{ modpackPreviewTitle }} · {{ modpackPreviewTotal }} мод(ов) будет установлено</p>
                   </div>
@@ -6359,12 +3913,13 @@ onBeforeUnmount(() => {
                   <button class="button button--accent" type="button" @click="closeModpackPreview(true)"><Icon name="download" :size="15" />Импортировать</button>
                 </div>
               </section></div>
+      </Transition>
       <Transition name="catalog-details">
         <CatalogDetailsDialog v-if="catalogDetailsOpen" :details="catalogDetails" :versions="catalogDetailsVersions" :project-type="catalogDetailsType" :catalog-name="activeCatalog?.name || 'Каталог'" :loading="catalogDetailsLoading" :error="catalogDetailsError" :can-install="catalogDetailsType === 'modpack' || Boolean(selectedInstance)" :installed="Boolean(catalogDetailsProject?.installed)" :busy="modBusy" @close="closeCatalogDetails" @install="installFromCatalogDetails" />
       </Transition>
-     <ActivityPanel :activity="activity" @close="activity.open = false" @cancel="cancelActivity" />
+     <ActivityPanel :activity="activity" @close="closeActivityManually" @cancel="cancelActivity" />
       <Teleport to="body">
-         <Transition name="toast"><div v-if="toast" :key="toastId" class="toast-message" :style="toastThemeStyle" role="status" aria-live="polite"><div class="toast-copy"><span class="status-dot" :class="toastToneClass" />{{ toast }}</div><div class="toast-progress" aria-hidden="true"><span /></div></div></Transition>
+         <Transition name="toast"><div v-if="toast" :key="toastId" class="toast-message" :class="{ 'toast-message--action': toastAction }" :style="toastThemeStyle" role="status" aria-live="polite" @mouseenter="pauseToastTimer" @mouseleave="resumeToastTimer"><div class="toast-copy"><span class="status-dot" :class="toastToneClass" /><span class="toast-text">{{ toast }}</span><button v-if="toastAction" class="toast-action" type="button" @click="runToastAction"><Icon name="arrow-right" :size="12" />{{ toastAction.label }}</button></div><div class="toast-progress" aria-hidden="true"><span :style="{ animationDuration: `${toastDuration}ms` }" /></div></div></Transition>
       </Teleport>
       <div v-if="initializing" class="boot-overlay"><BrandLogo class="boot-logo" label="Nivora Launcher" /><span>Подключаю launcher…</span></div>
       <FirstRunExperience
@@ -6394,5 +3949,23 @@ onBeforeUnmount(() => {
         @finish-tour="finishLauncherTour"
         @skip-tour="finishLauncherTour"
       />
+      <Transition name="dialog">
+      <InstanceCompareDialog
+        v-if="compareDialogOpen"
+        :instances="state.instances"
+        :initial-source="compareDialogSource"
+        @close="compareDialogOpen = false"
+        @toast="showToast"
+      />
+      </Transition>
+      <Transition name="dialog">
+      <AutotuneDialog
+        v-if="autotuneInstance"
+        :instance="autotuneInstance"
+        @close="autotuneInstance = null"
+        @applied="onAutotuneApplied"
+        @toast="showToast"
+      />
+      </Transition>
   </div>
 </template>

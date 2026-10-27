@@ -1,4 +1,3 @@
-// разбор лога упавшего экземпляра: короткий вердикт и конкретные советы.
 use regex::Regex;
 use serde_json::{json, Value};
 use std::fs;
@@ -191,7 +190,7 @@ pub(crate) fn analyze_crash(
         }));
     }
 
-    // retain не даёт менять элементы, а фильтр дописывает найденный файл.
+    // retain не даёт менять элементы, а фильтр дописывает найденный файл
     let mut kept = Vec::with_capacity(suspected_mods.len());
     for mut value in std::mem::take(&mut suspected_mods) {
         if match_mod_file(&mut value, instance_path) {
@@ -213,7 +212,7 @@ fn excerpt(lines: &[String]) -> Vec<String> {
         return Vec::new();
     }
     let tail: Vec<String> = lines.iter().rev().take(MAX_EXCERPT_LINES).rev().cloned().collect();
-    // последняя запись об ошибке часто в середине — оставляем и её контекст.
+    // последняя запись ошибки может быть в середине, поэтому сохраняем её контекст
     let stop = (lines.len() as i64 - (MAX_EXCERPT_LINES as i64) * 4).max(-1);
     let mut index = lines.len() as i64 - 1;
     while index > stop {
@@ -294,7 +293,8 @@ fn match_mod_file(mod_value: &mut Value, instance_path: Option<&Path>) -> bool {
     false
 }
 
-/// хвост последнего hs_err_pid*.log в каталоге экземпляра.
+/// хвост последнего hs_err_pid*.log в каталоге экземпляра
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn read_hs_err_report(instance_path: &Path, limit: usize) -> Vec<String> {
     let Ok(entries) = fs::read_dir(instance_path) else { return Vec::new() };
     let mut reports: Vec<(SystemTime, PathBuf)> = Vec::new();
@@ -303,7 +303,6 @@ pub(crate) fn read_hs_err_report(instance_path: &Path, limit: usize) -> Vec<Stri
         if !(name.starts_with("hs_err_pid") && name.ends_with(".log")) || !entry.path().is_file() {
             continue;
         }
-        // stat недоступен хотя бы для одного файла — как в Python, отчётов нет.
         let Ok(metadata) = entry.metadata() else { return Vec::new() };
         let Ok(modified) = metadata.modified() else { return Vec::new() };
         reports.push((modified, entry.path()));
@@ -380,7 +379,6 @@ mod tests {
         let report = analyze_crash(&log, Some(1), Some(&root), "", "", "quilt");
         assert_eq!(report["title"], json!("Конфликт модов"));
         let suspects = report["suspected_mods"].as_array().unwrap();
-        // create найден в mods/ и получил имя файла; indium убран — файла нет.
         assert_eq!(suspects.len(), 1);
         assert_eq!(suspects[0]["name"], json!("create"));
         assert_eq!(suspects[0]["file"], json!("create-fabric-0.3.0.jar"));
@@ -421,8 +419,6 @@ mod tests {
     #[test]
     fn excerpt_prefers_error_context_and_falls_back_to_tail() {
         let mut log: Vec<String> = (1..=200).map(|index| format!("line {index}")).collect();
-        // поиск идёт только по последним MAX*4 строкам: ошибку вне окна
-        // выдержка не видит — честный хвост, как в Python.
         log[49] = "java.lang.Exception: missed".into();
         let tail_only = excerpt(&log);
         assert_eq!(tail_only.len(), 24);
@@ -432,7 +428,6 @@ mod tests {
         let picked = excerpt(&log);
         assert_eq!(picked.last().unwrap(), "line 200");
         assert!(picked.contains(&"java.lang.Exception: boom".to_owned()));
-        // окно заканчивается не последней строкой — добавлен разделитель.
         assert!(picked.contains(&"…".to_owned()));
         let quiet: Vec<String> = (1..=30).map(|index| format!("ok {index}")).collect();
         let tail = excerpt(&quiet);

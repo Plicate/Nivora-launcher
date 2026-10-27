@@ -128,7 +128,7 @@ async function importRevocationData(file: { fileName: string; data: string; size
   <section class="plugin-center">
     <div class="section-intro plugin-catalog-intro">
       <div>
-        <span class="eyebrow">Каталог · плагины лаунчера</span>
+        
         <h2>Плагины лаунчера</h2>
         <p>Импортируйте архивы, проверяйте разрешения и отдельно решайте, каким издателям доверять. Списки отзыва принимаются только от явно назначенного ключа.</p>
       </div>
@@ -146,7 +146,7 @@ async function importRevocationData(file: { fileName: string; data: string; size
 
     <section v-if="props.runtimeViews.length" class="panel plugin-runtime-panel" aria-labelledby="plugin-runtime-title">
       <div class="panel-heading plugin-library-heading">
-        <div><span class="eyebrow">Изолированный QuickJS</span><h2 id="plugin-runtime-title">Интерфейс активных плагинов</h2><p>Эти страницы построены из проверенных декларативных компонентов, без HTML-кода плагина.</p></div>
+        <div><h2 id="plugin-runtime-title">Интерфейс активных плагинов</h2><p>Эти страницы построены из проверенных декларативных компонентов, без HTML-кода плагина.</p></div>
         <span class="count-badge">{{ props.runtimeViews.length }}</span>
       </div>
       <article v-for="entry in props.runtimeViews" :key="`${entry.pluginId}:${entry.view.id}`" class="plugin-runtime-view">
@@ -162,7 +162,7 @@ async function importRevocationData(file: { fileName: string; data: string; size
 
     <section v-if="installedPlugins.length" class="panel plugin-library-panel" aria-labelledby="installed-plugin-title">
       <div class="panel-heading plugin-library-heading">
-          <div><span class="eyebrow">Локальная библиотека</span><h2 id="installed-plugin-title">Установленные плагины</h2><p>API v1 остаётся статическим. API v2/v3 запускаются только после проверки доверия и выданных grants.</p></div>
+          <div><h2 id="installed-plugin-title">Установленные плагины</h2><p>API v1 остаётся статическим. API v2/v3 запускаются только после проверки доверия и выданных grants.</p></div>
         <span class="count-badge">{{ installedPlugins.length }}</span>
       </div>
       <div class="plugin-installed-list">

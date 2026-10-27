@@ -14,7 +14,8 @@ const props = withDefaults(defineProps<{
   busy?: boolean
   confirmDestructive?: boolean
   focusTab?: string
-}>(), { busy: false, confirmDestructive: true, focusTab: '' })
+  fileEditorMode?: 'builtin' | 'system' | string
+}>(), { busy: false, confirmDestructive: true, focusTab: '', fileEditorMode: 'builtin' })
 
 const emit = defineEmits<{
   launch: []
@@ -103,9 +104,9 @@ const currentVersionLabel = computed(() => currentVersion.value
   ? `${currentEdition.value === 'preview' ? 'Preview' : 'Minecraft'} ${currentVersion.value}`
   : 'Версия ещё не выбрана')
 const gameRunning = computed(() => props.instance.running || Boolean(metrics.value?.running))
-/** Windows играет ОФИЦИАЛЬНЫЙ Minecraft for Windows из Microsoft Store. */
+/** официальная версия Bedrock для Windows из Microsoft Store */
 const officialWindows = computed(() => status.value?.platform === 'windows-official' || status.value?.official === true)
-/** ОС без официального Bedrock (macOS): честно объясняем, а не «поломанная среда». */
+/** на macOS официальный Bedrock недоступен, поэтому показываем причину */
 const unsupportedPlatform = computed(() => status.value?.platform === 'unsupported')
 
 watch([versionEdition, versions], () => {
@@ -190,8 +191,7 @@ async function watchSetupJob(edition: string, version: string, resumed = false) 
       status = await bridge.bedrockSetupStatus(props.instance.name)
       pollFailures = 0
     } catch (error) {
-      // разовый сбой опроса не должен бросать наблюдение: установка живёт
-      // в бэкенде и продолжается без нас. Только серия неудач — повод сдаться.
+      // один сбой опроса не прерывает фоновую установку
       pollFailures += 1
       if (pollFailures < 5) continue
       notice.value = `Не удалось получить статус установки: ${error instanceof Error ? error.message : String(error)}`
@@ -243,7 +243,6 @@ async function resumeSetupJob() {
       notice.value = `Прошлая установка не завершилась: ${status.error}`
     }
   } catch {
-    // джобы могло ещё не быть — молча
   }
 }
 
@@ -255,7 +254,6 @@ async function installVersion() {
   notice.value = `Подготавливаю Minecraft ${edition === 'preview' ? 'Preview ' : ''}${version}…`
   emit('activity', { title: 'Установка Bedrock', detail: notice.value })
   try {
-    // установка идёт в фоновой нити бэкенда: раньше весь лаунчер на это
     await bridge.bedrockSetupVersion(props.instance.name, edition, version)
     await watchSetupJob(edition, version)
   } catch (error) {
@@ -278,8 +276,8 @@ function finishSetupResult(
     return
   }
   if (result.failed || !result.installed) {
-    // bedrockOnLinux может выйти с кодом 0 после собственной «error»:
-    // показываем настоящую причину, а не молчаливое «ничего не скачалось»
+    // bedrockOnLinux может выйти с кодом 0 после собственной "error":
+    // показываем настоящую причину, а не молчаливое "ничего не скачалось"
     const hint = result.error_hint || lastLogLine || ''
     notice.value = `Версия не установлена.${hint ? ` Причина: ${hint}` : ''} Полный ход установки — ниже.`
     return
@@ -300,14 +298,6 @@ async function cancelVersionInstall() {
   }
 }
 
-function metricPoints(key: 'cpu_percent' | 'ram_bytes' | 'storage_bytes') {
-  const values = metricHistory.value.map((item) => Number(item[key] || 0))
-  if (!values.length) return '0,40 100,40'
-  const min = Math.min(...values)
-  const max = Math.max(...values)
-  const span = Math.max(1, max - min)
-  return values.map((value, index) => `${(index / Math.max(1, values.length - 1)) * 100},${38 - ((value - min) / span) * 32}`).join(' ')
-}
 
 function formatBytes(value: number) {
   if (value >= 1024 ** 3) return `${(value / 1024 ** 3).toFixed(1)} GiB`
@@ -357,6 +347,13 @@ async function openWorkspaceFile(file: InstanceFile) {
   ))) return
   const path = joinFilePath(file.name)
   try {
+    if (file.editable && props.fileEditorMode === 'system') {
+      const root = props.instance.path
+      const separator = root.includes('\\') ? '\\' : '/'
+      const fullPath = `${root.replace(/[\\/]+$/, '')}${separator}${path.replace(/^[\\/]+/, '').replace(/[\\/]/g, separator)}`
+      await bridge.fsOpenFile(fullPath)
+      return
+    }
     if (file.editable) {
       const result = await bridge.instanceFileRead(props.instance.name, path)
       editorPath.value = path
@@ -471,7 +468,7 @@ async function connectMicrosoftStore() {
   notice.value = 'Откроется отдельное окно Microsoft. Войдите в аккаунт, которому принадлежит Minecraft.'
   try {
     // вход идёт в фоновой нити: браузерная авторизация занимает минуты,
-    // и раньше это время намертво блокировало весь лаунчер.
+    // и раньше это время намертво блокировало весь лаунчер
     await bridge.bedrockStoreLogin(props.instance.name)
     for (;;) {
       await new Promise((resolve) => window.setTimeout(resolve, 1500))
@@ -502,7 +499,7 @@ async function connectMicrosoftStore() {
         }
         notice.value = 'Аккаунт Microsoft подключён. Лицензия будет проверена при запуске игры.'
         void refreshAccountStatus()
-        // если версию не удалось поставить из-за входа — ставим её сами
+        // после входа продолжаем ожидающую установку версии
         if (pendingInstallAfterLogin.value && versionSelection.value && versionSelection.value !== currentVersion.value) {
           pendingInstallAfterLogin.value = false
           void installVersion()
@@ -597,7 +594,6 @@ function formatSize(bytes: number) {
 
 watch(() => props.instance.name, () => void ensureLoaded())
 let metricsTimer: number | undefined
-// ── Консоль Bedrock: живой лог сессии (тот же SessionLog, что и у Java) ──
 const consoleLines = ref<string[]>([])
 const consoleRunning = ref(false)
 const consoleBusy = ref(false)
@@ -612,7 +608,7 @@ async function pollConsole() {
     consoleLines.value = result.lines.slice(-300)
     consoleRunning.value = result.running
   } catch {
-    // журнал сессии ещё не создан — покажем пустое состояние
+    // журнал появится после создания сессии
   }
 }
 
@@ -648,7 +644,7 @@ async function openLogArchive(id: string) {
   }
 }
 
-// ── Скриншоты Bedrock: com.mojang/minecraftScreenshots (камера/Win+G) ──
+// скриншоты Bedrock
 const screenshots = ref<BedrockScreenshotItem[]>([])
 const screenshotsLoading = ref(false)
 const screenshotPreview = ref<{ name: string; source: string } | null>(null)
@@ -685,7 +681,7 @@ async function openScreenshot(item: BedrockScreenshotItem) {
   }
 }
 
-// ── Снапшоты контента Bedrock: паки ресурсов/аддоны/миры (com.mojang) ──
+// резервные копии контента Bedrock
 const snapshotCategories: Array<{ id: string; label: string }> = [
   { id: 'resourcepacks', label: 'Паки ресурсов' },
   { id: 'addons', label: 'Аддоны' },
@@ -794,8 +790,7 @@ defineExpose({ ensureLoaded, applyPendingVersion, refreshAccountStatus })
   <div class="bedrock-workspace">
     <div class="workspace-header">
       <div>
-        <span class="eyebrow">MINECRAFT BEDROCK</span>
-        <h2>{{ instance.display_name || instance.name }}</h2>
+        <!-- имя профиля уже показано в заголовке страницы -->
         <p><span class="tag">{{ currentVersionLabel }}</span> {{ status?.message || 'Проверяю готовность игры…' }}</p>
       </div>
       <div class="workspace-header-actions">
@@ -826,7 +821,6 @@ defineExpose({ ensureLoaded, applyPendingVersion, refreshAccountStatus })
           <section class="workspace-launch-banner">
             <div class="workspace-launch-copy">
               <span class="workspace-instance-status" :class="{ 'workspace-instance-status--running': gameRunning }"><i />{{ gameRunning ? 'Игра запущена' : status?.supported ? 'Готов к запуску' : 'Среда запуска проверяется' }}</span>
-              <h3>{{ instance.display_name || instance.name }}</h3>
               <p>{{ currentVersionLabel }} · Bedrock Edition · {{ officialWindows ? 'официальная версия из Microsoft Store' : `профиль ${instance.bedrock_profile || instance.name}` }}</p>
               <p class="bedrock-online-status">
                 <span :class="{ 'bedrock-online-status--on': status?.store_signed_in }"><i />{{ status?.store_signed_in ? (officialWindows ? 'Онлайн-режим: вход в аккаунт Microsoft/Xbox выполняется в игре' : `Онлайн-режим: ${status.gamertag || 'аккаунт Store подключён'}`) : officialWindows ? 'Онлайн-режим: войдите в аккаунт Microsoft/Xbox при первом запуске игры' : 'Онлайн-режим выключен: нужен отдельный вход в Microsoft Store' }}</span>
@@ -845,12 +839,6 @@ defineExpose({ ensureLoaded, applyPendingVersion, refreshAccountStatus })
             <span v-if="unsupportedPlatform">Официальный Minecraft Bedrock не выпускается для этой ОС: он доступен в Windows (Microsoft Store) и в Linux-сборке Nivora.</span>
             <span v-else>Среда запуска недоступна. Проверьте системные требования и зависимости приложения; игровые файлы загружаются из Microsoft Store под вашей лицензией.</span>
             <a v-if="!unsupportedPlatform" href="https://github.com/Wyze3306/BedrockOnLinux" target="_blank" rel="noreferrer">Проверить системные требования</a>
-          </div>
-
-          <div class="workspace-metric-grid">
-            <article class="workspace-metric workspace-metric--cpu"><div><span><Icon name="activity" :size="14" />CPU</span><strong>{{ (metrics?.cpu_percent || 0).toFixed(1) }}%</strong></div><svg viewBox="0 0 100 42" preserveAspectRatio="none" aria-label="График CPU"><polyline :points="metricPoints('cpu_percent')" /></svg><small>{{ metrics?.running ? 'Текущая загрузка игры' : 'Последний доступный замер' }}</small></article>
-            <article class="workspace-metric workspace-metric--ram"><div><span><Icon name="memory" :size="14" />RAM</span><strong>{{ formatBytes(metrics?.ram_bytes || 0) }}</strong></div><svg viewBox="0 0 100 42" preserveAspectRatio="none" aria-label="График RAM"><polyline :points="metricPoints('ram_bytes')" /></svg><small>Память игры и дочерних процессов</small></article>
-            <article class="workspace-metric workspace-metric--storage"><div><span><Icon name="hard-drive" :size="14" />Диск</span><strong>{{ formatBytes(metrics?.storage_bytes || 0) }}</strong></div><svg viewBox="0 0 100 42" preserveAspectRatio="none" aria-label="График размера профиля"><polyline :points="metricPoints('storage_bytes')" /></svg><small>Размер профиля и игровых файлов</small></article>
           </div>
 
           <div class="workspace-columns">
@@ -1121,7 +1109,6 @@ defineExpose({ ensureLoaded, applyPendingVersion, refreshAccountStatus })
 .bedrock-content-empty { padding: 22px 4px 10px; color: var(--muted); font-size: 11px; }
 .bedrock-content-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 4px; border-bottom: 1px solid var(--line); }
 .bedrock-row-actions { display: flex; align-items: center; gap: 7px; flex: 0 0 auto; }
-/* Консоль Bedrock: тот же вид, что у живого лога Java-воркспейса. */
 .console-output { display: grid; gap: 2px; max-height: 260px; overflow: auto; margin: 0; padding: 12px 14px; border: 1px solid var(--line); border-radius: var(--radius-control, 10px); background: color-mix(in srgb, var(--bg) 82%, black); color: var(--text); font-family: var(--font-mono); font-size: 11px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; }
 .console-output--archive { max-height: 320px; }
 .bedrock-archives { display: grid; gap: 8px; margin-top: 12px; }
@@ -1132,7 +1119,6 @@ defineExpose({ ensureLoaded, applyPendingVersion, refreshAccountStatus })
 .bedrock-archive-list span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); }
 .bedrock-archive-list small { color: var(--muted); }
 .bedrock-archive-viewer { margin-top: 8px; }
-/* Скриншоты Bedrock */
 .bedrock-screenshot-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
 .bedrock-screenshot-tile { display: grid; gap: 4px; padding: 12px 10px; border: 1px solid var(--line); border-radius: var(--radius-card, 7px); background: var(--panel-soft); color: var(--text); cursor: pointer; text-align: left; }
 .bedrock-screenshot-tile:hover { border-color: var(--accent); }

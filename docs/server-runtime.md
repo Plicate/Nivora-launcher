@@ -58,7 +58,7 @@ Browser preview не запускает Java: вместо имитации ус
 
 ---
 
-<!-- English version / Английская версия -->
+<!-- english version / Английская версия -->
 
 # Server main screen, launch and metrics
 
@@ -116,4 +116,4 @@ This is the **observed TCP payload of the game port**, not all network traffic o
 - when reading FDs is forbidden or the needed kernel counters are missing, the reason and `—` are shown, not a fake zero;
 - on Windows/macOS this source is not implemented: unavailability is shown there too, never whole-computer traffic.
 
-Checks include a real local TCP connection with a known transferred byte count, kernel reply parsing, child-process ownership, rate computation, connection close, and real test subprocesses with an early error, a clean stop and a restart. A full Minecraft JAR and a specific desktop build are verified separately on the target machine.
+

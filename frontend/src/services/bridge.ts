@@ -1,12 +1,15 @@
 import { convertFileSrc, invoke } from '@tauri-apps/api/core'
 import type { FileBrowserListing } from './fileBrowser'
+import { demoModpacksForCatalog, searchDemoModpacks } from './modpackMockCatalog'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
+import { LAUNCHER_VERSION } from '../version'
 import type {
   AccountInfo,
   AutoRepairFix,
   AutoRepairReport,
   AutoRepairResult,
   AnimationSettings,
+  AutotuneMode,
   AppState,
   BedrockContentItem,
   BedrockScreenshotItem,
@@ -52,6 +55,7 @@ import type {
   ServerDetails,
   ServerFile,
   ServerMetrics,
+  InstanceIconBlock,
   SettingsProfile,
   WorldBackup,
   BackupSchedule,
@@ -59,6 +63,16 @@ import type {
   ModDependencyGraph,
   CrashReport,
   ResourceUpdate,
+  InstanceComparison,
+  InstancePortResult,
+  PortChangeItem,
+  AutotuneResult,
+  PluginVerifyResult,
+  PluginKeypairResult,
+  InstancePin,
+  InstanceAsset,
+  SafeUpdateResult,
+  SafeUpdateSession,
   GitHubPluginDetails,
   GitHubPluginRepository,
   GitHubThemeRepository,
@@ -120,6 +134,8 @@ const fallbackSettings: SettingsInfo = {
   minimize_on_launch: false,
   language: null as string | null,
   font_family: 'system',
+  file_explorer: 'builtin',
+  file_editor: 'builtin',
   keep_logs_days: 14,
   telemetry: false,
   telemetry_endpoint: '',
@@ -132,7 +148,7 @@ const fallbackSettings: SettingsInfo = {
   has_client_id: false,
   developer_mode: false,
   theme: 'dark',
-  active_theme_id: 'midnight-signal',
+  active_theme_id: 'nivora-dark',
   wallpaper_path: '',
   wallpaper_data: '',
   wallpaper_blur: 12,
@@ -187,10 +203,10 @@ const fallbackSettings: SettingsInfo = {
     page_layouts: { instances: 'balanced', 'instance-settings': 'balanced', accounts: 'balanced', mods: 'wide', modpacks: 'wide', plugins: 'wide', themes: 'wide', settings: 'balanced' },
   widget_visibility: { 'instances.workspace': true, 'accounts.status': true, 'mods.context': true },
   color_tokens: {
-    accent: '#8b653f', accent_strong: '#c5a274', background: '#191a17', panel: '#20221e', panel_raised: '#282a25', panel_soft: '#30322c',
-    text: '#e9e8de', muted: '#a2a395', quiet: '#c7c7bb', border: '#77796b', danger: '#d58a7d', success: '#9bac78', warning: '#d2ad72', banner_shade: '#191a17',
+    accent: '#2f7ff6', accent_strong: '#6aa5ff', background: '#121417', panel: '#1a1d22', panel_raised: '#21252c', panel_soft: '#262b33',
+    text: '#f0f3f7', muted: '#8a919e', quiet: '#b9c0cd', border: '#5f6b7d', danger: '#e5484d', success: '#46a758', warning: '#e0a63c', banner_shade: '#121417',
   },
-  instance_groups: [],
+  instance_groups: ['Ванилла', 'С друзьями', 'Модпаки', 'Серверы'],
   pinned_instance_groups: [],
   login_source: 'microsoft',
   login_api_url: 'https://login.microsoftonline.com/consumers/oauth2/v2.0',
@@ -219,8 +235,119 @@ const fallbackSettings: SettingsInfo = {
 }
 
 const fallbackState: AppState = {
-  instances: [],
-  accounts: [],
+  instances: [
+    {
+      name: 'vanilla-1-21',
+      display_name: 'Vanilla 1.21.4',
+      description: 'Чистая игра без модов.',
+      group: 'Ванилла',
+      icon: '',
+      banner: '',
+      played_seconds: 82_460,
+      version_id: '1.21.4',
+      minecraft_version: '1.21.4',
+      loader: 'vanilla',
+      path: '/home/player/.nivora/instances/vanilla-1-21',
+      kind: 'client',
+      game_edition: 'java',
+      tags: ['без модов'],
+    },
+    {
+      name: 'fabric-smp',
+      display_name: 'Fabric SMP',
+      description: 'Сборка для игры с друзьями: оптимизация, голосовой чат, миникарта.',
+      group: 'С друзьями',
+      icon: '',
+      banner: '',
+      played_seconds: 412_300,
+      version_id: 'fabric-loader-0.16.9-1.21.1',
+      minecraft_version: '1.21.1',
+      loader: 'fabric',
+      loader_version: '0.16.9',
+      path: '/home/player/.nivora/instances/fabric-smp',
+      kind: 'client',
+      game_edition: 'java',
+      running: true,
+      tags: ['моды', 'онлайн'],
+    },
+    {
+      name: 'create-above-beyond',
+      display_name: 'Create: Above and Beyond',
+      description: 'Модпак про автоматизацию и механизмы Create.',
+      group: 'Модпаки',
+      icon: '',
+      banner: '',
+      played_seconds: 1_204_800,
+      version_id: 'forge-47.3.0',
+      minecraft_version: '1.20.1',
+      loader: 'forge',
+      loader_version: '47.3.0',
+      path: '/home/player/.nivora/instances/create-above-beyond',
+      kind: 'client',
+      game_edition: 'java',
+      tags: ['модпак', 'create'],
+    },
+    {
+      name: 'paper-server',
+      display_name: 'Домашний сервер',
+      description: 'Paper 1.21.1, выживание для своих.',
+      group: 'Серверы',
+      icon: '',
+      banner: '',
+      played_seconds: 0,
+      version_id: 'paper-1.21.1',
+      minecraft_version: '1.21.1',
+      loader: 'vanilla',
+      path: '/home/player/.nivora/servers/paper-server',
+      kind: 'server',
+      game_edition: 'java',
+      server_core: 'paper',
+      server_core_version: '1.21.1',
+      server_port: 25565,
+      server_eula: true,
+      tags: ['выживание'],
+    },
+    {
+      name: 'bedrock-windows',
+      display_name: 'Bedrock 1.21',
+      description: 'Профиль Bedrock Edition.',
+      group: '',
+      icon: '',
+      banner: '',
+      played_seconds: 36_000,
+      version_id: 'bedrock-1.21.44',
+      minecraft_version: '1.21.44',
+      loader: 'vanilla',
+      path: '/home/player/.nivora/instances/bedrock-windows',
+      kind: 'client',
+      game_edition: 'bedrock',
+      tags: [],
+    },
+  ],
+  accounts: [
+    {
+      account_id: 'ms-main',
+      kind: 'microsoft',
+      username: 'Steve_Player',
+      alias: 'Основной',
+      display_name: 'Steve_Player',
+      expires_at: Date.now() / 1000 + 86_400,
+      limit_seconds: 0,
+      used_seconds: 0,
+      is_default: true,
+    },
+    {
+      account_id: 'offline-debug',
+      kind: 'offline',
+      username: 'DevTester',
+      alias: '',
+      display_name: 'DevTester',
+      expires_at: 0,
+      limit_seconds: 0,
+      used_seconds: 0,
+      is_default: false,
+    },
+  ],
   plugins: [],
   server_cores: [
     { id: 'paper', name: 'Paper', family: 'PaperMC', description: 'Быстрое стабильное ядро для Paper API.' },
@@ -265,15 +392,13 @@ export function inTauri(): boolean {
   return typeof window !== 'undefined' && Boolean(window.__TAURI_INTERNALS__)
 }
 
-export const FRONTEND_BUILD_STAMP = 'r40'
+export const FRONTEND_BUILD_STAMP = 'r42'
 
 function requestTimeout(operation: string): number | undefined {
-  // bootstrap на холодном старте сканирует каталоги экземпляров: на
   if (operation === 'bootstrap') return 30000
   if (operation === 'bedrock_runtime_status') return 60000
   if (operation === 'bedrock_versions') return 120000
-  // установка Bedrock и вход в Microsoft идут в фоновой нити бэкенда:
-  // сами операции стартуют мгновенно, состояние опрашивается отдельно
+  // операция запускается в фоне, состояние проверяется отдельно
   if (operation === 'bedrock_setup_version' || operation === 'bedrock_store_login') return 30000
   if (operation === 'bedrock_setup_status' || operation === 'bedrock_store_login_status' || operation === 'bedrock_setup_cancel') return 15000
   if (operation === 'bedrock_create_instance') return 120000
@@ -286,8 +411,7 @@ function requestTimeout(operation: string): number | undefined {
   if (operation === 'external_instances_scan') return 30000
   if (operation === 'external_instance_import') return 2 * 60 * 1000
   if (operation === 'server_plugin_search' || operation === 'server_plugin_details' || operation === 'server_plugin_updates' || operation === 'server_core_versions' || operation === 'mods_details' || operation === 'mods_check_updates') return 30000
-  // catalog search must always resolve: the backend worker is serial, and without a
-  // deadline a stuck request would leave the search spinner spinning forever.
+  // без срока ожидания зависший поиск оставит индикатор загрузки навсегда
   if (operation === 'mods_search') return 60000
   if (operation === 'login_microsoft') return 15 * 60 * 1000
   if (operation === 'instance_file_upload') return 30000
@@ -299,11 +423,20 @@ function requestTimeout(operation: string): number | undefined {
   if (operation === 'world_import_finish') return 20 * 60 * 1000
   if (operation === 'mod_audit_prepare') return 5 * 60 * 1000
   if (operation === 'mod_audit_accept') return 30 * 60 * 1000
-  // ярлыки и экспорт списка модов: локальные операции, но экспорт читает
-  // манифесты jar-файлов через nivora-turbo — на больших наборах не мгновенно.
+  // экспорт читает манифесты JAR и может занять время на больших сборках
   if (operation === 'instance_shortcut_status' || operation === 'instance_shortcut_create' || operation === 'instance_shortcut_remove') return 15000
   if (operation === 'shortcut_take_launch_request') return 10000
   if (operation === 'instance_mod_list_export') return 60000
+  // сравнение и автонастройка читают манифесты JAR двух каталогов
+  if (operation === 'instance_compare') return 120000
+  if (operation === 'instance_autotune') return 120000
+  // упаковка и проверка подписи могут занять время на больших проектах
+  if (operation === 'plugin_dev_pack') return 120000
+  if (operation === 'plugin_dev_verify') return 60000
+  if (operation === 'instance_port_changes') return 5 * 60 * 1000
+  if (operation === 'instance_pins_get' || operation === 'instance_pin_toggle') return 15000
+  if (operation === 'mods_update_all_safe' || operation === 'mods_update_rollback') return 15 * 60 * 1000
+  if (operation === 'mods_update_sessions') return 15000
   return undefined
 }
 
@@ -417,9 +550,275 @@ function fallbackServerStatus(name: string, running: boolean): ServerStatus {
   return { running, pid: 0, started_at: running ? now : 0, players: 0, max_players: config.max_players, tps: metrics.tps, uptime_seconds: 0, metrics, last_metrics: {} }
 }
 
+// данные тем для предпросмотра
+const mockThemes: LauncherThemePreset[] = []
+
+// текстуры граней для предпросмотра собираются в blockIcon.ts
+const mockBlockPalette: Array<{ id: string; name: string; top: string; side: string }> = [
+  { id: 'grass_block', name: 'Трава', top: '#5da53f', side: '#7a5433' },
+  { id: 'stone', name: 'Камень', top: '#7d7d7d', side: '#757575' },
+  { id: 'dirt', name: 'Земля', top: '#8a6042', side: '#8a6042' },
+  { id: 'cobblestone', name: 'Булыжник', top: '#6f6f6f', side: '#686868' },
+  { id: 'oak_planks', name: 'Дубовые доски', top: '#b08a4f', side: '#a37f47' },
+  { id: 'sand', name: 'Песок', top: '#e3d8a4', side: '#ddd1a0' },
+  { id: 'glass', name: 'Стекло', top: '#c4e4ec', side: '#b7dbe4' },
+  { id: 'iron_block', name: 'Железный блок', top: '#d8d8d8', side: '#c9c9c9' },
+  { id: 'gold_block', name: 'Золотой блок', top: '#f5d43c', side: '#ecc431' },
+  { id: 'diamond_block', name: 'Алмазный блок', top: '#62d9d6', side: '#54c9c6' },
+  { id: 'obsidian', name: 'Обсидиан', top: '#241a33', side: '#1d1428' },
+  { id: 'netherrack', name: 'Адский камень', top: '#6e3230', side: '#652d2b' },
+  { id: 'glowstone', name: 'Светокамень', top: '#d8a44a', side: '#c8963f' },
+  { id: 'tnt', name: 'ТНТ', top: '#c43324', side: '#b02d20' },
+  { id: 'bookshelf', name: 'Книжная полка', top: '#a97f49', side: '#8a683c' },
+  { id: 'crafting_table', name: 'Верстак', top: '#9a7443', side: '#7d5f36' },
+]
+
+let mockBlockCache: InstanceIconBlock[] | null = null
+
+function mockFlatTexture(color: string, seed: number): string {
+  const canvas = document.createElement('canvas')
+  canvas.width = 16
+  canvas.height = 16
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return ''
+  ctx.fillStyle = color
+  ctx.fillRect(0, 0, 16, 16)
+  let state = seed * 2654435761
+  for (let dot = 0; dot < 60; dot += 1) {
+    state = (state * 1103515245 + 12345) % 2147483648
+    const x = state % 16
+    state = (state * 1103515245 + 12345) % 2147483648
+    const y = state % 16
+    state = (state * 1103515245 + 12345) % 2147483648
+    ctx.fillStyle = state % 2 ? 'rgba(255, 255, 255, .08)' : 'rgba(0, 0, 0, .1)'
+    ctx.fillRect(x, y, 1, 1)
+  }
+  return canvas.toDataURL('image/png')
+}
+
+function mockIsoBlocks(): InstanceIconBlock[] {
+  if (mockBlockCache) return mockBlockCache
+  mockBlockCache = mockBlockPalette.map((block, index) => {
+    const top = mockFlatTexture(block.top, index * 3 + 3)
+    const side = mockFlatTexture(block.side, index * 5 + 5)
+    const entry: InstanceIconBlock = { id: block.id, name: block.name, data_url: side, top_data_url: top }
+    if (top !== side) entry.side_data_url = side
+    return entry
+  })
+  return mockBlockCache
+}
+
+// виртуальная файловая система для предпросмотра
+const MOCK_FS_ROOT = '/home/player'
+function encodeBytesBase64(bytes: Uint8Array): string {
+  let binary = ''
+  for (let offset = 0; offset < bytes.length; offset += 0x8000) binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000))
+  return window.btoa(binary)
+}
+
+const mockFsDirs = [
+  MOCK_FS_ROOT,
+  `${MOCK_FS_ROOT}/.nivora`,
+  `${MOCK_FS_ROOT}/.nivora/instances`,
+  `${MOCK_FS_ROOT}/.nivora/instances/vanilla-1-21`,
+  `${MOCK_FS_ROOT}/.nivora/instances/vanilla-1-21/mods`,
+  `${MOCK_FS_ROOT}/.nivora/instances/vanilla-1-21/config`,
+  `${MOCK_FS_ROOT}/.nivora/instances/vanilla-1-21/saves`,
+  `${MOCK_FS_ROOT}/.local/share/nivora-launcher/game`,
+  `${MOCK_FS_ROOT}/.local/share/nivora-launcher/game/instances`,
+  `${MOCK_FS_ROOT}/.local/share/nivora-launcher/game/instances/vanilla-1-21`,
+  `${MOCK_FS_ROOT}/.local/share/nivora-launcher/game/instances/vanilla-1-21/mods`,
+  `${MOCK_FS_ROOT}/.local/share/nivora-launcher/game/instances/vanilla-1-21/saves`,
+  `${MOCK_FS_ROOT}/.local/share/nivora-launcher/game/instances/vanilla-1-21/exports`,
+  `${MOCK_FS_ROOT}/.local/share/nivora-launcher/game/backups`,
+]
+const mockFsData = new Map<string, string>([
+  [`${MOCK_FS_ROOT}/.nivora/instances/vanilla-1-21/mods/sodium.jar`, 'PK stub jar sodium'],
+  [`${MOCK_FS_ROOT}/.nivora/instances/vanilla-1-21/mods/iris.jar`, 'PK stub jar iris'],
+  [`${MOCK_FS_ROOT}/.nivora/instances/vanilla-1-21/options.txt`, 'music:0.5\nrenderDistance:12\n'],
+  [`${MOCK_FS_ROOT}/.local/share/nivora-launcher/game/instances/vanilla-1-21/mods/sodium.jar`, 'PK stub jar sodium'],
+  [`${MOCK_FS_ROOT}/.local/share/nivora-launcher/game/instances/vanilla-1-21/mods/iris.jar`, 'PK stub jar iris'],
+  [`${MOCK_FS_ROOT}/.local/share/nivora-launcher/game/instances/vanilla-1-21/mods/fabric-api.jar`, 'PK stub jar fabric-api'],
+  [`${MOCK_FS_ROOT}/.local/share/nivora-launcher/game/instances/vanilla-1-21/mods/old-tweaks.jar.disabled`, 'PK stub jar old-tweaks'],
+  [`${MOCK_FS_ROOT}/.local/share/nivora-launcher/game/instances/vanilla-1-21/exports/mods.md`, '# Mods: vanilla-1-21\n- Sodium 0.6.0\n- Iris 1.8.0\n'],
+])
+
+export const mockFileSystemAvailable = typeof window !== 'undefined' && !inTauri()
+
+function mockFsPath(path: string): string {
+  const parts: string[] = []
+  for (const part of path.replace(/\\/g, '/').split('/')) {
+    if (!part || part === '.') continue
+    if (part === '..') parts.pop()
+    else parts.push(part)
+  }
+  return `/${parts.join('/')}`
+}
+
+function mockFsExists(path: string): boolean {
+  const normalized = mockFsPath(path)
+  return mockFsDirs.includes(normalized) || mockFsData.has(normalized)
+}
+
+function mockFsBrowse(path?: string): FileBrowserListing {
+  const current = mockFsPath(path || MOCK_FS_ROOT)
+  const prefix = `${current}/`
+  const entries = new Map<string, { name: string; kind: 'dir' | 'file'; size: number | null; modified_at: number | null }>()
+  for (const dir of mockFsDirs) {
+    if (!dir.startsWith(prefix)) continue
+    const segment = dir.slice(prefix.length).split('/')[0]
+    if (segment) entries.set(segment, { name: segment, kind: 'dir', size: null, modified_at: Math.floor(Date.now() / 1000) - 86400 })
+  }
+  for (const [file, data] of mockFsData) {
+    if (!file.startsWith(prefix)) continue
+    const rest = file.slice(prefix.length)
+    if (rest.includes('/')) continue
+    entries.set(rest, { name: rest, kind: 'file', size: new TextEncoder().encode(data).length, modified_at: Math.floor(Date.now() / 1000) - 3600 })
+  }
+  const parent = current === MOCK_FS_ROOT ? null : current.replace(/\/[^/]*$/, '') || MOCK_FS_ROOT
+  return {
+    path: current,
+    parent,
+    root: { label: 'Дом', path: MOCK_FS_ROOT },
+    roots: [{ label: 'Дом', path: MOCK_FS_ROOT }],
+    entries: [...entries.values()].sort((a, b) => (a.kind === b.kind ? a.name.localeCompare(b.name) : a.kind === 'dir' ? -1 : 1)),
+  }
+}
+
+// данные каталога для предпросмотра
+const MOCK_MODRINTH_HITS: ModResult[] = [
+  { project_id: 'cloth-config', title: 'Cloth Config API', author: 'shedaniel', description: 'Configuration Library for Minecraft Mods', downloads: 183927705, follows: 1264, categories: ['fabric', 'forge', 'neoforge', 'library'], display_categories: ['library'], client_side: 'required', server_side: 'required', project_type: 'mod' },
+  { project_id: 'falling-leaves', title: 'Falling Leaves', author: 'Fourmisain', description: 'Adds a neat little particle effect to leaf blocks', downloads: 28110533, follows: 5892, categories: ['decoration', 'fabric'], display_categories: ['decoration'], client_side: 'required', server_side: 'unsupported', project_type: 'mod' },
+  { project_id: 'sodium', title: 'Sodium', author: 'jellysquid3_', description: 'Modern rendering engine with great performance.', downloads: 62103451, follows: 12480, categories: ['fabric', 'optimization'], display_categories: ['optimization'], client_side: 'required', server_side: 'optional', project_type: 'mod' },
+  { project_id: 'lithium', title: 'Lithium', author: 'jellysquid3_', description: 'No-frills generalized optimization patches.', downloads: 15400877, follows: 8031, categories: ['fabric', 'optimization'], display_categories: ['optimization'], client_side: 'optional', server_side: 'required', project_type: 'mod' },
+  { project_id: 'fabulously-optimized', title: 'Fabulously Optimized', author: 'robotkoer', description: 'A lightweight modpack with performance and quality-of-life fixes.', downloads: 8921456, follows: 3015, categories: ['fabric', 'optimization', 'utility'], display_categories: ['optimization', 'utility'], client_side: 'required', server_side: 'unsupported', project_type: 'modpack' },
+  { project_id: 'waystones', title: 'Waystones', author: 'BlayTheNinth', description: 'Set up waystones and travel between them.', downloads: 643510, follows: 892, categories: ['forge', 'neoforge', 'fabric', 'transport'], display_categories: ['transport'], client_side: 'required', server_side: 'required', project_type: 'mod' },
+]
+
 async function mockRequest<T>(operation: string, payload: Record<string, unknown>): Promise<T> {
   await new Promise((resolve) => window.setTimeout(resolve, 220))
   if (operation === 'bootstrap') return structuredClone(fallbackState) as T
+  if (operation === 'theme_list') return { themes: structuredClone(mockThemes) } as T
+  if (operation === 'theme_save') {
+    const theme = structuredClone(payload.theme) as LauncherThemePreset
+    const existing = mockThemes.findIndex((item) => item.id === theme.id)
+    if (existing >= 0) mockThemes.splice(existing, 1, theme)
+    else mockThemes.push(theme)
+    return { theme, themes: structuredClone(mockThemes) } as T
+  }
+  if (operation === 'theme_preview' || operation === 'theme_import') {
+    try {
+      const parsed = JSON.parse(String(payload.data || '')) as LauncherThemePreset
+      const theme = { ...parsed, id: parsed.id || `imported-${Date.now()}`, name: parsed.name || 'Импортированная тема' }
+      if (operation === 'theme_import') {
+        const existing = mockThemes.findIndex((item) => item.id === theme.id)
+        if (existing >= 0) mockThemes.splice(existing, 1, theme)
+        else mockThemes.push(theme)
+        return { theme, themes: structuredClone(mockThemes) } as T
+      }
+      return { theme } as T
+    } catch {
+      throw new Error('Файл темы повреждён или не JSON')
+    }
+  }
+  if (operation === 'theme_delete') {
+    const themeId = String(payload.theme_id || '')
+    const index = mockThemes.findIndex((item) => item.id === themeId)
+    if (index >= 0) mockThemes.splice(index, 1)
+    return { removed: index >= 0, themes: structuredClone(mockThemes) } as T
+  }
+  if (operation === 'theme_export') {
+    const theme = mockThemes.find((item) => item.id === String(payload.theme_id || ''))
+    if (!theme) throw new Error('Тема не найдена')
+    return { file_name: `${theme.id}.nivora-theme.json`, data: window.btoa(unescape(encodeURIComponent(JSON.stringify(theme, null, 2)))) } as T
+  }
+  if (operation === 'instance_icon_blocks') return { available: true, blocks: mockIsoBlocks() } as T
+  if (operation === 'fs_browse') return mockFsBrowse(payload.path ? String(payload.path) : undefined) as T
+  if (operation === 'fs_read_file') {
+    const path = String(payload.path || '')
+    const data = mockFsData.get(path)
+    if (data === undefined) throw new Error(`Встроенный проводник: файл не найден: ${path}`)
+    const bytes = new TextEncoder().encode(data)
+    const offset = Math.min(Math.max(0, Number(payload.offset || 0)), bytes.length)
+    const limit = Math.max(0, Math.min(6 * 1024 * 1024, Number(payload.length || bytes.length)))
+    const chunk = bytes.slice(offset, offset + limit)
+    return { size: bytes.length, offset, length: chunk.length, eof: offset + chunk.length >= bytes.length, data: encodeBytesBase64(chunk) } as T
+  }
+  if (operation === 'fs_write_file') {
+    const path = String(payload.path || '')
+    const data = String(payload.data || '')
+    mockFsData.set(path, data)
+    return { written: true, path, size: data.length } as T
+  }
+  if (operation === 'fs_create_file' || operation === 'fs_create_directory') {
+    const directory = mockFsPath(String(payload.directory || ''))
+    const name = String(payload.name || '')
+    if (!mockFsDirs.includes(directory)) throw new Error('Папка недоступна')
+    if (!name || name === '.' || name === '..' || name.includes('/') || [...name].some((char) => char.charCodeAt(0) === 0 || char.charCodeAt(0) === 92)) throw new Error('Некорректное имя файла или папки')
+    const path = mockFsPath(`${directory}/${name}`)
+    if (mockFsExists(path)) throw new Error('Файл или папка с таким именем уже существует')
+    if (operation === 'fs_create_directory') mockFsDirs.push(path)
+    else mockFsData.set(path, '')
+    return { created: true, path } as T
+  }
+  if (operation === 'fs_rename') {
+    const source = mockFsPath(String(payload.path || ''))
+    const name = String(payload.new_name || '')
+    if (!name || name === '.' || name === '..' || name.includes('/') || [...name].some((char) => char.charCodeAt(0) === 0 || char.charCodeAt(0) === 92)) throw new Error('Некорректное имя файла или папки')
+    const parent = source.slice(0, source.lastIndexOf('/')) || '/'
+    const target = mockFsPath(`${parent}/${name}`)
+    if (!mockFsExists(source)) throw new Error('Файл или папка больше недоступны')
+    if (mockFsExists(target)) throw new Error('Файл или папка с таким именем уже существует')
+    const directory = mockFsDirs.includes(source)
+    if (directory) {
+      const dirs = mockFsDirs.map((entry) => entry === source || entry.startsWith(`${source}/`) ? `${target}${entry.slice(source.length)}` : entry)
+      mockFsDirs.splice(0, mockFsDirs.length, ...dirs)
+      for (const [entry, data] of [...mockFsData]) {
+        if (entry === source || entry.startsWith(`${source}/`)) {
+          mockFsData.delete(entry)
+          mockFsData.set(`${target}${entry.slice(source.length)}`, data)
+        }
+      }
+    } else {
+      const data = mockFsData.get(source)!
+      mockFsData.delete(source)
+      mockFsData.set(target, data)
+    }
+    return { renamed: true, path: target } as T
+  }
+  if (operation === 'fs_delete') {
+    const path = mockFsPath(String(payload.path || ''))
+    if (path === MOCK_FS_ROOT || !mockFsExists(path)) throw new Error('Файл или папка недоступны для удаления')
+    const directory = mockFsDirs.includes(path)
+    if (directory) {
+      for (let index = mockFsDirs.length - 1; index >= 0; index -= 1) {
+        if (mockFsDirs[index] === path || mockFsDirs[index].startsWith(`${path}/`)) mockFsDirs.splice(index, 1)
+      }
+      for (const entry of [...mockFsData.keys()]) if (entry === path || entry.startsWith(`${path}/`)) mockFsData.delete(entry)
+    } else mockFsData.delete(path)
+    return { deleted: true, directory } as T
+  }
+  if (operation === 'fs_save_text_file') {
+    const path = String(payload.path || '')
+    const data = String(payload.data || '')
+    const expected = String(payload.expected_data || '')
+    const current = mockFsData.get(path)
+    if (current === undefined) throw new Error('Файл больше недоступен')
+    const currentData = window.btoa(unescape(encodeURIComponent(current)))
+    if (currentData !== expected) throw new Error('Файл изменился вне лаунчера. Закройте его и откройте заново, чтобы не затереть чужие изменения.')
+    mockFsData.set(path, decodeURIComponent(escape(window.atob(data))))
+    return { written: true, path, size: data.length } as T
+  }
+  if (operation === 'fs_open_file') {
+    const path = String(payload.path || '')
+    return { opened: Boolean(path), path } as T
+  }
+  if (operation === 'fs_reveal') {
+    // в предпросмотре нет системного проводника, поэтому возвращаем исходный путь
+    const path = String(payload.path || MOCK_FS_ROOT)
+    return { opened: true, path } as T
+  }
+  if (operation === 'settings_profiles_list') return { profiles: [] } as T
   if (operation === 'create_offline_account') {
     const username = String(payload.username || 'Player').trim().replace(/[^\p{L}\p{N}_-]/gu, '').slice(0, 16)
     if (!username) throw new Error('Имя debug-аккаунта пустое')
@@ -506,6 +905,21 @@ async function mockRequest<T>(operation: string, payload: Record<string, unknown
     instance.display_name = String(payload.display_name || instance.name).trim() || instance.name
     instance.description = String(payload.description || '').trim()
     instance.group = group
+    // мок сохраняет все поля профиля
+    if (payload.icon_data) {
+      const data = String(payload.icon_data)
+      instance.icon = data.startsWith('data:') ? data : `data:image/png;base64,${data}`
+    } else if (payload.clear_icon) {
+      instance.icon = ''
+    }
+    if (payload.banner_data) {
+      const data = String(payload.banner_data)
+      instance.banner = data.startsWith('data:') ? data : `data:image/png;base64,${data}`
+    } else if (payload.clear_banner) {
+      instance.banner = ''
+    }
+    if (payload.notes !== undefined) instance.notes = String(payload.notes || '')
+    if (Array.isArray(payload.tags)) instance.tags = payload.tags.map(String).filter(Boolean).slice(0, 12)
     return { instance, groups: [...fallbackState.settings.instance_groups] } as T
   }
   if (operation === 'instance_details') {
@@ -513,15 +927,39 @@ async function mockRequest<T>(operation: string, payload: Record<string, unknown
     const instance = fallbackState.instances.find((item) => item.name === name)
     if (!instance) throw new Error(`Экземпляр не найден: ${name}`)
     const settings = mockInstanceSettings.get(name) || defaultMockInstanceSettings()
+    const mods: InstanceAsset[] = instance.kind === 'server' || instance.game_edition === 'bedrock' ? [] : [
+      { name: 'sodium.jar', display_name: 'Sodium', path: `mods/sodium.jar`, size: 1_800_000, modified_at: Date.now() - 86_400_000, kind: 'mods', enabled: true, version: '0.6.0', author: 'jellysquid3', source: 'modrinth' },
+      { name: 'iris.jar', display_name: 'Iris Shaders', path: 'mods/iris.jar', size: 2_700_000, modified_at: Date.now() - 172_800_000, kind: 'mods', enabled: true, version: '1.8.0', author: 'coderbot', source: 'modrinth' },
+      { name: 'fabric-api.jar', display_name: 'Fabric API', path: 'mods/fabric-api.jar', size: 2_100_000, modified_at: Date.now() - 259_200_000, kind: 'mods', enabled: true, version: '0.110.0', author: 'FabricMC', source: 'modrinth' },
+      { name: 'old-tweaks.jar.disabled', display_name: 'Old Tweaks', path: 'mods/old-tweaks.jar.disabled', size: 805_000, modified_at: Date.now() - 604_800_000, kind: 'mods', enabled: false, version: '1.2.1', author: 'PDX' },
+    ]
     return {
       instance,
       settings: structuredClone(settings),
-      assets: { mods: [], resourcepacks: [], shaders: [] },
+      assets: { mods, resourcepacks: [], shaders: [] },
       worlds: [],
       servers: [],
       snapshots: { mods: [], resourcepacks: [], shaders: [], saves: [] },
     } as T
   }
+  if (operation === 'mod_dependency_graph') {
+    return {
+      nodes: [
+        { id: 'sodium', file: 'sodium.jar', display_name: 'Sodium', version: '0.6.0', enabled: true, source: 'modrinth', loader: 'fabric', dependencies: [{ id: 'fabric-api', constraint: 'любая', optional: false }] },
+        { id: 'iris', file: 'iris.jar', display_name: 'Iris Shaders', version: '1.8.0', enabled: true, source: 'modrinth', loader: 'fabric', dependencies: [{ id: 'sodium', constraint: '>=0.6', optional: false }, { id: 'fabric-api', constraint: 'любая', optional: true }] },
+        { id: 'fabric-api', file: 'fabric-api.jar', display_name: 'Fabric API', version: '0.110.0', enabled: true, source: 'modrinth', loader: 'fabric', dependencies: [] },
+        { id: 'old-tweaks', file: 'old-tweaks.jar.disabled', display_name: 'Old Tweaks', version: '1.2.1', enabled: false, source: '', loader: 'fabric', dependencies: [{ id: 'fabric-api', constraint: 'любая', optional: false }] },
+      ],
+      edges: [
+        { from: 'sodium', to: 'fabric-api', optional: false, constraint: 'любая' },
+        { from: 'iris', to: 'sodium', optional: false, constraint: '>=0.6' },
+        { from: 'iris', to: 'fabric-api', optional: true, constraint: 'любая' },
+        { from: 'old-tweaks', to: 'fabric-api', optional: false, constraint: 'любая' },
+      ],
+      missing: [{ id: 'architectury', required_by: 'old-tweaks', optional: true }],
+    } as T
+  }
+  if (operation === 'mod_removal_impact') return { mod_id: String(payload.mod_id || ''), breaks: ['Iris Shaders'] } as T
   if (operation === 'save_instance_settings') {
     const name = String(payload.name || '')
     const current = mockInstanceSettings.get(name) || defaultMockInstanceSettings()
@@ -609,7 +1047,7 @@ async function mockRequest<T>(operation: string, payload: Record<string, unknown
   }
   if (operation === 'skins_list') return { skins: [] } as T
   if (operation === 'check_remote_release') {
-    return { update_available: false, latest_version: '1.1.0', current_version: '1.1.0', release_url: '', published_at: '', notes: '', assets: [] } as T
+    return { update_available: false, latest_version: LAUNCHER_VERSION, current_version: LAUNCHER_VERSION, release_url: '', published_at: '', notes: '', assets: [] } as T
   }
   if (operation === 'skins_export') return { path: '/tmp/skin.png', folder: '/tmp' } as T
   if (operation === 'instance_log') return { lines: [], running: false, metrics: { timestamp: Date.now() / 1000, pid: 0, running: false, uptime_seconds: 0, ram_bytes: 0, cpu_percent: 0, storage_bytes: 0, players: 0, max_players: 0, tps: 0 } } as T
@@ -625,7 +1063,27 @@ async function mockRequest<T>(operation: string, payload: Record<string, unknown
   if (operation === 'instance_log_archives') return { logs: [] as InstanceLogArchive[], next_offset: null } as T
   if (operation === 'instance_log_archive_read') return { content: '', next_offset: Number(payload.offset || 0), eof: true } as InstanceLogArchiveReadResult as T
   if (operation === 'microsoft_login_status') return { status: 'idle' } as T
-  if (operation === 'mods_search') return { results: [] } as T
+  if (operation === 'mods_search') {
+    const query = String(payload.query || '')
+    const projectType = String(payload.project_type || 'mod')
+    const page = Number(payload.page || 0)
+    const limit = Number(payload.limit || 20)
+    if (projectType === 'modpack') {
+      const catalogId = String(payload.catalog_id || '')
+      const catalog = fallbackState.settings.resource_catalogs.find((item) => item.id === catalogId)
+      if (!catalog) throw new Error('Выберите каталог модпаков в настройках')
+      const catalogResults = catalog.kind === 'modrinth'
+        ? MOCK_MODRINTH_HITS.filter((item) => item.project_type === 'modpack').map((item) => ({ ...item, source: catalog.kind, catalog_id: catalog.id }))
+        : demoModpacksForCatalog(catalog)
+      if (!catalogResults) throw new Error(`Предпросмотр не поддерживает каталог модпаков «${catalog.name}»`)
+      return searchDemoModpacks(catalogResults, query, page, limit) as T
+    }
+    const category = String(payload.category || '')
+    const hits = MOCK_MODRINTH_HITS.filter((item) => item.project_type === projectType && (!category || item.categories?.includes(category)))
+    const needle = query.trim().toLowerCase()
+    const results = needle ? hits.filter((item) => `${item.title} ${item.description}`.toLowerCase().includes(needle)) : hits
+    return { results, page, page_size: results.length, total: results.length, has_more: false } as T
+  }
   if (operation === 'modpack_import') throw new Error('Импорт модпака доступен только в desktop launcher')
   if (operation === 'server_cores') return { cores: fallbackState.server_cores || [] } as T
   if (operation === 'server_core_versions') return { core: String(payload.core || 'custom'), versions: [] } as T
@@ -664,18 +1122,64 @@ async function mockRequest<T>(operation: string, payload: Record<string, unknown
   if (operation === 'server_plugin_details') return { details: {}, catalog_id: String(payload.catalog_id || '') } as T
   if (operation === 'server_plugin_updates') return { updates: [], files: [] } as T
   if (operation === 'server_plugin_update') return { plugin: {}, files: [], catalog_id: String(payload.catalog_id || '') } as T
-  if (operation === 'mods_details') return { details: {}, compatible_versions: [], catalog_id: String(payload.catalog_id || '') } as T
+  if (operation === 'mods_details') {
+    const catalogId = String(payload.catalog_id || '')
+    const catalog = fallbackState.settings.resource_catalogs.find((item) => item.id === catalogId)
+    const projectType = String(payload.project_type || 'mod')
+    const catalogResults = projectType === 'modpack' && catalog
+      ? catalog.kind === 'modrinth'
+        ? MOCK_MODRINTH_HITS.filter((item) => item.project_type === 'modpack').map((item) => ({ ...item, source: catalog.kind, catalog_id: catalog.id }))
+        : demoModpacksForCatalog(catalog) || []
+      : MOCK_MODRINTH_HITS
+    const hit = catalogResults.find((item) => (item.project_id || item.id) === String(payload.project_id || payload.id || ''))
+    return { details: hit ? { ...hit, license: { id: 'mit', name: 'MIT License' } } : {}, compatible_versions: [], catalog_id: catalogId } as T
+  }
   if (operation === 'instance_shortcut_status') return { supported: false, platform: 'web', desktop: { exists: false, path: '' }, menu: { exists: false, path: '' } } as T
   if (operation === 'instance_shortcut_create' || operation === 'instance_shortcut_remove') throw new Error('Ярлыки доступны только в desktop launcher')
   if (operation === 'shortcut_take_launch_request') return { name: null } as T
-  if (operation === 'instance_mod_list_export') return { content: '', format: String(payload.format || 'markdown'), count: 0, file_name: 'mods.md' } as T
+  if (operation === 'instance_mod_list_export') {
+    const name = String(payload.name || 'demo')
+    const format = String(payload.format || 'markdown')
+    const fileName = format === 'csv' ? 'mods.csv' : format === 'text' ? 'mods.txt' : 'mods.md'
+    const content = format === 'markdown'
+      ? `# Моды: ${name}\n\nЭкземпляр: \`${name}\` · модов: 2\n\n| Мод | Версия | ID | Загрузчик | Файл | Состояние |\n|---|---|---|---|---|---|\n| Sodium | 0.6.0 | sodium | fabric | \`sodium.jar\` | включен |\n| Iris | 1.8.0 | iris | fabric | \`iris.jar\` | выключен |\n`
+      : format === 'csv'
+        ? 'mod,version,mod_id,loader,file,enabled\nSodium,0.6.0,sodium,fabric,sodium.jar,true\n'
+        : `Моды: ${name}, всего 2\n- Sodium 0.6.0\n- Iris 1.8.0\n`
+    return { content, format, count: 2, file_name: fileName, path: `/home/player/.local/share/nivora-launcher/game/instances/${name}/exports/${fileName}`, dir: `/home/player/.local/share/nivora-launcher/game/instances/${name}/exports` } as T
+  }
   if (operation === 'mods_check_updates') return { updates: [], project_type: String(payload.project_type || 'mod'), instance_name: String(payload.instance_name || ''), catalog_id: String(payload.catalog_id || '') } as T
   if (operation === 'mods_update') return { project_id: String(payload.project_id || ''), name: '', version: '', version_id: '', file_name: '', dependencies: [], details: {}, instance_name: String(payload.instance_name || '') } as T
+  if (operation === 'instance_compare') throw new Error('Сравнение экземпляров доступно только в desktop launcher: браузерный preview не читает каталоги сборок')
+  if (operation === 'instance_port_changes') throw new Error('Перенос правок доступен только в desktop launcher')
+  if (operation === 'instance_autotune') throw new Error('Автонастройка доступна только в desktop launcher')
+  if (operation === 'plugin_dev_init' || operation === 'plugin_dev_lint' || operation === 'plugin_dev_pack' || operation === 'plugin_dev_verify' || operation === 'plugin_dev_keypair') {
+    throw new Error('Инструменты автора плагинов доступны только в desktop launcher')
+  }
+  if (operation === 'world_backup_list') return { backups: [], schedule: { enabled: false, interval_hours: 24, keep: 5, destination: 'local' } } as T
+  if (operation === 'world_backup_create') {
+    const name = String(payload.name || 'demo')
+    const backupId = `2026-10-22-manual`
+    return { backup: { backup_id: backupId, size_bytes: 240_000_000, files: 861, path: `/home/player/.local/share/nivora-launcher/game/backups/${name}/${backupId}.zip`, dir: `/home/player/.local/share/nivora-launcher/game/backups/${name}` }, schedule: { enabled: false, interval_hours: 24, keep: 5, destination: 'local' } } as T
+  }
+  if (operation === 'world_backup_restore') return { restored: ['world'], backups: [] } as T
+  if (operation === 'world_backup_delete') return { backups: [] } as T
+  if (operation === 'world_backup_schedule_get' || operation === 'world_backup_schedule_set') return { schedule: { enabled: false, interval_hours: 24, keep: 5, destination: 'local' } } as T
+  if (operation === 'instance_pins_get') return { pins: [] } as T
+  if (operation === 'instance_pin_toggle') return { pinned: true, pins: [{ kind: String(payload.kind || 'mod'), value: String(payload.value || '') }] } as T
+  if (operation === 'mods_update_all_safe') throw new Error('Безопасное обновление доступно только в desktop launcher')
+  if (operation === 'mods_update_rollback') throw new Error('Откат обновлений доступен только в desktop launcher')
+  if (operation === 'mods_update_sessions') return { sessions: [], instance_name: String(payload.instance_name || '') } as T
   return {} as T
 }
 
 export const bridge = {
   pluginDevChanges: () => request<{ enabled: boolean; generation: string; requests: Record<string, number> }>('plugin_dev_changes'),
+  pluginDevInit: (directory: string) => request<{ directory: string }>('plugin_dev_init', { directory }),
+  pluginDevLint: (directory: string) => request<{ warnings: string[] }>('plugin_dev_lint', { directory }),
+  pluginDevPack: (directory: string, output: string, key?: string) => request<{ archive: string }>('plugin_dev_pack', { directory, output, key }),
+  pluginDevVerify: (archive: string) => request<PluginVerifyResult>('plugin_dev_verify', { archive }),
+  pluginDevKeypair: (privatePem: string, publicPem: string) => request<PluginKeypairResult>('plugin_dev_keypair', { private_pem: privatePem, public_pem: publicPem }),
   pluginOperationTrace: (pluginId: string, method: string, args: Record<string, unknown>, signal?: AbortSignal, outcome: 'begin' | 'ok' | 'denied' = 'begin', elapsedMs = 0) => request('plugin_api_operation_trace', { plugin_id: pluginId, method, outcome, elapsed_ms: elapsedMs, event: typeof args.event === 'string' ? args.event : '', listener_id: typeof args.listener_id === 'string' ? args.listener_id : '', arguments: Object.fromEntries(Object.keys(args).slice(0, 64).map((key) => [key, '[redacted]'])) }, signal),
   cancelActiveOperations: async (): Promise<void> => {
     if (!inTauri()) return
@@ -713,8 +1217,24 @@ export const bridge = {
   loginMicrosoft: () => request<{ account: AccountInfo; messages: string[] }>('login_microsoft'),
   fsBrowse: (path?: string, options: { showHidden?: boolean } = {}) =>
     request<FileBrowserListing>('fs_browse', { path, show_hidden: options.showHidden || undefined }),
-  fsReadFile: (path: string, offset = 0) =>
-    request<{ size: number; offset: number; length: number; eof: boolean; data: string }>('fs_read_file', { path, offset }),
+  fsReadFile: (path: string, offset = 0, length?: number) =>
+    request<{ size: number; offset: number; length: number; eof: boolean; data: string }>('fs_read_file', { path, offset, length }),
+  fsWriteFile: (path: string, data: string) =>
+    request<{ written: boolean; path: string; size: number }>('fs_write_file', { path, data }),
+  fsCreateFile: (directory: string, name: string) =>
+    request<{ created: boolean; path: string }>('fs_create_file', { directory, name }),
+  fsCreateDirectory: (directory: string, name: string) =>
+    request<{ created: boolean; path: string }>('fs_create_directory', { directory, name }),
+  fsRename: (path: string, new_name: string) =>
+    request<{ renamed: boolean; path: string }>('fs_rename', { path, new_name }),
+  fsDelete: (path: string) =>
+    request<{ deleted: boolean; directory: boolean }>('fs_delete', { path }),
+  fsSaveTextFile: (path: string, expected_data: string, data: string) =>
+    request<{ written: boolean; path: string; size: number }>('fs_save_text_file', { path, expected_data, data }),
+  fsOpenFile: (path: string) =>
+    request<{ opened: boolean; path: string }>('fs_open_file', { path }),
+  fsReveal: (path?: string) =>
+    request<{ opened: boolean; path: string }>('fs_reveal', { path: path || undefined }),
   loginEly: (username: string, password: string) =>
     request<{ account: AccountInfo; messages: string[] }>('login_ely', { username, password }),
   globalSearch: (query: string, signal?: AbortSignal) =>
@@ -733,7 +1253,6 @@ export const bridge = {
   setDefaultAccount: (accountId: string) => request<{ account: AccountInfo; accounts: AccountInfo[] }>('set_default_account', { account_id: accountId }),
   moveAccount: (accountId: string, direction: 'up' | 'down') => request<{ accounts: AccountInfo[] }>('move_account', { account_id: accountId, direction }),
   deleteInstance: (name: string) => request<{ instances: InstanceInfo[] }>('delete_instance', { name }),
-  // ── Ярлыки экземпляра (рабочий стол / меню) и экспорт списка модов ──
   instanceShortcutStatus: (name: string) =>
     request<{
       supported: boolean
@@ -746,8 +1265,8 @@ export const bridge = {
   instanceShortcutRemove: (name: string, location?: 'desktop' | 'menu') =>
     request<{ removed: string[] }>('instance_shortcut_remove', { name, location }),
   shortcutTakeLaunchRequest: () => request<{ name: string | null }>('shortcut_take_launch_request'),
-  instanceModListExport: (name: string, format: 'markdown' | 'csv' | 'text' = 'markdown', includeDisabled = true) =>
-    request<{ content: string; format: string; count: number; file_name: string }>('instance_mod_list_export', { name, format, include_disabled: includeDisabled }),
+  instanceModListExport: (name: string, format: 'markdown' | 'csv' | 'text' = 'markdown', includeDisabled = true, save = false) =>
+    request<{ content: string; format: string; count: number; file_name: string; path?: string; dir?: string }>('instance_mod_list_export', { name, format, include_disabled: includeDisabled, save: save || undefined }),
   duplicateInstance: (source: string, target: string) =>
     request<{ instance: InstanceInfo }>('duplicate_instance', { source, target }),
   externalInstances: () => request<{ candidates: ExternalInstanceCandidate[] }>('external_instances_scan'),
@@ -755,7 +1274,6 @@ export const bridge = {
   importExternalInstance: (sourcePath: string, targetName?: string) =>
     request<{ instance: InstanceInfo; instances: InstanceInfo[] }>('external_instance_import', { source_path: sourcePath, target_name: targetName }),
 
-  // ── Optimization ───────────────────────────────────────────────
   jvmPresetsList: () =>
     request<{ presets: import('../types').JvmPreset[] }>('jvm_presets_list'),
   optimizationAnalyze: (name?: string) =>
@@ -799,6 +1317,7 @@ export const bridge = {
   bedrockCancelStoreLogin: (name: string) => request<{ stopped: boolean }>('bedrock_store_login_cancel', { name }),
   bedrockStop: (name: string) => request<{ stopped: boolean }>('bedrock_stop', { name }),
   instanceGroups: () => request<{ groups: string[] }>('instance_groups'),
+  instanceIconBlocks: () => request<{ available: boolean; blocks: InstanceIconBlock[] }>('instance_icon_blocks'),
   settingsProfilesList: () => request<{ profiles: SettingsProfile[] }>('settings_profiles_list'),
   settingsProfileSave: (name: string) => request<{ profiles: SettingsProfile[] }>('settings_profile_save', { name }),
   settingsProfileApply: (name: string) => request<{ settings: SettingsInfo; applied: string[] }>('settings_profile_apply', { name }),
@@ -806,7 +1325,7 @@ export const bridge = {
   settingsProfileExport: (name: string) => request<{ name: string; file_name: string; json: string }>('settings_profile_export', { name }),
   settingsProfileImport: (json: string, name?: string) => request<{ profiles: SettingsProfile[] }>('settings_profile_import', { json, name }),
   worldBackupList: (name: string) => request<{ backups: WorldBackup[]; schedule: BackupSchedule }>('world_backup_list', { name }),
-  worldBackupCreate: (name: string, destination = 'local') => request<{ backup: { backup_id: string; size_bytes: number; files: number }; schedule: BackupSchedule }>('world_backup_create', { name, destination }),
+  worldBackupCreate: (name: string, destination = 'local') => request<{ backup: { backup_id: string; size_bytes: number; files: number; path?: string; dir?: string }; schedule: BackupSchedule }>('world_backup_create', { name, destination }),
   worldBackupRestore: (name: string, backupId: string) => request<{ restored: string[]; backups: WorldBackup[] }>('world_backup_restore', { name, backup_id: backupId }),
   worldBackupDelete: (name: string, backupId: string) => request<{ backups: WorldBackup[] }>('world_backup_delete', { name, backup_id: backupId }),
   worldBackupScheduleGet: (name: string) => request<{ schedule: BackupSchedule }>('world_backup_schedule_get', { name }),
@@ -853,6 +1372,20 @@ export const bridge = {
   instanceSnapshotList: (name: string, category: string) => request<{ snapshots: ServerSnapshot[]; category: string }>('instance_snapshot_list', { name, category }),
   instanceSnapshotCreate: (name: string, category: string) => request<{ snapshot: ServerSnapshot; snapshots: ServerSnapshot[]; details: InstanceDetails }>('instance_snapshot_create', { name, category }),
   instanceSnapshotRestore: (name: string, category: string, snapshotId: string) => request<{ restored: ServerSnapshot; snapshots: ServerSnapshot[]; details: InstanceDetails }>('instance_snapshot_restore', { name, category, snapshot_id: snapshotId }),
+  instanceCompare: (source: string, target: string) => request<InstanceComparison>('instance_compare', { source, target }),
+  instancePortChanges: (source: string, target: string, items: PortChangeItem[]) =>
+    request<InstancePortResult>('instance_port_changes', { source, target, items }),
+  instanceAutotune: (name: string, apply = false, fpsCap = 0, mode: AutotuneMode = 'balanced') =>
+    request<AutotuneResult>('instance_autotune', { name, apply, fps_cap: fpsCap, mode }),
+  instancePins: (name: string) => request<{ pins: InstancePin[] }>('instance_pins_get', { name }),
+  instancePinToggle: (name: string, kind: InstancePin['kind'], value: string) =>
+    request<{ pinned: boolean; pins: InstancePin[] }>('instance_pin_toggle', { name, kind, value }),
+  modsUpdateAllSafe: (instanceName: string, projectTypes: Array<'mod' | 'resourcepack' | 'shader'> = ['mod']) =>
+    request<SafeUpdateResult>('mods_update_all_safe', { instance_name: instanceName, project_types: projectTypes }),
+  modsUpdateRollback: (instanceName: string, sessionId: string) =>
+    request<{ session_id: string; restored: string[]; errors: Array<{ category: string; error: string }>; sessions: SafeUpdateSession[]; details?: InstanceDetails }>('mods_update_rollback', { instance_name: instanceName, session_id: sessionId }),
+  modsUpdateSessions: (instanceName: string) =>
+    request<{ sessions: SafeUpdateSession[]; instance_name: string }>('mods_update_sessions', { instance_name: instanceName }),
   instanceSnapshotDelete: (name: string, category: string, snapshotId: string) => request<{ removed: boolean; snapshots: ServerSnapshot[]; details: InstanceDetails }>('instance_snapshot_delete', { name, category, snapshot_id: snapshotId }),
   saveInstanceSettings: (name: string, values: Partial<InstanceSettings>) =>
     request<{ settings: InstanceSettings }>('save_instance_settings', { name, values }),
@@ -1063,8 +1596,8 @@ export const bridge = {
   }) => request<{ exit_code: number; logs: string[]; version_id: string; crash?: CrashReport; repair?: AutoRepairReport | null }>('launch', payload),
   launchInstance: (name: string, options: { world?: string; server?: string; account?: string; profile_id?: string; native_bridge?: boolean } = {}) =>
     request<{ exit_code: number; logs: string[]; version_id: string; crash?: CrashReport; repair?: AutoRepairReport | null }>('launch_instance', { name, ...options }),
-  /** Одноразовый токен запуска Java Edition (после чтения ядро его стирает). */
-  /** Статус завершившейся игры: код выхода, хвост лога, разбор краша. */
+  /** одноразовый токен запуска Java Edition (после чтения ядро его стирает) */
+  /** статус завершившейся игры: код выхода, хвост лога, разбор краша */
   autoRepairDiagnose: (payload: { instance_name: string; exit_code?: number | null; error?: string; manual?: boolean }) =>
     request<AutoRepairReport>('auto_repair_diagnose', payload),
   autoRepairApply: (instanceName: string, fixes: AutoRepairFix[]) =>
@@ -1072,7 +1605,7 @@ export const bridge = {
   autoRepairMute: (kinds: string[], muted = true) =>
     request<{ settings: SettingsInfo }>('auto_repair_mute', { kinds, muted }),
   openFolder: (path?: string) => request<{ opened: boolean }>('open_folder', { path }),
-  modsSearch: (payload: { query: string; instance_name?: string; game_version?: string; loader?: string; server_core?: string; project_type?: ProjectType; catalog_id?: string; sort_by?: CatalogSort; page?: number; limit?: number }) =>
+  modsSearch: (payload: { query: string; instance_name?: string; game_version?: string; loader?: string; category?: string; server_core?: string; project_type?: ProjectType; catalog_id?: string; sort_by?: CatalogSort; page?: number; limit?: number }) =>
     request<{ results: ModResult[]; page?: number; page_size?: number; total?: number | null; has_more?: boolean; instance_name: string; game_version: string; loader: string; server_core?: string; catalog_id?: string }>('mods_search', payload),
   modsDetails: (payload: { project_id: string; instance_name?: string; game_version?: string; loader?: string; server_core?: string; project_type?: ProjectType; catalog_id?: string }) =>
     request<{ details: Record<string, unknown>; compatible_versions: { id: string; version_number: string; name: string; date_published: string; game_versions: string[]; loaders: string[] }[]; catalog_id: string }>('mods_details', payload),

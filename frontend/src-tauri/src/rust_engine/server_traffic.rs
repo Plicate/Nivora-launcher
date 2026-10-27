@@ -1,4 +1,4 @@
-// наблюдаемые счётчики TCP-полезной нагрузки сокетов одного дерева процессов сервера.
+// счётчики TCP-соединений процессов сервера
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -72,14 +72,14 @@ fn socket_inodes_from(pid: u32, proc_root: &Path) -> Result<HashSet<u32>, String
     Ok(result)
 }
 
-/// разбор одного inet_diag-сообщения: интересует сокет с нужным inode и портом.
+/// разбирает сообщение `inet_diag` для сокета с нужными inode и портом
 fn parse_diag_message(raw: &[u8], inodes: &HashSet<u32>, port: u16) -> Result<Option<(String, u64, u64)>, String> {
     if raw.len() < 72 {
         return Ok(None);
     }
     let inode = u32_le(raw, 68);
     let source_port = u16_be(raw, 4);
-    // raw[1] == 10 — TCP_LISTEN: слушающий сокет не считается.
+    // значение 10 в `raw[1]` означает TCP_LISTEN; слушающие сокеты не считаем
     if !inodes.contains(&inode) || source_port != port || raw[1] == 10 {
         return Ok(None);
     }
@@ -91,14 +91,14 @@ fn parse_diag_message(raw: &[u8], inodes: &HashSet<u32>, port: u16) -> Result<Op
             return Err("Некорректный ответ INET_DIAG".to_owned());
         }
         if kind == 2 {
-            // INET_DIAG_INFO: стабильный ABI tcp_info ядра.
+            // запрос INET_DIAG_INFO использует стабильный ABI tcp_info ядра
             let info = &raw[offset + 4..offset + length];
             if info.len() < 208 {
                 return Err("Ядро не предоставляет TCP_INFO bytes_sent/bytes_received".to_owned());
             }
             let received = u64_le(info, 128);
             let sent = u64_le(info, 200);
-            // cookie переживает переиспользование inode и разделяет IPv4/IPv6.
+            // cookie переживает переиспользование inode и разделяет IPv4/IPv6
             let cookie: String = raw[44..52].iter().map(|byte| format!("{byte:02x}")).collect();
             let key = format!("{}:{inode}:{cookie}", raw[0]);
             return Ok(Some((key, received, sent)));
@@ -153,15 +153,15 @@ fn linux_tcp_counters(pid: u32, port: u16) -> Result<HashMap<String, (u64, u64)>
         }
         for family in [libc::AF_INET, libc::AF_INET6] {
             sequence = sequence.wrapping_add(1);
-            // inet_diag_req_v2: family, proto, ext=2, pad, states=0xffffffff, sockid(48).
+            // inet_diag_req_v2: family, proto, ext=2, pad, states=0xffffffff, sockid(48)
             let mut request = Vec::with_capacity(56);
             request.extend_from_slice(&[family as u8, libc::IPPROTO_TCP as u8, 2, 0]);
             request.extend_from_slice(&0xffffffffu32.to_le_bytes());
             request.extend_from_slice(&[0u8; 48]);
             let mut message = Vec::with_capacity(16 + request.len());
             message.extend_from_slice(&((16 + request.len()) as u32).to_le_bytes());
-            message.extend_from_slice(&20u16.to_le_bytes()); // SOCK_DIAG_BY_FAMILY
-            message.extend_from_slice(&0x301u16.to_le_bytes()); // REQUEST | DUMP
+            message.extend_from_slice(&20u16.to_le_bytes()); // атрибут SOCK_DIAG_BY_FAMILY
+            message.extend_from_slice(&0x301u16.to_le_bytes()); // флаги REQUEST | DUMP
             message.extend_from_slice(&sequence.to_le_bytes());
             message.extend_from_slice(&0u32.to_le_bytes());
             message.extend_from_slice(&request);
@@ -229,11 +229,11 @@ fn linux_tcp_counters(pid: u32, port: u16) -> Result<HashMap<String, (u64, u64)>
                         continue;
                     }
                     if message_flags & 0x10 != 0 {
-                        // NLM_F_DUMP_INTR
+                        // флаг NLM_F_DUMP_INTR
                         return Err("TCP-таблица изменилась во время чтения".to_owned());
                     }
                     if kind == 3 {
-                        // NLMSG_DONE: ненулевой знаковый код — отказ ядра.
+                        // в NLMSG_DONE ненулевой знаковый код означает отказ ядра
                         if raw.len() >= 4 && i32::from_le_bytes(raw[0..4].try_into().expect("четыре байта")) != 0 {
                             return Err("Ядро прервало чтение TCP-таблицы".to_owned());
                         }
@@ -241,7 +241,7 @@ fn linux_tcp_counters(pid: u32, port: u16) -> Result<HashMap<String, (u64, u64)>
                         break;
                     }
                     if kind == 2 {
-                        // NLMSG_ERROR: код — знаковый int в первых четырёх байтах.
+                        // код NLMSG_ERROR хранится как знаковое 32-битное число в первых байтах
                         let code = if raw.len() >= 4 { u32_le(raw, 0) as i32 } else { -1 };
                         if code != 0 {
                             return Err(format!("INET_DIAG недоступен (errno {})", code.abs()));
@@ -414,7 +414,7 @@ mod windows_impl {
         pub key: String,
     }
 
-    /// строки сервера в состоянии ESTAB из MIB_TCPTABLE_OWNER_PID.
+    /// строки сервера в состоянии ESTAB из MIB_TCPTABLE_OWNER_PID
     pub(super) fn parse_owner_pid_table(raw: &[u8], pids: &HashSet<u32>, port: u16) -> Result<Vec<OwnedRow>, String> {
         if raw.len() < 4 {
             return Err("Некорректная TCP-таблица Windows".to_owned());
@@ -465,7 +465,7 @@ mod windows_impl {
 
     pub(super) fn windows_tcp_counters(pid: u32, port: u16) -> Result<HashMap<String, (u64, u64)>, String> {
         use std::sync::Mutex;
-        // сбор включается на соединение; список нужен, чтобы не включать повторно.
+        // сбор включается на соединение; список нужен, чтобы не включать повторно
         static ESTATS_ENABLED: Mutex<Option<HashSet<String>>> = Mutex::new(None);
 
         let pids = windows_pid_tree(pid)?;
@@ -486,7 +486,7 @@ mod windows_impl {
         let mut enabled = ESTATS_ENABLED.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let enabled = enabled.get_or_insert_with(HashSet::new);
         for owned in &rows {
-            // ESTATS API принимает строку без PID (MIB_TCPROW_LH).
+            // запрос ESTATS API принимает строку без PID (MIB_TCPROW_LH)
             let row = MIB_TCPROW_LH {
                 Anonymous: MIB_TCPROW_LH_0 { dwState: owned.row.dwState },
                 dwLocalAddr: owned.row.dwLocalAddr,
@@ -495,14 +495,14 @@ mod windows_impl {
                 dwRemotePort: owned.row.dwRemotePort,
             };
             if !enabled.contains(&owned.key) {
-                // счётчики соединения копятся только после явного включения сбора.
-                let rw = [1u8]; // TCP_ESTATS_DATA_RW_V0 { EnableCollection: TRUE }
+                // счётчики соединения копятся только после явного включения сбора
+                let rw = [1u8]; // структура TCP_ESTATS_DATA_RW_V0 { EnableCollection: TRUE }
                 unsafe {
                     SetPerTcpConnectionEStats(&row, TCP_ESTATS_DATA, rw.as_ptr(), 0, rw.len() as u32, 0);
                 }
                 enabled.insert(owned.key.clone());
             }
-            let mut rod = [0u8; 16]; // TCP_ESTATS_DATA_ROD_V0 { DataBytesIn, DataBytesOut }
+            let mut rod = [0u8; 16]; // структура TCP_ESTATS_DATA_ROD_V0 { DataBytesIn, DataBytesOut }
             let status = unsafe {
                 GetPerTcpConnectionEStats(
                     &row,
@@ -522,7 +522,7 @@ mod windows_impl {
                 counters.insert(owned.key.clone(), (u64_le(&rod, 0), u64_le(&rod, 8)));
             }
         }
-        // ушедшие соединения больше не требуют включённого сбора.
+        // ушедшие соединения больше не требуют включённого сбора
         if enabled.len() > 4096 {
             enabled.retain(|key| counters.contains_key(key));
         }
@@ -546,7 +546,7 @@ mod tests {
             raw[44 + index] = *byte;
         }
         raw[68..72].copy_from_slice(&inode.to_le_bytes());
-        // атрибут INET_DIAG_INFO с телом tcp_info на 208 байт.
+        // атрибут INET_DIAG_INFO с телом tcp_info на 208 байт
         let mut info = vec![0u8; 208];
         info[128..136].copy_from_slice(&1234u64.to_le_bytes());
         info[200..208].copy_from_slice(&5678u64.to_le_bytes());
@@ -571,13 +571,9 @@ mod tests {
     fn diag_message_ignores_foreign_sockets() {
         let mut inodes = HashSet::new();
         inodes.insert(4242);
-        // чужой inode.
         assert!(parse_diag_message(&diag_message(999, 25565, 1, 2), &inodes, 25565).unwrap().is_none());
-        // чужой порт.
         assert!(parse_diag_message(&diag_message(4242, 25566, 1, 2), &inodes, 25565).unwrap().is_none());
-        // слушающий сокет (TCP_LISTEN = 10).
         assert!(parse_diag_message(&diag_message(4242, 25565, 10, 2), &inodes, 25565).unwrap().is_none());
-        // короткий пакет.
         assert!(parse_diag_message(&[0u8; 72], &inodes, 25565).unwrap().is_none());
     }
 
@@ -585,14 +581,12 @@ mod tests {
     fn diag_message_rejects_broken_attributes() {
         let mut inodes = HashSet::new();
         inodes.insert(4242);
-        // атрибут с длиной меньше заголовка.
         let mut raw = diag_message(4242, 25565, 1, 2);
         raw[72..74].copy_from_slice(&2u16.to_le_bytes());
         assert_eq!(
             parse_diag_message(&raw, &inodes, 25565).unwrap_err(),
             "Некорректный ответ INET_DIAG"
         );
-        // есть только атрибуты другого типа — TCP_INFO не найден.
         let mut raw = diag_message(4242, 25565, 1, 2);
         raw[74..76].copy_from_slice(&1u16.to_le_bytes());
         assert_eq!(
@@ -608,24 +602,21 @@ mod tests {
         assert_eq!(first["network_available"], json!(false));
         assert_eq!(first["network_error"], json!("Ожидание первой TCP-выборки"));
         assert_eq!(first["network_rx_bps"], json!(null));
-        // недоступность переводит повторную попытку в 5-секундный интервал.
         let failed = tracker.sample(true);
         assert_eq!(failed["network_available"], json!(false));
         assert_eq!(
             failed["network_error"],
             json!("Нет доступа к socket FD серверного процесса")
         );
-        // до истечения интервала возвращается кэш.
         assert_eq!(tracker.sample(true)["network_error"], json!("Нет доступа к socket FD серверного процесса"));
     }
 
     #[test]
     fn windows_row_table_parsing_matches_layout() {
-        // таблица из двух строк: наша в ESTAB с нужным портом, чужая мимо.
         let pids: HashSet<u32> = [7u32].into_iter().collect();
         let mut table = Vec::new();
         table.extend_from_slice(&2u32.to_le_bytes());
-        let mut push_row = |table: &mut Vec<u8>, state: u32, lport: u32, owner: u32| {
+        let push_row = |table: &mut Vec<u8>, state: u32, lport: u32, owner: u32| {
             table.extend_from_slice(&state.to_le_bytes());
             table.extend_from_slice(&0x0100_0A0Au32.to_le_bytes());
             table.extend_from_slice(&((lport as u16).to_be() as u32).to_le_bytes()); // порт в сетевом порядке
@@ -651,7 +642,6 @@ mod tests {
 
     #[cfg(not(windows))]
     fn windows_table_rows_for_test(raw: &[u8], pids: &HashSet<u32>, port: u16) -> Vec<String> {
-        // разбор таблицы — чистая функция; повторяем логику без iphlpapi.
         let count = u32_le(raw, 0) as usize;
         let mut rows = Vec::new();
         for index in 0..count.min(65536) {

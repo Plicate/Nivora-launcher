@@ -1,4 +1,4 @@
-// webGL-рендер персонажа Minecraft: скин (оба слоя), плащ и элитры.
+// рендерит скин, плащ и элитры в WebGL
 export type SkinModel = 'classic' | 'slim'
 export type BackEquipment = 'cape' | 'elytra' | null
 
@@ -10,9 +10,9 @@ export interface SkinScene {
   yaw: number
   pitch: number
   zoom?: number
-  /** Скрытые части тела (индексы PARTS): 0 голова, 1 торс, 2 правая рука, 3 левая рука, 4 правая нога, 5 левая нога. */
+  /** скрытые части тела в порядке массива PARTS */
   hidden?: number[]
-  /** Скрыть второй слой (оверлей) — чтобы красить базовый слой. */
+  /** скрывает второй слой для редактирования базового */
   hideOverlay?: boolean
 }
 
@@ -84,7 +84,7 @@ function rotationZ(angle: number): Mat4 {
   return new Float32Array([c, s, 0, 0, -s, c, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1])
 }
 
-/** Порядок Эйлера XYZ, как у three.js. */
+/** порядок Эйлера XYZ, как у three.js */
 function euler(x: number, y: number, z: number): Mat4 {
   return chain(rotationX(x), rotationY(y), rotationZ(z))
 }
@@ -109,8 +109,8 @@ function transform(matrix: Mat4, point: Vec3): Vec3 {
   ]
 }
 
-/** Области граней в стандартной развёртке Minecraft (в единицах 64-пиксельной текстуры). */
-export function boxUvRects(box: UvBox): Record<FaceName, { x: number; y: number; width: number; height: number }> {
+/** области граней в стандартной развёртке Minecraft (в единицах 64-пиксельной текстуры) */
+function boxUvRects(box: UvBox): Record<FaceName, { x: number; y: number; width: number; height: number }> {
   const { u, v, w, h, d } = box
   return {
     top: { x: u + d, y: v, width: w, height: d },
@@ -186,7 +186,7 @@ function skinMeshes(model: SkinModel, texture: TextureInfo, hidden?: number[]): 
 
 function capeMesh(texture: TextureInfo): Mesh {
   const mesh: Mesh = { positions: [], uvs: [], shades: [] }
-  // висит от плеч (y = 8) за спиной (z = −2), развёрнут наружной стороной назад.
+  // висит от плеч (y = 8) за спиной (z = −2), развёрнут наружной стороной назад
   const matrix = chain(translation(0, 8, -2), rotationX(CAPE_ANGLE), rotationY(Math.PI), translation(0, -8, 0.5))
   addBox(mesh, matrix, [10, 16, 1], { u: 0, v: 0, w: 10, h: 16, d: 1 }, texture)
   return mesh
@@ -203,27 +203,11 @@ function elytraMesh(texture: TextureInfo): Mesh {
   return mesh
 }
 
-/** Масштаб пикселей текстуры плаща: 64×32 (и HD-кратные) или старый формат 22×17. */
+/** масштаб пикселей текстуры плаща: 64×32 (и HD-кратные) или старый формат 22×17 */
 export function capeTextureScale(width: number, height: number): number {
   if (width > 0 && height > 0 && Math.abs(width / height - 2) < 0.01) return width / 64
   if (width > 0 && height > 0 && Math.abs(width / height - 22 / 17) < 0.02) return width / 22
   return width / 64
-}
-
-/** Геометрия сцены без WebGL (для проверки развёрток и тестов). */
-export function sceneMeshes(
-  model: SkinModel,
-  skin: { width: number; height: number },
-  cape: { width: number; height: number } | null,
-  back: BackEquipment,
-): { skin: { inner: Mesh; outer: Mesh }; back: Mesh | null } {
-  const fake = {} as WebGLTexture
-  const skinInfo: TextureInfo = { texture: fake, width: skin.width, height: skin.height, scale: skin.width / 64 }
-  const capeInfo: TextureInfo | null = cape ? { texture: fake, width: cape.width, height: cape.height, scale: capeTextureScale(cape.width, cape.height) } : null
-  return {
-    skin: skinMeshes(model, skinInfo),
-    back: capeInfo && back === 'cape' ? capeMesh(capeInfo) : capeInfo && back === 'elytra' ? elytraMesh(capeInfo) : null,
-  }
 }
 
 export class SkinRenderer {
@@ -259,13 +243,13 @@ export class SkinRenderer {
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA)
   }
 
-  /** Вызывается, когда догрузилась какая-нибудь текстура — пора перерисовать. */
+  /** вызывается после загрузки текстуры */
   onChange(listener: () => void): () => void {
     this.listeners.add(listener)
     return () => this.listeners.delete(listener)
   }
 
-  /** Состояние текстуры скина: null — готова, иначе текст для пользователя. */
+  /** null означает готовую текстуру, иначе здесь сообщение об ошибке */
   skinStatus(url: string): string | null {
     if (!url) return 'Нет активного скина'
     const state = this.request(url, 'skin')
@@ -274,13 +258,7 @@ export class SkinRenderer {
     return null
   }
 
-  /**
-   * Синхронная загрузка/обновление текстуры прямо из canvas (редактор скинов).
-   * Обходной путь против мигания: раньше каждый штрих кисти собирал новый
-   * PNG data-URL, рендерер грузил его как отдельную картинку, и на время
-   * асинхронной загрузки моделька исчезала. Здесь текстура загружается в тот
-   * же WebGLTexture через texImage2D в один кадр — разрыва нет.
-   */
+  /** обновляет WebGL-текстуру синхронно, чтобы модель не мигала при рисовании */
   updateCanvasTexture(url: string, canvas: HTMLCanvasElement): TextureState {
     const { gl } = this
     const width = canvas.width

@@ -1,4 +1,4 @@
-// движок операций GUI. Запрос — плоский JSON {operation, ...поля},
+// команды GUI-движка
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::fs::File;
@@ -7,10 +7,13 @@ use std::path::{Path, PathBuf};
 
 mod accounts;
 mod backups;
+mod block_icons;
 mod bootstrap;
 mod cloud;
 mod fs_browser;
 mod github_plugins;
+mod graphics;
+mod wallpapers;
 pub mod bedrock;
 mod config;
 mod constants;
@@ -19,6 +22,7 @@ pub mod events;
 mod installer;
 mod instance_files;
 mod instances;
+mod instance_versions;
 pub mod global_search;
 mod instance_workspace;
 pub mod world_import;
@@ -27,16 +31,36 @@ mod loaders;
 mod metadata;
 mod metrics;
 mod mod_dependencies;
+mod auto_repair;
+mod mod_audit;
+mod server_files;
+mod launcher;
+mod shader_benchmark;
+mod autotune;
+mod hardware;
+mod instance_manifest;
+mod instance_compare;
+mod instance_pins;
+mod opener;
+mod options_file;
+mod plugin_dev;
 mod modcat;
 mod modpack_export;
+mod modpacks;
 mod mods;
+mod mods_ops;
 mod mod_list;
 mod net;
 mod operations;
+
+pub(crate) fn ensure_runtime_dir() -> Result<PathBuf, String> {
+    operations::ensure_runtime_dir()
+}
 mod ops;
 mod optimization;
 mod plugin_catalogs;
 mod plugin_guard;
+mod plugin_ops;
 mod plugin_reload;
 mod plugin_security;
 mod plugins;
@@ -45,6 +69,7 @@ mod profiles;
 pub mod registry;
 mod release_check;
 mod runtime;
+mod safe_update;
 mod server;
 mod server_network;
 mod server_traffic;
@@ -55,6 +80,10 @@ mod skins;
 pub mod shortcuts;
 mod platform;
 mod platform_support;
+mod security;
+// типы AppContainer используются только в Windows-ветках
+#[cfg_attr(not(windows), allow(dead_code))]
+mod windows_sandbox;
 mod turbo;
 pub mod shader_analysis;
 pub mod state;
@@ -63,16 +92,19 @@ mod themes;
 mod upnp;
 
 pub const NATIVE_OPS: &[&str] = &[
-    // стартовое состояние собирается без Python: холодный запуск больше не
-    // поднимает воркер и не ждёт интерпретатор.
     "bootstrap",
     "hash_file",
     "hash_directory",
-    // встроенный проводник: свои окна вместо системных диалогов.
     "fs_browse",
     "fs_read_file",
-    // файлы и логи Java-экземпляров — нативно; Bedrock остаётся воркеру
-    // (needs_worker): корень контента резолвит профиль BoL.
+    "fs_write_file",
+    "fs_create_file",
+    "fs_create_directory",
+    "fs_rename",
+    "fs_delete",
+    "fs_save_text_file",
+    "fs_open_file",
+    "fs_reveal",
     "instance_file_list",
     "instance_file_read",
     "instance_file_write",
@@ -87,19 +119,22 @@ pub const NATIVE_OPS: &[&str] = &[
     "rename_instance_group",
     "delete_instance",
     "duplicate_instance",
-    // рабочее пространство Java-экземпляра (порт instance_workspace.py):
-    // настройки, ресурсы, миры (NBT) и серверы — целиком локальные операции.
+    "update_instance_profile",
+    "instance_icon_blocks",
     "instance_details",
     "save_instance_settings",
     "remove_instance_asset",
     "toggle_mod",
     "import_asset",
     "mods_remove_files",
+    "mods_remove",
+    "instance_versions",
+    "instance_version_override_save",
+    "instance_version_import",
+    "instance_repair_version",
     "save_settings",
     "plugin_list",
     "java_validate",
-    // minecraft Bedrock целиком в Rust: Linux — BedrockOnLinux, Windows —
-    // официальный Minecraft for Windows из Microsoft Store.
     "bedrock_runtime_status",
     "bedrock_versions",
     "bedrock_setup_version",
@@ -128,10 +163,16 @@ pub const NATIVE_OPS: &[&str] = &[
     "theme_import",
     "theme_delete",
     "theme_export",
+    "github_theme_search",
+    "github_theme_install",
     "settings_profiles_list",
     "settings_profile_delete",
     "settings_profile_export",
     "settings_profile_import",
+    "settings_profile_save",
+    "settings_profile_apply",
+    "wallpaper_import",
+    "wallpaper_clear",
     "java_options",
     "security_status",
     "server_cores",
@@ -157,18 +198,15 @@ pub const NATIVE_OPS: &[&str] = &[
     "server_status",
     "mod_dependency_graph",
     "mod_removal_impact",
-    // поиск источников импорта — только чтение пары каталогов. Через общий
     "external_instances_scan",
-    // сеть Java-серверов целиком в Rust: диагностика (белый IP, NAT, UPnP),
+    "external_instance_import",
     "server_network_diagnose",
     "server_network_status",
     "server_network_prepare",
     "server_network_open",
     "server_network_close",
-    // бюджеты операций плагинов (guard) и dev-режим перезагрузки.
     "plugin_api_quota_usage",
     "plugin_dev_changes",
-    // сетевые метаданные: список версий Mojang, версии загрузчиков и ядер
     "versions",
     "loader_choices",
     "server_core_versions",
@@ -176,14 +214,13 @@ pub const NATIVE_OPS: &[&str] = &[
     "shader_analyze",
     "global_search",
     "world_import_path",
-    // запись экрана (F7): ffmpeg-процесс живёт в движке, состояние — в
-    // recordings/recording-state.json (его же читает overlay_state).
+    "world_import_begin",
+    "world_import_chunk",
+    "world_import_cancel",
+    "world_import_finish",
     "recording_start",
     "recording_stop",
     "recording_status",
-    // WebDAV-синхронизация данных лаунчера: манифест подписан локальным
-    // ключом, пароль — в libsecret/Credential Manager (формат совместим с
-    // Python-воркером: те же ключи и байты подписи).
     "cloud_status",
     "cloud_configure",
     "cloud_test",
@@ -192,8 +229,6 @@ pub const NATIVE_OPS: &[&str] = &[
     "cloud_restore",
     "cloud_delete",
     "cloud_disconnect",
-    // каталог плагинов GitHub: поиск по topic, установка релизных ZIP и
-    // публикация через OAuth device flow (порт github_plugins.py).
     "github_plugin_status",
     "github_plugin_search",
     "github_plugin_details",
@@ -202,7 +237,10 @@ pub const NATIVE_OPS: &[&str] = &[
     "github_plugin_oauth_poll",
     "github_plugin_sign_out",
     "github_plugin_publish",
-    // библиотека скинов и профиль Minecraft: без Python-воркера.
+    "launch",
+    "launch_instance",
+    "shader_benchmark_start",
+    "shader_benchmark_status",
     "skins_list",
     "skins_import",
     "skins_export",
@@ -213,79 +251,129 @@ pub const NATIVE_OPS: &[&str] = &[
     "clear_cape",
     "open_skins_folder",
     "skins_folder",
-    // каталог Modrinth через Go-бинарник nivora-modcat
     "mods_search",
     "mods_details",
     "mods_check_updates",
-    // анализ производительности — Rust + Java-хелпер ModScan
+    "mods_install",
+    "mods_update",
+    "mods_update_all_safe",
+    "mods_update_rollback",
+    "mods_update_sessions",
+    "modpack_import",
     "optimization_analyze",
-    // ярлыки экземпляров (рабочий стол / меню приложений) и запуск по ярлыку
+    "optimization_apply",
+    "graphics_diagnostics",
     "instance_shortcut_status",
     "instance_shortcut_create",
     "instance_shortcut_remove",
     "shortcut_take_launch_request",
-    // экспорт списка модов экземпляра (Markdown / CSV / текст)
+    "export_modpack",
     "instance_mod_list_export",
+    "instance_autotune",
+    "auto_repair_diagnose",
+    "auto_repair_mute",
+    "auto_repair_apply",
+    "plugin_dev_init",
+    "plugin_dev_lint",
+    "plugin_dev_pack",
+    "plugin_dev_verify",
+    "plugin_dev_keypair",
+    "instance_snapshot_create",
+    "instance_snapshot_delete",
+    "instance_snapshot_list",
+    "instance_snapshot_restore",
+    "instance_log",
+    "instance_compare",
+    "instance_port_changes",
+    "instance_pins_get",
+    "instance_pin_toggle",
+    "open_external",
+    "open_folder",
+    "system_notify",
+    "mod_audit_prepare",
+    "mod_audit_accept",
+    "mod_audit_cancel",
+    "mod_audit_status",
+    "server_file_list",
+    "server_file_read",
+    "server_file_write",
+    "server_file_mkdir",
+    "server_file_upload",
+    "server_file_delete",
+    "server_snapshot_list",
+    "server_snapshot_create",
+    "server_snapshot_delete",
+    "server_snapshot_restore",
+    "server_details",
+    "server_save_config",
+    "server_plugin_catalogs",
+    "save_server_plugin_catalogs",
+    "server_plugin_search",
+    "server_plugin_details",
+    "server_plugin_updates",
+    "server_plugin_update",
+    "server_plugin_install",
+    "server_plugin_remove",
+    "plugin_security_status",
+    "plugin_permission_grants_set",
+    "plugin_local_untrusted_execution",
+    "plugin_publisher_pin",
+    "plugin_publisher_unpin",
+    "plugin_publisher_revocation_authority_set",
+    "plugin_revocations_import",
+    "plugin_local_revoke",
+    "plugin_local_unrevoke",
+    "plugin_install",
+    "plugin_set_enabled",
+    "plugin_uninstall",
+    "plugin_api_source",
+    "plugin_api_runtime_info",
+    "plugin_api_operation_trace",
+    "plugin_api_capabilities",
+    "plugin_api_permissions_get",
+    "plugin_api_permissions_set",
+    "plugin_api_authorize",
+    "plugin_api_open_external",
+    "plugin_api_instances_list",
+    "plugin_api_process_metrics",
+    "plugin_api_config_projected_read",
+    "plugin_api_files_list",
+    "plugin_api_files_read",
+    "plugin_api_files_write",
+    "plugin_api_files_remove",
+    "plugin_network_fetch",
+    "plugin_http_request",
+    "plugin_network_dns",
+    "plugin_network_ping",
+    "plugin_network_port_check",
+    "plugin_api_proxy_routes_get",
+    "plugin_api_proxy_routes_save",
+    "plugin_api_proxy_routes_add",
+    "plugin_api_proxy_routes_remove",
+    "plugin_server_list_get",
+    "plugin_server_list_save",
+    "plugin_server_list_add",
+    "plugin_server_list_remove",
+    "plugin_storage_get",
+    "plugin_storage_set",
+    "plugin_storage_remove",
+    "plugin_config_get",
+    "plugin_config_set",
+    "plugin_config_remove",
+    "plugin_file_list",
+    "plugin_file_read",
+    "plugin_file_write",
+    "plugin_file_remove",
+    "plugin_database_query",
+    "plugin_database_execute",
+    "server_create",
+    "server_upload_core",
+    "server_core_download",
 ];
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn is_native(operation: &str) -> bool {
     NATIVE_OPS.contains(&operation)
-}
-
-pub fn needs_worker(operation: &str, request: &Value) -> bool {
-    match operation {
-        // на Windows песочница — AppContainer; её проверку (пробный запуск
-        // процесса в контейнере) выполняет Python-бэкенд.
-        "security_status" => return cfg!(windows),
-        // файловые операции и удаление Bedrock-экземпляров остаются за
-        "instance_file_list" | "instance_file_read" | "instance_file_write" | "instance_file_mkdir"
-        | "instance_file_upload" | "instance_file_delete" | "delete_instance" => {
-            return request_bedrock_instance(request);
-        }
-        "world_backup_create" | "world_backup_restore" | "world_backup_delete" | "world_backup_list" => {}
-        // legacy-токены Microsoft в файле переносимы в Secret Service только
-        // через Python; чистые файлы обслуживаются нативно.
-        "create_offline_account" | "delete_account" | "set_default_account" | "move_account" => {
-            return accounts::has_legacy_tokens(&state::launcher_roots().config_home);
-        }
-        // каталог Modrinth обслуживает Go-бинарник; без него, для плагинов,
-        // модпаков и чужих каталогов — прежний путь через воркер
-        "mods_search" | "mods_details" | "mods_check_updates" => {
-            return !modcat::native_possible(operation, request);
-        }
-        _ => return false,
-    }
-    if operation == "world_backup_create" && request.get("destination").and_then(Value::as_str) == Some("cloud") {
-        return true;
-    }
-    if matches!(operation, "world_backup_restore" | "world_backup_delete")
-        && request
-            .get("backup_id")
-            .and_then(Value::as_str)
-            .map(|value| value.ends_with("@cloud"))
-            .unwrap_or(false)
-    {
-        return true;
-    }
-    let roots = state::launcher_roots();
-    backups::cloud_configured(&roots.config_home)
-}
-
-fn request_bedrock_instance(request: &Value) -> bool {
-    let name = request
-        .get("name")
-        .and_then(Value::as_str)
-        .or_else(|| request.get("instance_name").and_then(Value::as_str))
-        .map(str::trim)
-        .unwrap_or("");
-    if name.is_empty() {
-        return false;
-    }
-    let roots = state::launcher_roots();
-    let game_dir = state::settings_game_dir(&roots.config_home, &roots.data_home);
-    state::resolve_instance_path(&game_dir, name)
-        .map(|path| state::instance_metadata(&path).get("game_edition").and_then(Value::as_str) == Some("bedrock"))
-        .unwrap_or(false)
 }
 
 pub fn handle(operation: &str, request: &Value) -> Result<Value, String> {
@@ -295,6 +383,14 @@ pub fn handle(operation: &str, request: &Value) -> Result<Value, String> {
         "hash_directory" => hash_directory(request),
         "fs_browse" => Ok(ok_response(operation, fs_browser::fs_browse(request)?)),
         "fs_read_file" => Ok(ok_response(operation, fs_browser::fs_read_file(request)?)),
+        "fs_write_file" => Ok(ok_response(operation, fs_browser::fs_write_file(request)?)),
+        "fs_create_file" => Ok(ok_response(operation, fs_browser::fs_create_file(request)?)),
+        "fs_create_directory" => Ok(ok_response(operation, fs_browser::fs_create_directory(request)?)),
+        "fs_rename" => Ok(ok_response(operation, fs_browser::fs_rename(request)?)),
+        "fs_delete" => Ok(ok_response(operation, fs_browser::fs_delete(request)?)),
+        "fs_save_text_file" => Ok(ok_response(operation, fs_browser::fs_save_text_file(request)?)),
+        "fs_open_file" => Ok(ok_response(operation, fs_browser::fs_open_file(request)?)),
+        "fs_reveal" => Ok(ok_response(operation, fs_browser::fs_reveal(request)?)),
         "instance_file_list" => Ok(ok_response(operation, instance_files::instance_file_list(request)?)),
         "instance_file_read" => Ok(ok_response(operation, instance_files::instance_file_read(request)?)),
         "instance_file_write" => Ok(ok_response(operation, instance_files::instance_file_write(request)?)),
@@ -309,7 +405,14 @@ pub fn handle(operation: &str, request: &Value) -> Result<Value, String> {
         "rename_instance_group" => Ok(ok_response(operation, instances::rename_instance_group(request)?)),
         "delete_instance" => Ok(ok_response(operation, instances::delete_instance(request)?)),
         "duplicate_instance" => Ok(ok_response(operation, instances::duplicate_instance(request)?)),
+        "update_instance_profile" => Ok(ok_response(operation, instances::update_instance_profile(request)?)),
+        "export_modpack" => Ok(ok_response(operation, modpack_export::export_modpack(request)?)),
+        "instance_icon_blocks" => Ok(ok_response(operation, block_icons::instance_icon_blocks(request)?)),
         "instance_details" => Ok(ok_response(operation, instance_workspace::instance_details(request)?)),
+        "instance_versions" => Ok(ok_response(operation, instance_versions::instance_versions(request)?)),
+        "instance_version_override_save" => Ok(ok_response(operation, instance_versions::instance_version_override_save(request)?)),
+        "instance_version_import" => Ok(ok_response(operation, instance_versions::instance_version_import(request)?)),
+        "mods_remove" => Ok(ok_response(operation, instance_workspace::mods_remove(request)?)),
         "save_instance_settings" => Ok(ok_response(operation, instance_workspace::save_instance_settings(request)?)),
         "remove_instance_asset" => Ok(ok_response(operation, instance_workspace::remove_instance_asset(request)?)),
         "toggle_mod" => Ok(ok_response(operation, instance_workspace::toggle_mod(request)?)),
@@ -330,10 +433,16 @@ pub fn handle(operation: &str, request: &Value) -> Result<Value, String> {
         "theme_import" => Ok(ok_response(operation, themes::theme_import(request)?)),
         "theme_delete" => Ok(ok_response(operation, themes::theme_delete(request)?)),
         "theme_export" => Ok(ok_response(operation, themes::theme_export(request)?)),
+        "github_theme_search" => Ok(ok_response(operation, github_plugins::github_theme_search(request)?)),
+        "github_theme_install" => Ok(ok_response(operation, github_plugins::github_theme_install(request)?)),
         "settings_profiles_list" => Ok(ok_response(operation, profiles::profiles_list(request)?)),
         "settings_profile_delete" => Ok(ok_response(operation, profiles::profile_delete(request)?)),
         "settings_profile_export" => Ok(ok_response(operation, profiles::profile_export(request)?)),
         "settings_profile_import" => Ok(ok_response(operation, profiles::profile_import(request)?)),
+        "settings_profile_save" => Ok(ok_response(operation, profiles::settings_profile_save(request)?)),
+        "settings_profile_apply" => Ok(ok_response(operation, profiles::settings_profile_apply(request)?)),
+        "wallpaper_import" => Ok(ok_response(operation, wallpapers::wallpaper_import(request)?)),
+        "wallpaper_clear" => Ok(ok_response(operation, wallpapers::wallpaper_clear(request)?)),
         "java_options" => Ok(ok_response(operation, system::java_options(request)?)),
         "security_status" => Ok(ok_response(operation, system::security_status(request)?)),
         "server_cores" => Ok(ok_response(operation, system::server_cores(request)?)),
@@ -351,6 +460,7 @@ pub fn handle(operation: &str, request: &Value) -> Result<Value, String> {
         "login_microsoft" => Ok(ok_response(operation, accounts::login_microsoft(request)?)),
         "login_ely" => Ok(ok_response(operation, accounts::login_ely(request)?)),
         "install" => Ok(ok_response(operation, installer::install(request)?)),
+        "instance_repair_version" => Ok(ok_response(operation, installer::instance_repair_version(request)?)),
         "server_start" => Ok(ok_response(operation, server::server_start(request)?)),
         "server_stop" => Ok(ok_response(operation, server::server_stop(request)?)),
         "server_restart" => Ok(ok_response(operation, server::server_restart(request)?)),
@@ -360,6 +470,7 @@ pub fn handle(operation: &str, request: &Value) -> Result<Value, String> {
         "mod_dependency_graph" => Ok(ok_response(operation, mod_dependencies::mod_dependency_graph(request)?)),
         "mod_removal_impact" => Ok(ok_response(operation, mod_dependencies::mod_removal_impact(request)?)),
         "external_instances_scan" => Ok(ok_response(operation, instances::external_instances_scan(request)?)),
+        "external_instance_import" => Ok(ok_response(operation, instances::external_instance_import(request)?)),
         "server_network_diagnose" => Ok(ok_response(operation, server_network::server_network_diagnose(request)?)),
         "server_network_status" => Ok(ok_response(operation, server_network::server_network_status(request)?)),
         "server_network_prepare" => Ok(ok_response(operation, server_network::server_network_prepare(request)?)),
@@ -376,8 +487,20 @@ pub fn handle(operation: &str, request: &Value) -> Result<Value, String> {
         "mods_search" => Ok(ok_response(operation, modcat::mods_search(request)?)),
         "mods_details" => Ok(ok_response(operation, modcat::mods_details(request)?)),
         "mods_check_updates" => Ok(ok_response(operation, modcat::mods_check_updates(request)?)),
+        "mods_install" => Ok(ok_response(operation, mods_ops::mods_install(request)?)),
+        "mods_update" => Ok(ok_response(operation, mods_ops::mods_update(request)?)),
+        "mods_update_all_safe" => Ok(ok_response(operation, mods_ops::mods_update_all_safe(request)?)),
+        "mods_update_rollback" => Ok(ok_response(operation, mods_ops::mods_update_rollback(request)?)),
+        "mods_update_sessions" => Ok(ok_response(operation, mods_ops::mods_update_sessions(request)?)),
+        "modpack_import" => Ok(ok_response(operation, modpacks::modpack_import(request)?)),
         "optimization_analyze" => Ok(ok_response(operation, optimization::optimization_analyze(request)?)),
         "world_import_path" => Ok(ok_response(operation, world_import::world_import_path(request)?)),
+        "world_import_begin" => Ok(ok_response(operation, world_import::world_import_begin(request)?)),
+        "world_import_chunk" => Ok(ok_response(operation, world_import::world_import_chunk(request)?)),
+        "world_import_cancel" => Ok(ok_response(operation, world_import::world_import_cancel(request)?)),
+        "world_import_finish" => Ok(ok_response(operation, world_import::world_import_finish(request)?)),
+        "optimization_apply" => Ok(ok_response(operation, optimization::optimization_apply(request)?)),
+        "graphics_diagnostics" => Ok(ok_response(operation, graphics::graphics_diagnostics(request)?)),
         "recording_start" => Ok(ok_response(operation, recorder::recording_start(request)?)),
         "recording_stop" => Ok(ok_response(operation, recorder::recording_stop(request)?)),
         "recording_status" => Ok(ok_response(operation, recorder::recording_status(request)?)),
@@ -397,6 +520,10 @@ pub fn handle(operation: &str, request: &Value) -> Result<Value, String> {
         "github_plugin_oauth_poll" => Ok(ok_response(operation, github_plugins::github_plugin_oauth_poll(request)?)),
         "github_plugin_sign_out" => Ok(ok_response(operation, github_plugins::github_plugin_sign_out(request)?)),
         "github_plugin_publish" => Ok(ok_response(operation, github_plugins::github_plugin_publish(request)?)),
+        "launch" => Ok(ok_response(operation, launcher::launch(request)?)),
+        "launch_instance" => Ok(ok_response(operation, launcher::launch_instance(request)?)),
+        "shader_benchmark_start" => Ok(ok_response(operation, shader_benchmark::shader_benchmark_start(request)?)),
+        "shader_benchmark_status" => Ok(ok_response(operation, shader_benchmark::shader_benchmark_status(request)?)),
         "skins_list" => Ok(ok_response(operation, skins::skins_list(request)?)),
         "skins_import" => Ok(ok_response(operation, skins::skins_import(request)?)),
         "skins_export" => Ok(ok_response(operation, skins::skins_export(request)?)),
@@ -428,12 +555,112 @@ pub fn handle(operation: &str, request: &Value) -> Result<Value, String> {
         "instance_shortcut_remove" => Ok(ok_response(operation, shortcuts::instance_shortcut_remove(request)?)),
         "shortcut_take_launch_request" => Ok(ok_response(operation, shortcuts::shortcut_take_launch_request(request)?)),
         "instance_mod_list_export" => Ok(ok_response(operation, mod_list::instance_mod_list_export(request)?)),
+        "instance_autotune" => Ok(ok_response(operation, autotune::instance_autotune(request)?)),
+        "auto_repair_diagnose" => Ok(ok_response(operation, auto_repair::auto_repair_diagnose(request)?)),
+        "auto_repair_mute" => Ok(ok_response(operation, auto_repair::auto_repair_mute(request)?)),
+        "auto_repair_apply" => Ok(ok_response(operation, auto_repair::auto_repair_apply(request)?)),
+        "plugin_dev_init" => Ok(ok_response(operation, plugin_dev::plugin_dev_init(request)?)),
+        "plugin_dev_lint" => Ok(ok_response(operation, plugin_dev::plugin_dev_lint(request)?)),
+        "plugin_dev_pack" => Ok(ok_response(operation, plugin_dev::plugin_dev_pack(request)?)),
+        "plugin_dev_verify" => Ok(ok_response(operation, plugin_dev::plugin_dev_verify(request)?)),
+        "plugin_dev_keypair" => Ok(ok_response(operation, plugin_dev::plugin_dev_keypair(request)?)),
+        "instance_snapshot_create" => Ok(ok_response(operation, snapshots::instance_snapshot_create(request)?)),
+        "instance_snapshot_delete" => Ok(ok_response(operation, snapshots::instance_snapshot_delete(request)?)),
+        "instance_snapshot_list" => Ok(ok_response(operation, snapshots::instance_snapshot_list(request)?)),
+        "instance_snapshot_restore" => Ok(ok_response(operation, snapshots::instance_snapshot_restore(request)?)),
+        "instance_log" => Ok(ok_response(operation, metrics::instance_log(request)?)),
+        "instance_compare" => Ok(ok_response(operation, instance_compare::instance_compare(request)?)),
+        "instance_port_changes" => Ok(ok_response(operation, instance_compare::instance_port_changes(request)?)),
+        "instance_pins_get" => Ok(ok_response(operation, instance_pins::instance_pins_get(request)?)),
+        "instance_pin_toggle" => Ok(ok_response(operation, instance_pins::instance_pin_toggle(request)?)),
+        "open_external" => Ok(ok_response(operation, opener::open_external(request)?)),
+        "open_folder" => Ok(ok_response(operation, opener::open_folder(request)?)),
+        "system_notify" => Ok(ok_response(operation, opener::system_notify(request)?)),
+        "mod_audit_prepare" => Ok(ok_response(operation, mod_audit::mod_audit_prepare(request)?)),
+        "mod_audit_accept" => Ok(ok_response(operation, mod_audit::mod_audit_accept(request)?)),
+        "mod_audit_cancel" => Ok(ok_response(operation, mod_audit::mod_audit_cancel(request)?)),
+        "mod_audit_status" => Ok(ok_response(operation, mod_audit::mod_audit_status(request)?)),
+        "server_file_list" => Ok(ok_response(operation, server_files::server_file_list(request)?)),
+        "server_file_read" => Ok(ok_response(operation, server_files::server_file_read(request)?)),
+        "server_file_write" => Ok(ok_response(operation, server_files::server_file_write(request)?)),
+        "server_file_mkdir" => Ok(ok_response(operation, server_files::server_file_mkdir(request)?)),
+        "server_file_upload" => Ok(ok_response(operation, server_files::server_file_upload(request)?)),
+        "server_file_delete" => Ok(ok_response(operation, server_files::server_file_delete(request)?)),
+        "server_snapshot_list" => Ok(ok_response(operation, server_files::server_snapshot_list(request)?)),
+        "server_snapshot_create" => Ok(ok_response(operation, server_files::server_snapshot_create(request)?)),
+        "server_snapshot_delete" => Ok(ok_response(operation, server_files::server_snapshot_delete(request)?)),
+        "server_snapshot_restore" => Ok(ok_response(operation, server_files::server_snapshot_restore(request)?)),
+        "server_details" => Ok(ok_response(operation, server_files::server_details(request)?)),
+        "server_save_config" => Ok(ok_response(operation, server_files::server_save_config(request)?)),
+        "server_plugin_catalogs" => Ok(ok_response(operation, plugin_catalogs::server_plugin_catalogs(request)?)),
+        "save_server_plugin_catalogs" => Ok(ok_response(operation, plugin_catalogs::save_server_plugin_catalogs(request)?)),
+        "server_plugin_search" => Ok(ok_response(operation, plugin_catalogs::server_plugin_search(request)?)),
+        "server_plugin_details" => Ok(ok_response(operation, plugin_catalogs::server_plugin_details(request)?)),
+        "server_plugin_updates" => Ok(ok_response(operation, plugin_catalogs::server_plugin_updates(request)?)),
+        "server_plugin_update" => Ok(ok_response(operation, plugin_catalogs::server_plugin_update(request)?)),
+        "server_plugin_install" => Ok(ok_response(operation, plugin_catalogs::server_plugin_install(request)?)),
+        "server_plugin_remove" => Ok(ok_response(operation, plugin_catalogs::server_plugin_remove(request)?)),
+        "plugin_security_status" => Ok(ok_response(operation, plugin_ops::plugin_security_status(request)?)),
+        "plugin_permission_grants_set" => Ok(ok_response(operation, plugin_ops::plugin_permission_grants_set(request)?)),
+        "plugin_local_untrusted_execution" => Ok(ok_response(operation, plugin_ops::plugin_local_untrusted_execution(request)?)),
+        "plugin_publisher_pin" => Ok(ok_response(operation, plugin_ops::plugin_publisher_pin(request)?)),
+        "plugin_publisher_unpin" => Ok(ok_response(operation, plugin_ops::plugin_publisher_unpin(request)?)),
+        "plugin_publisher_revocation_authority_set" => Ok(ok_response(operation, plugin_ops::plugin_publisher_revocation_authority_set(request)?)),
+        "plugin_revocations_import" => Ok(ok_response(operation, plugin_ops::plugin_revocations_import(request)?)),
+        "plugin_local_revoke" => Ok(ok_response(operation, plugin_ops::plugin_local_revoke(request)?)),
+        "plugin_local_unrevoke" => Ok(ok_response(operation, plugin_ops::plugin_local_unrevoke(request)?)),
+        "plugin_install" => Ok(ok_response(operation, plugin_ops::plugin_install(request)?)),
+        "plugin_set_enabled" => Ok(ok_response(operation, plugin_ops::plugin_set_enabled(request)?)),
+        "plugin_uninstall" => Ok(ok_response(operation, plugin_ops::plugin_uninstall(request)?)),
+        "plugin_api_source" => Ok(ok_response(operation, plugin_ops::plugin_api_source(request)?)),
+        "plugin_api_runtime_info" => Ok(ok_response(operation, plugin_ops::plugin_api_runtime_info(request)?)),
+        "plugin_api_operation_trace" => Ok(ok_response(operation, plugin_ops::plugin_api_operation_trace(request)?)),
+        "plugin_api_capabilities" => Ok(ok_response(operation, plugin_ops::plugin_api_capabilities(request)?)),
+        "plugin_api_permissions_get" => Ok(ok_response(operation, plugin_ops::plugin_api_permissions_get(request)?)),
+        "plugin_api_permissions_set" => Ok(ok_response(operation, plugin_ops::plugin_api_permissions_set(request)?)),
+        "plugin_api_authorize" => Ok(ok_response(operation, plugin_ops::plugin_api_authorize(request)?)),
+        "plugin_api_open_external" => Ok(ok_response(operation, plugin_ops::plugin_api_open_external(request)?)),
+        "plugin_api_instances_list" => Ok(ok_response(operation, plugin_ops::plugin_api_instances_list(request)?)),
+        "plugin_api_process_metrics" => Ok(ok_response(operation, plugin_ops::plugin_api_process_metrics(request)?)),
+        "plugin_api_config_projected_read" => Ok(ok_response(operation, plugin_ops::plugin_api_config_projected_read(request)?)),
+        "plugin_api_files_list" => Ok(ok_response(operation, plugin_ops::plugin_api_files(request, "list")?)),
+        "plugin_api_files_read" => Ok(ok_response(operation, plugin_ops::plugin_api_files(request, "read")?)),
+        "plugin_api_files_write" => Ok(ok_response(operation, plugin_ops::plugin_api_files(request, "write")?)),
+        "plugin_api_files_remove" => Ok(ok_response(operation, plugin_ops::plugin_api_files(request, "remove")?)),
+        "plugin_network_fetch" => Ok(ok_response(operation, plugin_ops::plugin_network_fetch(request)?)),
+        "plugin_http_request" => Ok(ok_response(operation, plugin_ops::plugin_http_request(request)?)),
+        "plugin_network_dns" => Ok(ok_response(operation, plugin_ops::plugin_network_dns(request)?)),
+        "plugin_network_ping" => Ok(ok_response(operation, plugin_ops::plugin_network_ping(request)?)),
+        "plugin_network_port_check" => Ok(ok_response(operation, plugin_ops::plugin_network_ping(request)?)),
+        "plugin_api_proxy_routes_get" => Ok(ok_response(operation, plugin_ops::plugin_api_proxy_routes_get(request)?)),
+        "plugin_api_proxy_routes_save" => Ok(ok_response(operation, plugin_ops::plugin_api_proxy_routes_save(request)?)),
+        "plugin_api_proxy_routes_add" => Ok(ok_response(operation, plugin_ops::plugin_api_proxy_routes_add(request)?)),
+        "plugin_api_proxy_routes_remove" => Ok(ok_response(operation, plugin_ops::plugin_api_proxy_routes_remove(request)?)),
+        "plugin_server_list_get" => Ok(ok_response(operation, plugin_ops::plugin_server_list_get(request)?)),
+        "plugin_server_list_save" => Ok(ok_response(operation, plugin_ops::plugin_server_list_save(request)?)),
+        "plugin_server_list_add" => Ok(ok_response(operation, plugin_ops::plugin_server_list_add(request)?)),
+        "plugin_server_list_remove" => Ok(ok_response(operation, plugin_ops::plugin_server_list_remove(request)?)),
+        "plugin_storage_get" => Ok(ok_response(operation, plugin_ops::plugin_storage_get(request)?)),
+        "plugin_storage_set" => Ok(ok_response(operation, plugin_ops::plugin_storage_set(request)?)),
+        "plugin_storage_remove" => Ok(ok_response(operation, plugin_ops::plugin_storage_remove(request)?)),
+        "plugin_config_get" => Ok(ok_response(operation, plugin_ops::plugin_config_get(request)?)),
+        "plugin_config_set" => Ok(ok_response(operation, plugin_ops::plugin_config_set(request)?)),
+        "plugin_config_remove" => Ok(ok_response(operation, plugin_ops::plugin_config_remove(request)?)),
+        "plugin_file_list" => Ok(ok_response(operation, plugin_ops::plugin_file_list(request)?)),
+        "plugin_file_read" => Ok(ok_response(operation, plugin_ops::plugin_file_read(request)?)),
+        "plugin_file_write" => Ok(ok_response(operation, plugin_ops::plugin_file_write(request)?)),
+        "plugin_file_remove" => Ok(ok_response(operation, plugin_ops::plugin_file_remove(request)?)),
+        "plugin_database_query" => Ok(ok_response(operation, plugin_ops::plugin_database_query(request)?)),
+        "plugin_database_execute" => Ok(ok_response(operation, plugin_ops::plugin_database_execute(request)?)),
+        "server_create" => Ok(ok_response(operation, server::server_create(request)?)),
+        "server_upload_core" => Ok(ok_response(operation, server::server_upload_core(request)?)),
+        "server_core_download" => Ok(ok_response(operation, server::server_core_download(request)?)),
         other => Err(format!("rust-движок не обслуживает операцию {other}")),
     }
 }
 
 fn ok_response(operation: &str, data: Value) -> Value {
-    // конверт протокола; фронтенд ждёт данные в envelope.data.
+    // конверт протокола; фронтенд ждёт данные в envelope.data
     json!({ "ok": true, "operation": operation, "data": data })
 }
 
@@ -486,7 +713,7 @@ fn hash_directory(request: &Value) -> Result<Value, String> {
     }
     let mut files: Vec<Value> = Vec::new();
     let mut total_size: u64 = 0;
-    // обход вглубь от корня: пути собираются ОТ корня, поэтому «выход»
+    // обход вглубь от корня: пути собираются ОТ корня, поэтому "выход"
     fn walk(dir: &Path, prefix: &str, files: &mut Vec<Value>, total_size: &mut u64) -> Result<(), String> {
         let mut entries: Vec<_> = std::fs::read_dir(dir)
             .map_err(|error| format!("Не удалось прочитать каталог {}: {error}", dir.display()))?
@@ -555,11 +782,8 @@ mod tests {
         for operation in NATIVE_OPS {
             assert!(is_native(operation), "{operation}");
         }
-        // bootstrap переехал в движок: холодный старт не поднимает воркер
         assert!(is_native("bootstrap"));
-        // каталог Modrinth тоже нативный, но без бинарника уходит воркеру
         assert!(is_native("mods_search"));
-        assert!(!modcat::native_possible("mods_search", &json!({ "project_type": "modpack" })));
         let info = handle("engine_info", &json!({})).expect("engine_info");
         assert_eq!(info["ok"], json!(true));
         assert_eq!(info["data"]["engine"], json!("rust"));
@@ -574,7 +798,6 @@ mod tests {
         let response = handle("hash_file", &json!({ "path": file.to_string_lossy() })).expect("hash_file");
         assert_eq!(response["ok"], json!(true));
         assert_eq!(response["data"]["size"], json!(6));
-        // эталон — вывод sha256sum для этого файла.
         assert_eq!(response["data"]["sha256"], json!("5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03"));
         let missing = handle("hash_file", &json!({ "path": root.join("nope").to_string_lossy() }));
         assert!(missing.is_err());
@@ -593,8 +816,7 @@ mod tests {
         assert_eq!(response["data"]["count"], json!(2));
         assert_eq!(response["data"]["total_size"], json!(6));
         let paths: Vec<&str> = response["data"]["files"].as_array().unwrap().iter().map(|item| item["path"].as_str().unwrap()).collect();
-        // сортировка и прямые слеши в относительных путях — контракт
-        // манифеста, на который ориентируется сравнение с манифестом модпака.
+        // в манифесте важны сортировка и прямые слеши
         assert_eq!(paths, vec!["a.txt", "sub/b.txt"]);
         let missing = handle("hash_directory", &json!({ "path": root.join("nope").to_string_lossy() }));
         assert!(missing.is_err());
@@ -627,12 +849,12 @@ mod tests {
             if let Some(Value::String(encoded)) = normalized.remove("data") {
                 let decoded = base64::engine::general_purpose::STANDARD.decode(encoded).unwrap_or_default();
                 let archive = {
-                    // содержимое архива важнее байтов deflate-потока.
+                    // содержимое архива важнее байтов deflate-потока
                     let mut archive = zip::ZipArchive::new(std::io::Cursor::new(&decoded)).unwrap();
                     let mut parts = serde_json::Map::new();
                     for index in 0..archive.len() {
                         let mut member = archive.by_index(index).unwrap();
-                        let name = member.name().to_owned();
+                        let name = member.name().map(|v| v.to_string()).unwrap_or_default();
                         let mut buffer = String::new();
                         member.by_ref().read_to_string(&mut buffer).unwrap();
                         parts.insert(name, json!(buffer));
@@ -682,14 +904,14 @@ mod tests {
         );
         report.insert("schedule-get".into(), outcome(&backups::world_backup_schedule_get(&json!({ "name": "Alpha" })).map(normalize_backup)));
 
-        // портим мир и восстанавливаем: содержимое обязано вернуться.
+        // портим мир и восстанавливаем: содержимое обязано вернуться
         fs::write(instance.join("saves/New World/level.dat"), "сломано").unwrap();
         report.insert("backup-restore".into(), outcome(&backups::world_backup_restore(&json!({ "name": "Alpha", "backup_id": backup_id })).map(normalize_backup)));
         let restored = fs::read_to_string(instance.join("saves/New World/level.dat")).unwrap_or_default();
         report.insert("restored-content".into(), json!(restored));
         report.insert("backup-delete".into(), outcome(&backups::world_backup_delete(&json!({ "name": "Alpha", "backup_id": backup_id })).map(normalize_backup)));
 
-        // аккаунты: файл, порядок и default_account_id обязаны совпадать.
+        // аккаунты: файл, порядок и default_account_id обязаны совпадать
         report.insert("account-create".into(), outcome(&accounts::create_offline_account(&json!({ "username": "  Игрок_77!  " }))));
         let accounts_file = roots.config_home.join("accounts.json");
         let mut records: Vec<Value> = serde_json::from_str(&fs::read_to_string(&accounts_file).unwrap_or_default().to_owned()).unwrap_or_default();

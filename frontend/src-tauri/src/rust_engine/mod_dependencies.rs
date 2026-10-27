@@ -1,4 +1,4 @@
-// дерево зависимостей модов по манифестам внутри jar-файлов.
+// зависимости модов из манифестов в JAR-файлах
 use regex::Regex;
 use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet};
@@ -102,12 +102,12 @@ fn re_mcmod_token() -> &'static Regex {
 }
 
 fn read_zip_member(archive: &mut zip::ZipArchive<File>, name: &str) -> Vec<u8> {
-    let Ok(mut entry) = archive.by_name(name) else { return Vec::new() };
+    let Ok(entry) = archive.by_name(name) else { return Vec::new() };
     if entry.is_dir() || entry.size() > MAX_MANIFEST_BYTES {
         return Vec::new();
     }
     let mut buffer = Vec::new();
-    // ограничение ещё и на чтение: заголовок size в архиве мог солгать.
+    // ограничение ещё и на чтение: заголовок size в архиве мог солгать
     let mut limited = entry.take(MAX_MANIFEST_BYTES + 1);
     if limited.read_to_end(&mut buffer).is_err() || buffer.len() as u64 > MAX_MANIFEST_BYTES {
         return Vec::new();
@@ -216,7 +216,7 @@ fn toml_manifest(raw: &[u8]) -> Option<Value> {
     let version = re_toml_version().captures(&text).and_then(|captures| captures.get(1)).map(|m| m.as_str().to_owned());
     let loader = if text.to_lowercase().contains("neoforge") { "neoforge" } else { "forge" };
     let mut dependencies: Vec<Value> = Vec::new();
-    // тело блока — до следующей строки с «[» (эквивалент lookahead из Python).
+    // блок заканчивается перед следующей секцией TOML
     let markers: Vec<usize> = re_toml_block_start().find_iter(&text).map(|found| found.end()).collect();
     for start in markers {
         let body_end = text[start..]
@@ -299,7 +299,7 @@ pub(crate) fn read_mod_manifest(path: &Path) -> Option<Value> {
     }
     let file = File::open(path).ok()?;
     let mut archive = zip::ZipArchive::new(file).ok()?;
-    let names: HashSet<String> = archive.file_names().map(str::to_owned).collect();
+    let names: HashSet<String> = archive.file_names().filter_map(|name| name.ok()).map(|name| name.to_string()).collect();
     let parsers: &[(&str, fn(&[u8]) -> Option<Value>)] = &[
         ("fabric.mod.json", fabric_manifest),
         ("quilt.mod.json", quilt_manifest),
@@ -455,7 +455,7 @@ pub(crate) fn dependency_graph(mods_directory: &Path) -> Result<Value, String> {
     Ok(json!({ "nodes": nodes, "edges": edges, "missing": missing }))
 }
 
-/// что сломается, если удалить мод: обратный обход по рёбрам.
+/// что сломается, если удалить мод: обратный обход по рёбрам
 pub(crate) fn removal_impact(graph: &Value, mod_id: &str) -> Value {
     let mut reverse: HashMap<String, Vec<String>> = HashMap::new();
     if let Some(edges) = graph.get("edges").and_then(Value::as_array) {
@@ -637,7 +637,7 @@ type="optional"
         )
         .unwrap();
 
-        // как и в Python, sidecar-файл сам попадает в узлы графа — фильтрует UI.
+        // боковой файл тоже становится узлом графа; его скрывает интерфейс
         let graph = dependency_graph(&mods).unwrap();
         let nodes = graph["nodes"].as_array().unwrap();
         let ids: Vec<&str> = nodes.iter().map(|node| node["id"].as_str().unwrap()).collect();
@@ -648,7 +648,6 @@ type="optional"
         let edges = graph["edges"].as_array().unwrap();
         assert_eq!(edges.len(), 1);
         assert_eq!(edges[0]["to"], json!("beta"));
-        // minecraft — шум, sodium и missingone — не установлены.
         let missing: Vec<&str> = graph["missing"].as_array().unwrap().iter().map(|item| item["id"].as_str().unwrap()).collect();
         assert_eq!(missing, vec!["sodium", "missingone"]);
 

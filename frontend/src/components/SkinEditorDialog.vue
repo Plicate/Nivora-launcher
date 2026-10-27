@@ -27,7 +27,7 @@ const emit = defineEmits<{
 type ToolId = 'brush' | 'eraser' | 'fill' | 'picker' | 'line' | 'rect' | 'lighten' | 'darken' | 'noise'
 
 const SIZE = 64
-// ключ текстуры предпросмотра: постоянный, меняется только содержимое.
+// ключ текстуры предпросмотра: постоянный, меняется только содержимое
 const EDITOR_TEXTURE_KEY = 'skin-editor:current'
 const OVERLAY_SCALE = 12
 const HISTORY_LIMIT = 60
@@ -99,7 +99,7 @@ const libraryOptions = computed<SelectOption[]>(() => [
 
 const regions = computed(() => skinRegions(model.value))
 
-/* ── цвет ─────────────────────────────────────────────────────────────── */
+/* цвет */
 
 function hexToRgb(hex: string): [number, number, number] {
   const normalized = hex.trim().replace(/^#/, '')
@@ -119,7 +119,7 @@ function rememberColor(value: string) {
   recentColors.value = [value, ...recentColors.value.filter((item) => item.toLowerCase() !== value.toLowerCase())].slice(0, 12)
 }
 
-/* ── история ──────────────────────────────────────────────────────────── */
+/* история */
 
 function pushHistory() {
   if (!context) return
@@ -148,7 +148,7 @@ function redo() {
   schedulePreview()
 }
 
-/* ── рисование ────────────────────────────────────────────────────────── */
+/* рисование */
 
 function clampByte(value: number): number {
   return Math.min(255, Math.max(0, Math.round(value)))
@@ -322,7 +322,7 @@ function clearTexture() {
   statusMessage.value = 'Текстура очищена'
 }
 
-/* ── загрузка скинов ──────────────────────────────────────────────────── */
+/* загрузка скинов */
 
 function mirrorRegion(source: SkinRegion, target: SkinRegion) {
   if (!context) return
@@ -341,8 +341,7 @@ function mirrorRegion(source: SkinRegion, target: SkinRegion) {
   context.putImageData(flipped, target.x, target.y)
 }
 
-/** 64×32 → 64×64: копируем правые конечности в левые слоты (зеркально),
- * как это делает сама Minecraft при загрузке старых скинов. */
+/** формат 64×32 не содержит левых конечностей, поэтому создаём их зеркально */
 function upgradeLegacyTexture() {
   if (!context) return
   const source = skinRegions('classic')
@@ -404,7 +403,7 @@ async function onFileChosen() {
   loadSkinFromImage(`data:image/png;base64,${file.data}`, file.fileName)
 }
 
-/* ── сохранение ───────────────────────────────────────────────────────── */
+/* сохранение */
 
 function textureDataUrl(): string {
   return textureCanvas.value?.toDataURL('image/png') || ''
@@ -463,7 +462,7 @@ async function exportFile() {
   }
 }
 
-/* ── 3D-предпросмотр ──────────────────────────────────────────────────── */
+/* 3D-предпросмотр */
 
 function schedulePreview(immediate = false) {
   previewDirty = true
@@ -523,7 +522,7 @@ function togglePart(index: number) {
   renderPreview()
 }
 
-/* ── сетка-оверлей ────────────────────────────────────────────────────── */
+/* сетка */
 
 function drawGridOverlay() {
   if (!gridContext) return
@@ -618,7 +617,7 @@ onBeforeUnmount(() => {
       <section class="dialog-card skin-editor-card" role="dialog" tabindex="-1" aria-modal="true" aria-label="Редактор скинов">
         <div class="panel-heading">
           <div>
-            <span class="eyebrow">Skin studio</span>
+            
             <h2>Сделать скин</h2>
             <p>{{ accountName }} · {{ model === 'slim' ? 'стройные руки' : 'широкие руки' }}</p>
           </div>

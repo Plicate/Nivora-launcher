@@ -1,11 +1,3 @@
-//! Экспорт списка модов экземпляра: Markdown / CSV / текст.
-//!
-//! Контракт операции `instance_mod_list_export`:
-//! `{name, format: "markdown"|"csv"|"text", include_disabled: bool}` →
-//! `{content, format, count, file_name}`. Данные те же, что показывает
-//! вкладка модов: jar-файлы каталога `mods` (включая `.disabled`),
-//! метаданные из `fabric.mod.json` / `META-INF/mods.toml` читает
-//! nivora-turbo scan-jars; без него остаётся имя файла.
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -63,7 +55,6 @@ pub fn instance_mod_list_export(request: &Value) -> Result<Value, String> {
         .to_owned();
     let mods_dir = path.join("mods");
     let entries = collect_mods(&mods_dir, include_disabled)?;
-    // метаданные модов — из jar-манифестов (nivora-turbo scan-jars), по пути.
     let mut manifests: std::collections::HashMap<PathBuf, super::global_search::JarManifest> = std::collections::HashMap::new();
     if let Some(binary) = super::turbo::turbo_binary() {
         for manifest in super::global_search::scan_jars(&binary, &entries) {
@@ -101,7 +92,22 @@ pub fn instance_mod_list_export(request: &Value) -> Result<Value, String> {
     let content = render(format, &display_name, name, &rows);
     let count = rows.len();
     let file_name = sanitize_file_name(&display_name, format);
-    Ok(json!({ "content": content, "format": format.name(), "count": count, "file_name": file_name }))
+    let mut response = json!({ "content": content, "format": format.name(), "count": count, "file_name": file_name });
+    // сохраняем файл в exports, чтобы интерфейс мог открыть его в проводнике
+    if request.get("save").and_then(Value::as_bool).unwrap_or(false) {
+        let exports_dir = path.join("exports");
+        if fs::symlink_metadata(&exports_dir).map(|meta| meta.file_type().is_symlink()).unwrap_or(false) {
+            return Err("Каталог exports экземпляра является символьной ссылкой".to_owned());
+        }
+        fs::create_dir_all(&exports_dir).map_err(|error| format!("Не удалось создать каталог exports: {error}"))?;
+        let target = exports_dir.join(&file_name);
+        fs::write(&target, content.as_bytes()).map_err(|error| format!("Не удалось записать файл экспорта: {error}"))?;
+        if let Some(map) = response.as_object_mut() {
+            map.insert("path".to_owned(), json!(target.to_string_lossy()));
+            map.insert("dir".to_owned(), json!(exports_dir.to_string_lossy()));
+        }
+    }
+    Ok(response)
 }
 
 struct Row {
@@ -259,7 +265,6 @@ mod tests {
         let result = instance_mod_list_export(&json!({ "name": "x", "format": "markdown" })).is_err();
         assert!(result, "несуществующий экземпляр должен давать ошибку");
         let _ = result;
-        // Через прямой вызов рендера: содержимое стабильного формата.
         let rows = vec![
             Row {
                 file: "sodium.jar".into(),

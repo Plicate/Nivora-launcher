@@ -1,7 +1,6 @@
-// карта UV-областей текстуры скина Minecraft для редактора скинов:
-export type SkinFace = 'top' | 'bottom' | 'right' | 'front' | 'left' | 'back'
-export type SkinPartId = 'head' | 'body' | 'rightArm' | 'leftArm' | 'rightLeg' | 'leftLeg'
-export type SkinLayer = 'base' | 'overlay'
+type SkinFace = 'top' | 'bottom' | 'right' | 'front' | 'left' | 'back'
+type SkinPartId = 'head' | 'body' | 'rightArm' | 'leftArm' | 'rightLeg' | 'leftLeg'
+type SkinLayer = 'base' | 'overlay'
 
 export interface SkinRegion {
   id: string
@@ -16,7 +15,7 @@ export interface SkinRegion {
   height: number
 }
 
-export interface SkinRegionBox {
+interface SkinRegionBox {
   u: number
   v: number
   w: number
@@ -42,7 +41,7 @@ const PART_LABELS: Record<SkinPartId, string> = {
   leftLeg: 'Левая нога',
 }
 
-/** Прямоугольники сторон одной «коробки» развёртки (как в skinRenderer). */
+/** прямоугольники граней в развёртке скина */
 export function boxRegions(box: SkinRegionBox): Record<SkinFace, { x: number; y: number; width: number; height: number }> {
   const { u, v, w, h, d } = box
   return {
@@ -73,10 +72,7 @@ function partLayouts(model: 'classic' | 'slim'): PartLayout[] {
   ]
 }
 
-/**
- * Все области текстуры 64×64. `legacy` — формат 64×32: размечаем только то,
- * что в нём есть (базовый слой, правые конечности и шляпа).
- */
+/** в формате 64×32 описаны только базовый слой и правая сторона тела */
 export function skinRegions(model: 'classic' | 'slim', legacy = false): SkinRegion[] {
   const regions: SkinRegion[] = []
   for (const layout of partLayouts(model)) {
@@ -108,7 +104,7 @@ export function skinRegions(model: 'classic' | 'slim', legacy = false): SkinRegi
   return legacy ? regions.filter((region) => region.y + region.height <= 32) : regions
 }
 
-/** Область, в которую попадает пиксель текстуры, или null. */
+/** область, в которую попадает пиксель текстуры, или null */
 export function regionAt(regions: SkinRegion[], x: number, y: number): SkinRegion | null {
   for (const region of regions) {
     if (x >= region.x && x < region.x + region.width && y >= region.y && y < region.y + region.height) return region

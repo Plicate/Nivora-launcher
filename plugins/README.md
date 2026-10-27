@@ -44,10 +44,10 @@ V2/v3 entrypoints run in QuickJS only after integrity validation, publisher-key 
 The current v3 SDK surface includes:
 
 - `api.runtime.getInfo()`, `getCapabilities()`, `getQuotaUsage()`, `assertCapability()`
-- `api.permissions.get()` and `set()`
+- `api.permissions.get()` and `set()`; `set()` can only revoke existing grants, while new grants require a user action in Plugin Center
 - `api.files.list/readText/writeText/remove()` with scopes `plugin`, `instance`, `launcher-root-readonly`
 - `api.config.readProjected(schemaId)`
-- `api.http.request(...)`
+- `api.http.request(...)` for HTTPS to allowlisted hosts; HTTP and configured proxies are blocked
 - `api.instances.list()` and `api.instances.getProcessMetrics(instanceName)`
 - `api.os.openUrl(url)`
 - `api.proxy.listRoutes()/saveRoutes()/addRoute()/removeRoute()`
@@ -79,7 +79,7 @@ Unsigned packages include SHA-256 integrity hashes. Signing and verification use
 
 ---
 
-<!-- Русская версия / Russian version -->
+<!-- русская версия / Russian version -->
 
 # SDK плагинов Nivora Launcher
 
@@ -127,10 +127,10 @@ V2/v3-entrypoint выполняются в QuickJS только после пр�
 Текущая поверхность v3 SDK:
 
 - `api.runtime.getInfo()`, `getCapabilities()`, `getQuotaUsage()`, `assertCapability()`
-- `api.permissions.get()` и `set()`
+- `api.permissions.get()` и `set()`; `set()` может только отзывать grants, новые выдаются пользователем в менеджере плагинов
 - `api.files.list/readText/writeText/remove()` со скоупами `plugin`, `instance`, `launcher-root-readonly`
 - `api.config.readProjected(schemaId)`
-- `api.http.request(...)`
+- `api.http.request(...)` для HTTPS к разрешённым хостам; HTTP и настроенные прокси блокируются
 - `api.instances.list()` и `api.instances.getProcessMetrics(instanceName)`
 - `api.os.openUrl(url)`
 - `api.proxy.listRoutes()/saveRoutes()/addRoute()/removeRoute()`

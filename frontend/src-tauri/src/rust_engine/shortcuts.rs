@@ -1,24 +1,5 @@
-//! Ярлыки экземпляров на рабочем столе и в меню приложений.
-//!
-//! Контракт операций (IPC через desktop-мост, данные — `envelope.data`):
-//! * `instance_shortcut_status {name}` → `{supported, platform, desktop, menu}`,
-//!   где `desktop`/`menu` = `{exists, path}`;
-//! * `instance_shortcut_create {name, location}` → `{path, location, icon}`,
-//!   `location` — `desktop` (по умолчанию) или `menu`, `icon` — `instance`
-//!   либо `fallback`;
-//! * `instance_shortcut_remove {name, location?}` → `{removed: [path]}`;
-//! * `shortcut_take_launch_request {}` → `{name}` — экземпляр, запрошенный
-//!   ярлыком (`--launch-instance`), выдаётся один раз.
-//!
-//! Ошибки — строки на русском (как во всём мосте). Ярлык запускает только
-//! сам лаунчер с аргументом `--launch-instance <имя каталога>`; имя проходит
-//! ту же проверку, что и каталоги экземпляров, произвольных команд нет.
-//!
-//! Форматы: Windows — `.lnk` через системный IShellLinkW (COM), иконка `.ico`;
-//! macOS — `.app`-обёртка с `Info.plist`, скриптом запуска и `icon.icns`;
-//! Linux — `.desktop` по спецификации freedesktop. Повторное создание
-//! перезаписывает только свой ярлык (реестр в `shortcuts/registry.json`),
-//! чужой файл с тем же именем не трогается.
+//! создаёт ярлыки экземпляров для рабочего стола и меню приложений
+//! ярлык запускает только лаунчер с проверенным именем экземпляра и не заменяет чужие файлы
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -35,9 +16,9 @@ const MAX_REGISTRY_BYTES: u64 = 1024 * 1024;
 const ASSETS_DIR: &str = ".nivora-launcher-assets";
 const MACOS_BUNDLE_PREFIX: &str = "com.nivora.launcher.shortcut.";
 
-/// Экземпляр, который попросили запустить ярлыком; выдаётся UI один раз.
+/// экземпляр, который попросили запустить ярлыком; выдаётся UI один раз
 static PENDING_LAUNCH: Mutex<Option<String>> = Mutex::new(None);
-/// Сериализация изменений реестра ярлыков между параллельными вызовами.
+/// сериализация изменений реестра ярлыков между параллельными вызовами
 static REGISTRY_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,8 +71,7 @@ impl Format {
     }
 }
 
-/// Всё, что нужно для создания ярлыка, без обращения к окружению процесса:
-/// так модуль тестируется без глобальных переменных.
+/// параметры среды, передаваемые модулю, в том числе для тестов
 #[derive(Debug, Clone)]
 pub struct Environment {
     pub format: Format,
@@ -109,7 +89,6 @@ pub struct Instance {
     pub path: PathBuf,
 }
 
-// ------------------------------------------------------------ операции ----
 
 pub fn instance_shortcut_status(request: &Value) -> Result<Value, String> {
     let environment = Environment::detect()?;
@@ -140,8 +119,7 @@ pub fn shortcut_take_launch_request(_request: &Value) -> Result<Value, String> {
     Ok(json!({ "name": name }))
 }
 
-/// Запомнить экземпляр из аргумента `--launch-instance` (старт или запрос
-/// второй копии). Невалидное имя отбрасывается.
+/// запоминает проверенное имя экземпляра для запуска
 pub fn set_pending_launch(name: &str) -> bool {
     match validate_instance_name(name) {
         Ok(valid) => {
@@ -152,7 +130,7 @@ pub fn set_pending_launch(name: &str) -> bool {
     }
 }
 
-/// `--launch-instance <имя>` или `--launch-instance=<имя>` из argv.
+/// читает имя экземпляра из аргумента `--launch-instance`
 pub fn launch_argument<I: IntoIterator<Item = String>>(arguments: I) -> Option<String> {
     let mut iterator = arguments.into_iter();
     while let Some(argument) = iterator.next() {
@@ -166,14 +144,13 @@ pub fn launch_argument<I: IntoIterator<Item = String>>(arguments: I) -> Option<S
     None
 }
 
-/// Удаление экземпляра убирает и его ярлыки (best-effort).
+/// удаляет ярлыки экземпляра, если доступна среда рабочего стола
 pub fn forget_instance(name: &str) {
     if let Ok(environment) = Environment::detect() {
         let _ = remove(&environment, name, None);
     }
 }
 
-// ------------------------------------------------------------- ядро ----
 
 fn instance_name(request: &Value) -> Result<String, String> {
     let raw = request
@@ -248,7 +225,7 @@ pub fn create(environment: &Environment, instance: &Instance, location: Location
             file_name(&target)
         ));
     }
-    // Экземпляр переименовали — старый ярлык этого места убираем.
+    // при переименовании экземпляра удаляем его старый ярлык
     if let Some(previous) = registry.get(&instance.name).and_then(|items| items.get(location.as_str())).map(PathBuf::from) {
         if previous != target && previous.exists() && is_ours(environment.format, &previous, &instance.name) {
             remove_path(&previous)?;
@@ -313,7 +290,7 @@ fn shortcut_path(
     let extension = environment.format.extension();
     let base = sanitize_file_stem(&instance.display_name, &instance.name);
     let candidate = directory.join(format!("{base}.{extension}"));
-    // Тот же файл уже записан за другим экземпляром — добавляем имя каталога.
+    // при совпадении имён добавляем имя каталога экземпляра
     let taken_by_other = registry.iter().any(|(owner, items)| {
         owner != &instance.name && items.values().any(|path| Path::new(path) == candidate)
     });
@@ -324,8 +301,7 @@ fn shortcut_path(
     }
 }
 
-/// Имя файла из отображаемого имени: пробелы и не-ASCII сохраняются,
-/// запрещённые в Windows/macOS/Linux символы и зарезервированные имена — нет.
+/// очищает отображаемое имя для пути на Windows, macOS и Linux
 pub fn sanitize_file_stem(display_name: &str, fallback: &str) -> String {
     let cleaned: String = display_name
         .chars()
@@ -367,7 +343,7 @@ fn remove_path(path: &Path) -> Result<(), String> {
     result.map_err(|error| format!("Не удалось удалить ярлык {}: {error}", path.display()))
 }
 
-/// Ярлык создан Nivora для этого экземпляра (защита от перезаписи чужого).
+/// проверяет, что ярлык принадлежит лаунчеру и этому экземпляру
 fn is_ours(format: Format, path: &Path, name: &str) -> bool {
     if is_symlink(path) {
         return false;
@@ -391,7 +367,6 @@ fn is_ours(format: Format, path: &Path, name: &str) -> bool {
     }
 }
 
-// ----------------------------------------------------------- реестр ----
 
 fn read_registry(state_dir: &Path) -> BTreeMap<String, BTreeMap<String, String>> {
     state::read_bounded_json(&state_dir.join(REGISTRY_FILE), MAX_REGISTRY_BYTES)
@@ -407,14 +382,12 @@ fn write_registry(state_dir: &Path, registry: &BTreeMap<String, BTreeMap<String,
     fs::rename(&temporary, state_dir.join(REGISTRY_FILE)).map_err(|error| format!("Не удалось записать реестр ярлыков: {error}"))
 }
 
-// ------------------------------------------------------------ иконки ----
 
 fn icon_base(environment: &Environment, name: &str) -> PathBuf {
     environment.state_dir.join("icons").join(name)
 }
 
-/// Иконка экземпляра в формате платформы. `None` — у экземпляра нет PNG-иконки
-/// (или она битая): используется иконка лаунчера.
+/// возвращает иконку экземпляра или `None`, если её нет или она повреждена
 fn prepare_icon(environment: &Environment, instance: &Instance) -> Result<Option<PathBuf>, String> {
     let Some(source) = instance_icon_png(&instance.path) else {
         return Ok(None);
@@ -468,11 +441,10 @@ pub struct Rgba {
 }
 
 impl Rgba {
-    /// собирать изображение из сырых RGBA-пикселей (тесты и бенчмарки).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn from_pixels(width: u32, height: u32, pixels: Vec<u8>) -> Rgba {
         Rgba { width, height, pixels }
     }
-    /// Вписать в квадрат `size`×`size` с прозрачными полями (билинейно).
     fn resize(&self, size: u32) -> Rgba {
         let scale = (size as f32 / self.width as f32).min(size as f32 / self.height as f32);
         let width = ((self.width as f32 * scale).round() as u32).clamp(1, size);
@@ -533,7 +505,6 @@ pub fn encode_png(image: &Rgba) -> Result<Vec<u8>, String> {
     Ok(output)
 }
 
-/// ICO с PNG-кадрами 256/48/32/16 (формат поддерживается с Windows Vista).
 pub fn build_ico(image: &Rgba) -> Result<Vec<u8>, String> {
     let sizes = [256u32, 48, 32, 16];
     let frames: Vec<Vec<u8>> = sizes.iter().map(|&size| encode_png(&image.resize(size))).collect::<Result<_, _>>()?;
@@ -556,7 +527,6 @@ pub fn build_ico(image: &Rgba) -> Result<Vec<u8>, String> {
     Ok(output)
 }
 
-/// ICNS с PNG-элементами ic07 (128), ic08 (256), ic09 (512).
 pub fn build_icns(image: &Rgba) -> Result<Vec<u8>, String> {
     let mut body = Vec::new();
     for (kind, size) in [(b"ic07", 128u32), (b"ic08", 256), (b"ic09", 512)] {
@@ -572,10 +542,8 @@ pub fn build_icns(image: &Rgba) -> Result<Vec<u8>, String> {
     Ok(output)
 }
 
-// ----------------------------------------------------------- форматы ----
 
-/// Аргумент Exec= по спецификации Desktop Entry: кавычки, экранирование
-/// `"` `` ` `` `$` `\`, затем строковое экранирование `\` и `%` → `%%`.
+/// экранирует аргумент `Exec` по правилам Desktop Entry
 pub fn desktop_exec_argument(value: &str) -> String {
     let mut quoted = String::from("\"");
     for character in value.chars() {
@@ -658,8 +626,7 @@ pub fn macos_launch_script(environment: &Environment, instance: &Instance) -> St
 }
 
 fn write_macos_bundle(environment: &Environment, instance: &Instance, target: &Path, icon: Option<&Path>) -> Result<(), String> {
-    // Сначала собираем пакет рядом, затем атомарно подменяем: Finder не
-    // увидит полусобранный .app.
+    // собираем пакет рядом и подменяем атомарно, чтобы Finder не увидел его частично
     let staging = target.with_extension("app-nivora-tmp");
     let _ = fs::remove_dir_all(&staging);
     let contents = staging.join("Contents");
@@ -682,7 +649,8 @@ fn write_macos_bundle(environment: &Environment, instance: &Instance, target: &P
     fs::rename(&staging, target).map_err(|error| format!("Не удалось записать ярлык {}: {error}", target.display()))
 }
 
-/// Строка аргументов Windows для CommandLineToArgvW: имя всегда в кавычках.
+/// экранирует аргумент для `CommandLineToArgvW`
+#[cfg_attr(not(windows), allow(dead_code))]
 pub fn windows_arguments(name: &str) -> String {
     format!("{LAUNCH_ARGUMENT} \"{name}\"")
 }
@@ -710,9 +678,7 @@ fn write_windows_link(environment: &Environment, instance: &Instance, target: &P
     })
 }
 
-/// Запись .lnk системным IShellLinkW: Windows сама формирует IDList,
-/// LinkInfo и Unicode-строки — пробелы и не-ASCII в путях без ручного
-/// кодирования. COM инициализируется на вызывающем (фоновом) потоке.
+/// создаёт `.lnk` через `IShellLinkW` в потоке с инициализированным COM
 #[cfg(windows)]
 pub mod windows_link {
     use std::ffi::c_void;
@@ -850,7 +816,6 @@ pub mod windows_link {
     }
 }
 
-// --------------------------------------------------------- окружение ----
 
 impl Environment {
     pub fn detect() -> Result<Self, String> {
@@ -880,8 +845,7 @@ fn home() -> PathBuf {
         .unwrap_or_else(std::env::temp_dir)
 }
 
-/// Исполняемый файл для ярлыка. AppImage монтируется во временный каталог —
-/// ярлык должен указывать на сам .AppImage.
+/// возвращает файл запуска; для AppImage это сам образ, а не точка монтирования
 fn launcher_executable() -> Result<PathBuf, String> {
     if let Some(appimage) = env_dir("APPIMAGE") {
         return Ok(appimage);
@@ -891,7 +855,6 @@ fn launcher_executable() -> Result<PathBuf, String> {
 
 fn fallback_icon(format: Format, launcher: &Path) -> Option<PathBuf> {
     match format {
-        // .lnk без своей иконки берёт иконку exe (индекс 0).
         Format::WindowsLnk => None,
         Format::MacApp => {
             let resources = launcher.parent()?.parent()?.join("Resources");
@@ -935,7 +898,7 @@ fn menu_directory(format: Format, data_home: &Path) -> PathBuf {
     }
 }
 
-/// XDG_DESKTOP_DIR из ~/.config/user-dirs.dirs (локализованный «Рабочий стол»).
+/// читает локализованный каталог рабочего стола из XDG-настроек
 fn xdg_user_dir(key: &str) -> Option<PathBuf> {
     let config = std::env::var_os("XDG_CONFIG_HOME")
         .filter(|value| !value.is_empty())
@@ -1048,7 +1011,6 @@ mod tests {
         let icon_line = content.lines().find(|line| line.starts_with("Icon=")).unwrap();
         let icon = PathBuf::from(&icon_line[5..]);
         assert_eq!(decode_png_rgba(&fs::read(&icon).unwrap()).unwrap().width, 256);
-        // Повтор — тот же файл, без дублей.
         let second = create(&environment, &item, Location::Desktop).unwrap();
         assert_eq!(second["path"], first["path"]);
         assert_eq!(fs::read_dir(&environment.desktop_dir).unwrap().count(), 1);
@@ -1069,7 +1031,6 @@ mod tests {
         item.display_name = "New Name".into();
         let new = PathBuf::from(create(&environment, &item, Location::Menu).unwrap()["path"].as_str().unwrap().to_owned());
         assert!(!old.exists() && new.exists());
-        // Чужой файл с тем же именем не перезаписывается и не удаляется.
         let foreign = environment.desktop_dir.join("New Name.desktop");
         fs::create_dir_all(&environment.desktop_dir).unwrap();
         fs::write(&foreign, "[Desktop Entry]\nName=Other\n").unwrap();
@@ -1108,7 +1069,6 @@ mod tests {
         let icns = fs::read(path.join("Contents/Resources/icon.icns")).unwrap();
         assert_eq!(&icns[..4], b"icns");
         assert_eq!(u32::from_be_bytes(icns[4..8].try_into().unwrap()) as usize, icns.len());
-        // Обновление на месте и удаление.
         create(&environment, &item, Location::Desktop).unwrap();
         assert_eq!(remove(&environment, "creative", Some(Location::Desktop)).unwrap().len(), 1);
         assert!(!path.exists());

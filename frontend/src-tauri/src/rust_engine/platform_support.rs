@@ -1,5 +1,4 @@
-// тонкий слой различий платформ: права дескрипторов, reparse-точки, сигналы
-// процессам, открытие путей в системе.
+// общие операции с процессами и путями для разных платформ
 use std::path::{Path, PathBuf};
 
 pub(crate) fn simplify_path(path: PathBuf) -> PathBuf {
@@ -11,7 +10,7 @@ pub(crate) fn simplify_path(path: PathBuf) -> PathBuf {
     path
 }
 
-/// `canonicalize` + [`simplify_path`].
+/// `canonicalize` + [`simplify_path`]
 pub(crate) fn canonical_path(path: &Path) -> std::io::Result<PathBuf> {
     std::fs::canonicalize(path).map(simplify_path)
 }
@@ -28,14 +27,6 @@ pub(crate) fn strip_verbatim_prefix(text: &str) -> Option<String> {
     None
 }
 
-/// применяет POSIX-биты прав там, где они есть; Windows пользуется ACL профиля.
-#[cfg(unix)]
-pub(crate) fn set_private_fd(fd: i32, mode: u32) {
-    unsafe {
-        libc::fchmod(fd, mode);
-    }
-}
-
 #[cfg(not(unix))]
 pub(crate) fn set_private_fd(_fd: i32, _mode: u32) {}
 
@@ -48,7 +39,7 @@ pub(crate) fn is_reparse_point(path: &Path) -> bool {
             #[cfg(windows)]
             {
                 use std::os::windows::fs::MetadataExt;
-                return metadata.file_attributes() & 0x400 != 0; // FILE_ATTRIBUTE_REPARSE_POINT
+                return metadata.file_attributes() & 0x400 != 0; // attribute FILE_ATTRIBUTE_REPARSE_POINT
             }
             #[cfg(not(windows))]
             false
@@ -63,7 +54,7 @@ pub(crate) fn process_exists(pid: i32) -> bool {
     }
     #[cfg(unix)]
     unsafe {
-        // kill с нулевым сигналом только проверяет существование.
+        // kill с нулевым сигналом только проверяет существование
         let status = libc::kill(pid, 0);
         if status == 0 {
             return true;
@@ -79,7 +70,7 @@ pub(crate) fn process_exists(pid: i32) -> bool {
             CloseHandle(handle);
             return true;
         }
-        // отказ в доступе всё равно означает, что PID существует.
+        // отказ в доступе всё равно означает, что PID существует
         std::io::Error::last_os_error().raw_os_error() == Some(5)
     }
 }
@@ -99,7 +90,7 @@ pub(crate) fn prepare_process(command: &mut std::process::Command) {
     }
 }
 
-/// завершение дерева процессов: группа на unix, taskkill /T на Windows.
+/// завершение дерева процессов: группа на unix, taskkill /T на Windows
 pub(crate) fn terminate_process_tree(pid: i32, force: bool) {
     #[cfg(unix)]
     {
@@ -143,7 +134,7 @@ fn which_taskkill() -> Option<std::path::PathBuf> {
     system32.exists().then_some(system32)
 }
 
-/// открытие пути средствами системы (файловый менеджер, браузер и т.п.).
+/// открытие пути средствами системы (файловый менеджер, браузер и т.п.)
 pub(crate) fn open_path(path: &Path) -> Result<(), String> {
     #[cfg(windows)]
     {
@@ -173,7 +164,8 @@ pub(crate) fn open_path(path: &Path) -> Result<(), String> {
     }
 }
 
-/// имя платформы в терминах sys.platform из Python.
+/// возвращает идентификатор платформы: win32, darwin или linux
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn sys_platform() -> &'static str {
     #[cfg(windows)]
     { "win32" }
@@ -201,7 +193,7 @@ mod tests {
         assert!(process_exists(std::process::id() as i32));
         assert!(!process_exists(0));
         assert!(!process_exists(-5));
-        // PID 0x7fffffff на Linux в пользовательском пространстве не существует.
+        // pid 0x7fffffff на Linux в пользовательском пространстве не существует
         assert!(!process_exists(i32::MAX));
     }
 

@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Проверка рендеринга скинов</title>
+    <style>
+      body {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        margin: 0;
+        background: #222;
+      }
+
+      canvas {
+        width: 260px;
+        height: 300px;
+        background: #333;
+      }
+
+      #log {
+        width: 100%;
+        color: #eee;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="front"></canvas>
+    <canvas id="cape"></canvas>
+    <canvas id="elytra"></canvas>
+    <canvas id="side"></canvas>
+    <pre id="log" aria-live="polite"></pre>
+
+    <script>
+      const log = document.querySelector('#log')
+      window.onerror = (message, source, line) => {
+        log.textContent += `ERR ${message} ${line}\n`
+      }
+      window.addEventListener('unhandledrejection', (event) => {
+        log.textContent += `REJ ${event.reason}\n`
+      })
+    </script>
+    <script type="module">
+      import { SkinRenderer } from '/src/services/skinRenderer.ts'
+
+      const scenes = [
+        { id: 'front', yaw: -0.5, pitch: 0.1, back: null },
+        { id: 'cape', yaw: Math.PI - 0.5, pitch: 0.1, back: 'cape' },
+        { id: 'elytra', yaw: Math.PI - 0.5, pitch: 0.2, back: 'elytra' },
+        { id: 'side', yaw: Math.PI / 2, pitch: 0, back: 'cape' },
+      ]
+      const fixture = '/tests/fixtures/skin/'
+      const log = (message) => {
+        document.querySelector('#log').textContent += `${message}\n`
+      }
+
+      log(`webgl: ${Boolean(document.createElement('canvas').getContext('webgl'))}`)
+      for (const scene of scenes) {
+        try {
+          const renderer = new SkinRenderer(document.getElementById(scene.id))
+          const draw = () => renderer.render({
+            skin: `${fixture}jeb.png`,
+            cape: `${fixture}cape.png`,
+            model: 'classic',
+            back: scene.back,
+            yaw: scene.yaw,
+            pitch: scene.pitch,
+          }, 520, 600)
+          renderer.onChange(() => {
+            draw()
+            log(`${scene.id} status ${renderer.skinStatus(`${fixture}jeb.png`)}`)
+          })
+          draw()
+        } catch (error) {
+          log(`fail ${error}`)
+        }
+      }
+    </script>
+  </body>
+</html>

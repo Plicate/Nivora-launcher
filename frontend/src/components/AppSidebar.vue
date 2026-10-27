@@ -4,6 +4,7 @@ import Icon from './Icon.vue'
 import BrandLogo from './BrandLogo.vue'
 import CustomSelect from './CustomSelect.vue'
 import type { InstanceInfo, SelectOption, SidebarPosition, SidebarWidthMode, ViewName } from '../types'
+import { LAUNCHER_VERSION_LABEL } from '../version'
 
 const props = withDefaults(defineProps<{
   current: ViewName
@@ -55,7 +56,7 @@ const orderedGroupNames = computed(() => [
 ])
 const groupFilters = computed(() => [
   { value: 'all', label: 'Все экземпляры', icon: 'instances', count: props.instances.length },
-  { value: 'ungrouped', label: 'Без группы', icon: 'folder', count: props.instances.filter((instance) => !instance.group?.trim()).length },
+  { value: 'ungrouped', label: 'Без подборки', icon: 'folder', count: props.instances.filter((instance) => !instance.group?.trim()).length },
   ...orderedGroupNames.value.map((group) => ({
     value: `group:${group}`,
     label: group,
@@ -169,7 +170,7 @@ const groupFilters = computed(() => [
     <div class="sidebar-footer">
       <Icon class="sidebar-footer-icon" :name="cloudConfigured ? 'cloud' : 'hard-drive'" :size="14" />
       <span>{{ cloudConfigured ? 'Облако подключено' : 'Только локально' }}</span>
-      <small>1.1</small>
+      <small>{{ LAUNCHER_VERSION_LABEL }}</small>
     </div>
     <div
       v-if="widthMode === 'manual' && (position === 'left' || position === 'right')"

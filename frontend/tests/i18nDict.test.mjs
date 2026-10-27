@@ -1,6 +1,3 @@
-// Словарь локализации: источник ключей — русские строки разметки. Тест
-// держит словарь целым: дубли ключей, пустые переводы, кириллица в
-// английских значениях и битые шаблоны паттернов ломали бы тихо.
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -45,7 +42,7 @@ test('translate: точные ключи, паттерны с группами, 
   assert.equal(translate('  Сохранить  '), '  Save  ')
   assert.equal(translate('Доступна версия 1.2.3.'), 'Version 1.2.3 is available.')
   assert.equal(translate('Скачано 10 из 20 байт.'), 'Downloaded 10 of 20 bytes.')
-  // Неизвестная строка возвращается как есть — graceful fallback.
+  // неизвестные строки остаются без перевода
   assert.equal(translate('Совершенно новая строка'), 'Совершенно новая строка')
   assert.equal(translate(''), '')
 })

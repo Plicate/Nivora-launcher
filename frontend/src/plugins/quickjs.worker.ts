@@ -82,7 +82,7 @@ function post(message: WorkerMessage) {
   try {
     workerScope.postMessage(message)
   } catch {
-    // a terminated parent cannot receive any further runtime messages.
+    // завершившемуся родительскому процессу уже нельзя отправить сообщение
   }
 }
 
@@ -128,7 +128,7 @@ function disposeRuntime() {
     try {
       deferred.dispose()
     } catch {
-      // the context may already have been interrupted or disposed.
+      // контекст мог быть прерван или уже очищен
     }
   }
   pendingHostCalls.clear()
@@ -136,20 +136,20 @@ function disposeRuntime() {
     try {
       handle.dispose()
     } catch {
-      // the context may already have been interrupted or disposed.
+      // контекст мог быть прерван или уже очищен
     }
   }
   internalFunctions.clear()
   try {
     context?.dispose()
   } catch {
-    // continue disposing the runtime even if QuickJS reports a leaked handle.
+    // продолжаем очистку, даже если QuickJS сообщает о незакрытом ресурсе
   }
   context = undefined
   try {
     runtime?.dispose()
   } catch {
-    // the worker will be terminated by the parent after a fatal error.
+    // после критической ошибки родитель завершит рабочий поток
   }
   runtime = undefined
 }
@@ -978,7 +978,7 @@ function processHostCallResult(message: Extract<ParentMessage, { type: 'host-cal
   if (!deferred) return
   pendingHostCalls.delete(message.id)
   if (!context || disposed) {
-    try { deferred.dispose() } catch { /* disposed with the runtime */ }
+    try { deferred.dispose() } catch { /* runtime уже очищен */ }
     return
   }
   if (byteLength(message.replyJson) > MAX_RPC_BYTES) {
@@ -996,7 +996,7 @@ function processHostCallResult(message: Extract<ParentMessage, { type: 'host-cal
     }
     pumpPendingJobs()
   } catch (error) {
-    try { deferred.dispose() } catch { /* disposed with the runtime */ }
+    try { deferred.dispose() } catch { /* runtime уже очищен */ }
     failRuntime(error)
   }
 }

@@ -1,6 +1,5 @@
-// ник Minecraft: 3–16 символов, только латиница, цифры и «_». Те же
-export const NICKNAME_MIN_LENGTH = 3
-export const NICKNAME_MAX_LENGTH = 16
+const NICKNAME_MIN_LENGTH = 3
+const NICKNAME_MAX_LENGTH = 16
 const ALLOWED_CHARACTER = /^[A-Za-z0-9_]$/
 
 function describeCharacter(character: string): string {
@@ -9,7 +8,7 @@ function describeCharacter(character: string): string {
   return `«${character}»`
 }
 
-/** Текст ошибки или пустая строка, если ник допустим. */
+/** текст ошибки или пустая строка, если ник допустим */
 export function nicknameError(value: string): string {
   if (!value) return 'Введите ник'
   const characters = Array.from(value)

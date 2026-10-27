@@ -43,7 +43,7 @@ creators:
 
 ---
 
-<!-- English version / Английская версия -->
+<!-- english version / Английская версия -->
 
 # Theme format
 

@@ -110,7 +110,7 @@ const handleDialogKeydown = useModalFocus(dialogOpen, dialogElement, closeDialog
     <section ref="dialogElement" class="catalog-details-dialog" role="dialog" tabindex="-1" aria-modal="true" :aria-label="`Подробности: ${title}`" @keydown="handleDialogKeydown">
       <header class="catalog-details-header">
          <div class="catalog-details-mark"><img v-if="details.icon_url || details.icon" :src="String(details.icon_url || details.icon)" alt="" /><Icon v-else :name="projectType === 'plugin' ? 'plug' : 'mods'" :size="24" /></div>
-        <div class="catalog-details-title"><span class="eyebrow">{{ catalogName }} · {{ projectType }}</span><h2>{{ title }}</h2><p>{{ String(details.author || details.owner || '') }}</p></div>
+        <div class="catalog-details-title"><h2>{{ title }}</h2><p>{{ String(details.author || details.owner || '') }}</p></div>
          <button class="icon-button" type="button" aria-label="Закрыть подробности" @click="closeDialog"><Icon name="close" :size="18" /></button>
       </header>
 
@@ -130,6 +130,7 @@ const handleDialogKeydown = useModalFocus(dialogOpen, dialogElement, closeDialog
           </section>
           <div class="catalog-details-facts">
             <div v-if="formatCount(details.downloads)"><span>Загрузки</span><strong>{{ formatCount(details.downloads) }}</strong></div>
+            <div v-if="formatCount(details.follows)"><span>В избранном</span><strong>{{ formatCount(details.follows) }}</strong></div>
             <div v-if="licenseName"><span>Лицензия</span><strong>{{ licenseName }}</strong></div>
             <div v-if="formatDate(details.date_created || details.created_at || details.datePublished)"><span>Опубликовано</span><strong>{{ formatDate(details.date_created || details.created_at || details.datePublished) }}</strong></div>
             <div v-if="formatDate(details.date_modified || details.updated_at || details.lastUpdated)"><span>Обновлено</span><strong>{{ formatDate(details.date_modified || details.updated_at || details.lastUpdated) }}</strong></div>

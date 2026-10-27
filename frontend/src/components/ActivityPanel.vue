@@ -10,7 +10,7 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{ close: []; cancel: [] }>()
-// внутри webview обычные <a target="_blank"> не открываются — только через бэкенд.
+// ссылки из встроенного окна открываем через бэкенд
 const openFailed = ref(false)
 const copyState = ref<'idle' | 'done' | 'failed'>('idle')
 async function openVerificationUri(): Promise<void> {
@@ -24,7 +24,7 @@ async function openVerificationUri(): Promise<void> {
   }
 }
 
-/// быстрое копирование содержимого маркера работы: заголовок, статус и лог.
+/// быстрое копирование содержимого маркера работы: заголовок, статус и лог
 async function copyActivitySummary(): Promise<void> {
   const text = [
     props.activity.title,
@@ -58,7 +58,7 @@ async function copyActivitySummary(): Promise<void> {
     <aside v-if="activity.open" class="activity-panel">
       <div class="activity-header">
         <div>
-          <span class="eyebrow">ACTIVITY</span>
+          
           <h2>{{ activity.title }}</h2>
         </div>
          <div class="activity-header-actions">
@@ -90,7 +90,7 @@ async function copyActivitySummary(): Promise<void> {
         <span :style="{ width: `${activity.progress}%` }" />
       </div>
       <div v-if="activity.verification_code" class="verification-card">
-        <span class="eyebrow">MICROSOFT DEVICE CODE</span>
+        
         <strong>{{ activity.verification_code }}</strong>
         <div class="verification-qr">
           <QrCode :value="activity.verification_uri || 'https://microsoft.com/devicelogin'" :size="132" label="QR-код страницы входа Microsoft" />

@@ -1,7 +1,4 @@
-// порт python-модулей cloud_storage.py + gui_cloud_ops.py: WebDAV-синхронизация
-// данных лаунчера. Манифест подписан HMAC-SHA256 локальным ключом (файл
-// cloud-manifest.key, формат байтов подписи совместим с Python-воркером);
-// пароль хранится в libsecret (Linux) или в диспетчере учётных данных (Windows).
+// подпись WebDAV-манифеста считается через HMAC-SHA256; пароль хранится в системном хранилище
 use base64::Engine;
 use quick_xml::events::Event;
 use quick_xml::name::ResolveResult;
@@ -29,16 +26,16 @@ const MAX_TOTAL_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const MAX_REMOTE_ENTRIES: usize = 10_000;
 const SECRET_SERVICE: &str = "trial-launcher-webdav";
 
-/// имена деревьев, не попадающих в облако (совпадает с Python-воркером).
+/// имена каталогов, исключённых из облачной синхронизации
 const EXCLUDED_TREE_NAMES: [&str; 3] = ["logs", ".trial-cell", "plugins"];
-/// серверные метаданные экземпляра не восстанавливаются в game/.
+/// серверные метаданные экземпляра не восстанавливаются в game/
 const SERVER_METADATA_NAMES: [&str; 3] = [
     ".trial-launcher-server.json",
     ".trial-launcher-live.json",
     ".trial-launcher-metrics.json",
 ];
-/// никогда не выгружается и не восстанавливается: управляющие файлы,
-/// аккаунты (токены) и ключ манифеста.
+/// управляющие файлы, токены аккаунтов и ключ манифеста не выгружаются
+/// и не восстанавливаются
 const EXCLUDED_FILE_NAMES: [&str; 8] = [
     ".trial-launcher.json",
     ".trial-launcher-instance.json",
@@ -50,7 +47,7 @@ const EXCLUDED_FILE_NAMES: [&str; 8] = [
     MANIFEST_KEY_FILE,
 ];
 
-/// настройки, восстанавливаемые из облака (перечень из cloud_storage.py).
+/// настройки, разрешённые к восстановлению из облака
 const RESTORABLE_SETTINGS: &[&str] = &[
     "memory",
     "max_downloads",
@@ -118,8 +115,6 @@ fn unix_now() -> f64 {
         .unwrap_or(0.0)
 }
 
-// ─── ключи путей ────────────────────────────────────────────────────────────
-
 fn safe_key(value: &str) -> Result<String, String> {
     let key = value.replace('\\', "/");
     let key = key.trim_matches('/');
@@ -157,9 +152,8 @@ fn safe_remote_path(value: &str) -> Result<String, String> {
     Ok(joined.chars().take(512).collect())
 }
 
-/// https-only endpoint без учётных данных в URL; нормализация как
-/// urlsplit/urlunsplit в Python: query и fragment отбрасываются, путь без
-/// завершающих «/». Возвращает строку БЕЗ завершающего слэша.
+/// требует HTTPS и запрещает учётные данные; обрезает пробелы и завершающие `/`
+/// во входе, удаляет параметры запроса и фрагмент; пустой ввод остаётся пустым
 fn validated_url(value: &str) -> Result<String, String> {
     const MESSAGE: &str = "WebDAV endpoint должен иметь вид https://host/remote.php/dav/files/user";
     let url = value.trim().trim_end_matches('/');
@@ -175,7 +169,7 @@ fn validated_url(value: &str) -> Result<String, String> {
     let netloc_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     let netloc = &rest[..netloc_end];
     let path = rest[netloc_end..].split(['?', '#']).next().unwrap_or("");
-    // учётные данные в netloc запрещены (user:pass@host)
+    // запрещает userinfo в адресе (например, user:pass@host)
     let host_part = match netloc.rfind('@') {
         Some(position) => &netloc[position + 1..],
         None => netloc,
@@ -197,8 +191,7 @@ fn validated_url(value: &str) -> Result<String, String> {
     Ok(format!("https://{netloc}{path}"))
 }
 
-/// urllib.parse.quote(part, safe=""): кодируется всё, кроме unreserved.
-/// Используется и WebDAV-путями (cloud.rs), и путями GitHub (github_plugins.rs).
+/// кодирует байты сегмента пути, оставляя незарезервированные ASCII-символы
 pub(crate) fn percent_encode_path_segment(part: &str) -> String {
     let mut out = String::with_capacity(part.len());
     for byte in part.as_bytes() {
@@ -231,7 +224,7 @@ fn percent_decode_path(value: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// origin как в Python: (scheme, hostname, port or 443).
+/// возвращает схему, имя хоста и порт (443, если порт не указан)
 fn url_origin(url: &str) -> (String, String, u16) {
     match url::Url::parse(url) {
         Ok(parsed) => (
@@ -251,8 +244,6 @@ fn format_http_error(status: u16) -> String {
         other => format!("WebDAV вернул HTTP {other}."),
     }
 }
-
-// ─── секреты (libsecret / диспетчер учётных данных Windows) ─────────────────
 
 fn secret_attributes(url: &str, username: &str) -> Vec<String> {
     vec![
@@ -289,7 +280,7 @@ fn secret_get(url: &str, username: &str, soft: bool) -> Result<String, String> {
         let mut arguments = vec!["lookup".to_owned()];
         arguments.extend(secret_attributes(url, username));
         match run_secret_tool(&tool, &arguments, None) {
-            // secret-tool lookup печатает пароль и завершается нулём
+            // при успехе команда возвращает пароль через стандартный вывод
             Ok(output) if output.success => {
                 Ok(output.stdout.trim_end_matches(['\r', '\n']).to_owned())
             }
@@ -355,7 +346,7 @@ fn secret_clear(url: &str, username: &str) -> Result<(), String> {
         let mut arguments = vec!["clear".to_owned()];
         arguments.extend(secret_attributes(url, username));
         match run_secret_tool(&tool, &arguments, None) {
-            // secret-tool clear возвращает 1, когда записи нет, — это успех
+            // отсутствующая запись (код 1) считается успешно удалённой
             Ok(output) if output.success || output.code == 1 => Ok(()),
             Ok(_) => Err("libsecret не удалил пароль WebDAV".to_owned()),
             Err(_) => Err("Не удалось удалить пароль WebDAV из libsecret".to_owned()),
@@ -370,8 +361,8 @@ struct SecretToolOutput {
     stdout: String,
 }
 
-/// secret-tool с таймаутом 5 секунд (subprocess.run(timeout=5) в Python):
-/// по истечении процесс убивается. Ненулевой код возврата — не ошибка запуска.
+/// завершает процесс через 5 секунд; ненулевой код возврата означает ошибку команды,
+/// но не ошибку запуска
 #[cfg(not(windows))]
 fn run_secret_tool(
     binary: &Path,
@@ -390,7 +381,7 @@ fn run_secret_tool(
         .stderr(Stdio::null())
         .spawn()
         .map_err(|error| error.to_string())?;
-    // пароль мал (сотни байт) — помещается в буфер пайпа, блокировки нет
+    // пароль небольшой и помещается в буфер стандартного ввода процесса
     if let Some(password) = stdin {
         if let Some(pipe) = child.stdin.as_mut() {
             let _ = pipe.write_all(password.as_bytes());
@@ -425,8 +416,6 @@ fn run_secret_tool(
     }
 }
 
-// ─── HMAC-SHA256 (подпись манифеста) ────────────────────────────────────────
-
 fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
     const BLOCK: usize = 64;
     let mut key_block = [0u8; BLOCK];
@@ -457,7 +446,7 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-/// hmac.compare_digest — сравнение за постоянное время.
+/// для строк одинаковой длины сравнивает байты без раннего выхода
 fn constant_time_equal(left: &str, right: &str) -> bool {
     let (left, right) = (left.as_bytes(), right.as_bytes());
     if left.len() != right.len() {
@@ -468,8 +457,6 @@ fn constant_time_equal(left: &str, right: &str) -> bool {
         .fold(0u8, |acc, (a, b)| acc | (a ^ b))
         == 0
 }
-
-// ─── WebDAV-клиент ──────────────────────────────────────────────────────────
 
 struct CloudFile {
     key: String,
@@ -496,8 +483,7 @@ impl WebDavStorage {
         let url = validated_url(&raw_url)?;
         let username = store.str_setting("cloud_username").trim().to_owned();
         let remote_path = safe_remote_path(&store.str_setting("cloud_remote_path"))?;
-        // пароль ищется по СЫРОМУ значению настройки — так же, как в Python:
-        // атрибуты libsecret строятся из settings.cloud_url без нормализации.
+        // секрет ищется по исходному cloud_url; это значение входит в его атрибуты
         let password = secret_get(&raw_url, &username, false)?;
         if url.is_empty() || username.is_empty() || password.is_empty() {
             return Err("Сначала настройте WebDAV endpoint, логин и пароль или токен".to_owned());
@@ -512,8 +498,8 @@ impl WebDavStorage {
         } else {
             format!("{url}/{suffix}/")
         };
-        // как в Python: WebDAV ходит напрямую (ProxyHandler({})), без прокси
-        // лаунчера; таймаут — max(5, download_timeout_seconds), одна попытка.
+        // прокси лаунчера не используется в WebDAV; таймаут не меньше 5 секунд,
+        // выполняется одна попытка
         let timeout = store
             .int_setting("download_timeout_seconds")
             .clamp(5, i64::MAX)
@@ -527,7 +513,7 @@ impl WebDavStorage {
         })
     }
 
-    /// редиректы WebDAV: только тот же origin и только https.
+    /// разрешает перенаправления WebDAV только на тот же источник (схема, хост, порт) и HTTPS
     fn redirect_validator<'a>(original: &'a str) -> impl Fn(&str) -> Result<(), String> + 'a {
         let origin = url_origin(original);
         move |target: &str| {
@@ -573,7 +559,7 @@ impl WebDavStorage {
             )
             .map_err(|error| {
                 if error.contains("слишком большой") {
-                    // лимит ответа в терминах WebDAV, как в cloud_storage.py
+                    // преобразует превышение лимита ответа в ошибку WebDAV
                     "Ответ WebDAV слишком большой".to_owned()
                 } else {
                     format!("Не удалось подключиться к WebDAV: {error}")
@@ -661,9 +647,8 @@ impl WebDavStorage {
         if size > MAX_FILE_BYTES {
             return Err(format!("Файл слишком большой для синхронизации: {safe}"));
         }
-        // HttpClient шлёт тело байтами, поэтому файл читается в память (лимит
-        // 512 МиБ выше). Python стримил дескриптором — различие только в пике
-        // потребления памяти, контракт WebDAV тот же.
+        // клиент HttpClient держит тело в памяти, поэтому файл читается целиком;
+        // размер файла ограничен 512 МиБ
         let content =
             fs::read(path).map_err(|error| format!("Не удалось прочитать файл {key}: {error}"))?;
         self.ensure_parent_collection(&safe)?;
@@ -781,7 +766,7 @@ impl WebDavStorage {
     }
 }
 
-/// одна запись PROPFIND: href + первый propstat/prop.
+/// одна запись PROPFIND: href и первый propstat/prop
 struct DavEntry {
     href: String,
     has_prop: bool,
@@ -790,8 +775,7 @@ struct DavEntry {
     modified: String,
 }
 
-/// разбор multistatus-ответа: учитываются только элементы пространства имён
-/// DAV: (как ElementTree-поиск "{DAV:}…" в Python).
+/// разбирает multistatus и учитывает только элементы пространства имён DAV:
 fn parse_propfind(body: &[u8]) -> Result<Vec<DavEntry>, String> {
     use quick_xml::NsReader;
     let text = std::str::from_utf8(body)
@@ -851,7 +835,7 @@ fn parse_propfind(body: &[u8]) -> Result<Vec<DavEntry>, String> {
                     buffer.clear();
                     continue;
                 }
-                // самозакрытый элемент не имеет текста и потомков
+                // самозакрытый элемент не содержит текста или потомков
                 if tag.local_name().as_ref() == "collection" && in_resourcetype {
                     if let Some(entry) = current.as_mut() {
                         entry.is_collection = true;
@@ -860,8 +844,7 @@ fn parse_propfind(body: &[u8]) -> Result<Vec<DavEntry>, String> {
             }
             Event::Text(text) => {
                 if let Some(target) = capture {
-                    // текст уже расэнскейплен ридером (trim_text + decode),
-                    // дополнительно декодируем сущности XML 1.0
+                    // декодирует текстовое содержимое XML 1.0
                     let value = text.xml10_content().into_owned();
                     if let Some(entry) = current.as_mut() {
                         match target {
@@ -900,7 +883,7 @@ fn parse_propfind(body: &[u8]) -> Result<Vec<DavEntry>, String> {
     Ok(entries)
 }
 
-/// RFC 2822/1123 дата («Sun, 01 Nov 2026 12:00:00 GMT») → unix-время.
+/// преобразует дату HTTP (RFC 2822/1123) в Unix-время UTC
 fn parse_http_date(value: &str) -> f64 {
     let parts: Vec<&str> = value.split_whitespace().collect();
     if parts.len() < 5 {
@@ -938,7 +921,7 @@ fn parse_http_date(value: &str) -> f64 {
         (Ok(hour), Ok(minute), Ok(second)) => (hour, minute, second),
         _ => return 0.0,
     };
-    // дни с начала эпохи (гражданский алгоритм Хиннанта, UTC)
+    // преобразует календарную дату UTC в число дней от начала эпохи Unix
     let years = if month <= 2 { year - 1 } else { year };
     let era = years.div_euclid(400);
     let year_of_era = years - era * 400;
@@ -947,8 +930,6 @@ fn parse_http_date(value: &str) -> f64 {
     let days = era * 146_097 + day_of_era - 719_468;
     (days * 86_400 + hour * 3_600 + minute * 60 + second) as f64
 }
-
-// ─── публичное состояние и пароль ───────────────────────────────────────────
 
 fn cloud_has_password(store: &ConfigStore) -> bool {
     secret_get(
@@ -989,8 +970,6 @@ fn cloud_settings_public(store: &ConfigStore) -> Value {
     })
 }
 
-// ─── источники синхронизации ────────────────────────────────────────────────
-
 fn is_protected_local_path(store: &ConfigStore, path: &Path) -> bool {
     let resolved = match fs::canonicalize(path) {
         Ok(resolved) => resolved,
@@ -1016,7 +995,7 @@ fn is_protected_local_path(store: &ConfigStore, path: &Path) -> bool {
     false
 }
 
-/// файлы, попадающие в облачный бэкап: (ключ, путь).
+/// файлы, попадающие в облачный бэкап: (ключ, путь)
 fn sync_sources(store: &ConfigStore) -> Result<Vec<(String, PathBuf)>, String> {
     let mut roots: Vec<(&str, PathBuf)> = vec![("data", store.paths.data_home.clone())];
     let game_dir = store.game_dir()?;
@@ -1080,7 +1059,7 @@ fn sync_sources(store: &ConfigStore) -> Result<Vec<(String, PathBuf)>, String> {
     Ok(sources)
 }
 
-/// аналог sorted(root.rglob("*")) — глобальная сортировка путей.
+/// обходит дерево каталогов и сортирует все найденные пути
 fn walk_sorted(root: &Path) -> Result<Vec<PathBuf>, String> {
     let mut out: Vec<PathBuf> = Vec::new();
     let mut stack = vec![root.to_owned()];
@@ -1104,13 +1083,13 @@ fn walk_sorted(root: &Path) -> Result<Vec<PathBuf>, String> {
     Ok(out)
 }
 
-/// локальный путь для ключа; None — ключ не восстанавливается.
+/// возвращает локальный путь или None, если ключ нельзя восстановить
 fn local_target(store: &ConfigStore, key: &str) -> Result<Option<PathBuf>, String> {
     let safe = safe_key(key)?;
     if safe == "config/settings.json" {
         return Ok(Some(store.paths.settings_file.clone()));
     }
-    // account tokens are never restored from DAV, even when the upload opt-in is set.
+    // токены аккаунтов не восстанавливаются из DAV, даже если включена их загрузка
     if safe == "config/accounts.json" {
         return Ok(None);
     }
@@ -1188,11 +1167,8 @@ fn atomic_file_write(path: &Path, content: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
-// ─── манифест ───────────────────────────────────────────────────────────────
-
-/// байты = json.dumps(filtered, ensure_ascii=False, sort_keys=True, indent=2):
-/// ключи вставляются по алфавиту, чтобы порядок совпадал и при BTreeMap, и при
-/// IndexMap (preserve_order).
+/// сериализует настройки как UTF-8 JSON с отступами и ключами по алфавиту;
+/// порядок не зависит от используемого типа Map
 fn filtered_settings_bytes(store: &ConfigStore) -> Result<Vec<u8>, String> {
     let settings = store.settings();
     let mut keys: Vec<&str> = RESTORABLE_SETTINGS
@@ -1266,9 +1242,8 @@ fn manifest_key(store: &ConfigStore) -> Result<Vec<u8>, String> {
     }
 }
 
-/// подписываемые байты: json.dumps(..., sort_keys=True, separators=(",", ":")).
-/// Ключи вставляются в алфавитном порядке (files, format; внутри файла —
-/// key, modified_at, sha256, size) — байты совпадают с Python-воркером.
+/// подписывает компактный JSON с ключами в алфавитном порядке: files, format;
+/// каждая запись содержит `key`, `modified_at`, `sha256` и `size`
 fn manifest_payload(files: &[Value]) -> Result<Vec<u8>, String> {
     let mut normalized: Vec<Value> = Vec::with_capacity(files.len());
     for item in files {
@@ -1316,12 +1291,10 @@ fn sha256_of(content: &[u8]) -> String {
 }
 
 struct LoadedManifest {
-    #[allow(dead_code)]
-    updated_at: f64,
     files: Vec<Value>,
 }
 
-/// int() из Python: строки с пробелами, числа; иначе — ошибка записи.
+/// принимает числа и целые числа в строках, удаляя пробелы по краям
 fn manifest_int(item: &Value, key: &str) -> Result<i64, String> {
     match item.get(key) {
         None | Some(Value::Null) => Err("некорректную запись".to_owned()),
@@ -1412,10 +1385,7 @@ fn load_manifest(
     }
     let payload_digest = sha256_of(&manifest_payload(&files)?);
     Ok((
-        LoadedManifest {
-            updated_at: raw.get("updated_at").and_then(Value::as_f64).unwrap_or(0.0),
-            files,
-        },
+        LoadedManifest { files },
         payload_digest,
     ))
 }
@@ -1496,8 +1466,6 @@ fn restore_plan(store: &ConfigStore, storage: &WebDavStorage) -> Result<(Value, 
     ))
 }
 
-// ─── синхронизация ──────────────────────────────────────────────────────────
-
 pub(crate) fn sync_cloud(store: &mut ConfigStore) -> Result<Value, String> {
     let storage = WebDavStorage::new(store)?;
     storage.ensure_root()?;
@@ -1526,7 +1494,7 @@ pub(crate) fn sync_cloud(store: &mut ConfigStore) -> Result<Value, String> {
     if planned_total > MAX_TOTAL_BYTES {
         return Err("Облачный бэкап превышает общий лимит размера".to_owned());
     }
-    // дайджесты для манифеста считаются одной пачкой до выгрузки: nivora-turbo
+    // хеши существующих файлов вычисляются одной пачкой до загрузки
     let existing: Vec<PathBuf> = sources
         .iter()
         .filter(|(_, path)| path.exists())
@@ -1675,8 +1643,6 @@ pub(crate) fn delete_cloud_file(store: &ConfigStore, key: &str) -> Result<(), St
     WebDavStorage::new(store)?.delete(key)
 }
 
-// ─── операции GUI (порт gui_cloud_ops.py) ───────────────────────────────────
-
 pub(crate) fn cloud_status(_request: &Value) -> Result<Value, String> {
     let store = ConfigStore::load()?;
     Ok(json!({ "status": cloud_settings_public(&store) }))
@@ -1697,13 +1663,11 @@ pub(crate) fn cloud_configure(request: &Value) -> Result<Value, String> {
         .unwrap_or("")
         .trim()
         .to_owned();
-    // только проверка: в настройках сохраняется сырая (обрезанная) строка,
-    // как в Python — по ней строятся атрибуты libsecret.
+    // проверяет URL, но сохраняет обрезанное значение настройки для атрибутов секрета
     validated_url(&next_url)?;
     let credentials_changed = next_url != store.str_setting("cloud_url")
         || next_username != store.str_setting("cloud_username");
-    // в Python фолбэк — legacy-имя «trial-launcher»; движок использует
-    // переименованный дефолт настроек «nivora-launcher».
+    // путь по умолчанию равен `nivora-launcher`; пустой сохранённый путь заменяется на `trial-launcher`
     const DEFAULT_REMOTE_PATH: &str = "nivora-launcher";
     let values = json!({
         "cloud_url": next_url,
@@ -1711,8 +1675,8 @@ pub(crate) fn cloud_configure(request: &Value) -> Result<Value, String> {
         "cloud_remote_path": request.get("remote_path").and_then(Value::as_str).unwrap_or(DEFAULT_REMOTE_PATH),
         "cloud_include_accounts": request.get("include_accounts").and_then(Value::as_bool).unwrap_or(false),
     });
-    // remove the old key before changing its libsecret attributes. Otherwise
-    // changing endpoint or username would leave an orphaned credential.
+    // удаляет секрет со старыми атрибутами, чтобы при смене URL или логина
+    // в хранилище не осталась недоступная учётная запись
     if credentials_changed {
         save_cloud_password(&store, "")?;
     }
@@ -1819,6 +1783,70 @@ pub(crate) fn cloud_disconnect(_request: &Value) -> Result<Value, String> {
     }))
 }
 
+/// возвращает облачные ZIP-копии мира или пустой список при ошибке WebDAV
+pub(crate) fn backup_cloud_list(store: &ConfigStore, instance: &str) -> Vec<Value> {
+    let entries = (|| {
+        let storage = WebDavStorage::new(store)?;
+        let prefix = format!("backups/{instance}/");
+        Ok::<_, String>(
+            storage
+                .list_files()?
+                .into_iter()
+                .filter(|item| item.key.starts_with(&prefix) && item.key.ends_with(".zip"))
+                .map(|item| {
+                    let stem = item.key.trim_end_matches(".zip");
+                    let stem = stem.rsplit('/').next().unwrap_or(stem);
+                    json!({
+                        "id": format!("{stem}@cloud"),
+                        "created_at": if item.modified_at > 0.0 { item.modified_at } else { 0.0 },
+                        "size_bytes": if item.size > 0 { item.size } else { 0 },
+                        "destination": "cloud",
+                    })
+                })
+                .collect::<Vec<_>>(),
+        )
+    })();
+    entries.unwrap_or_default()
+}
+
+pub(crate) fn backup_cloud_put(store: &ConfigStore, instance: &str, file_name: &str, path: &Path) -> Result<(), String> {
+    let storage = WebDavStorage::new(store)?;
+    storage.put_file(&format!("backups/{instance}/{file_name}"), path)
+}
+
+pub(crate) fn backup_cloud_get(store: &ConfigStore, instance: &str, backup_id: &str) -> Result<Vec<u8>, String> {
+    let storage = WebDavStorage::new(store)?;
+    storage.get(&format!("backups/{instance}/{backup_id}.zip"))
+}
+
+pub(crate) fn backup_cloud_delete(store: &ConfigStore, instance: &str, backup_id: &str) -> Result<(), String> {
+    let storage = WebDavStorage::new(store)?;
+    storage.delete(&format!("backups/{instance}/{backup_id}.zip"))
+}
+
+/// удаляет самые старые файлы, оставляя не более keep (от 1 до 50)
+pub(crate) fn backup_cloud_prune(store: &ConfigStore, instance: &str, keep: i64) {
+    let Ok(storage) = WebDavStorage::new(store) else {
+        return;
+    };
+    let prefix = format!("backups/{instance}/");
+    let mut keys: Vec<(f64, String)> = match storage.list_files() {
+        Ok(items) => items
+            .into_iter()
+            .filter(|item| item.key.starts_with(&prefix))
+            .map(|item| (item.modified_at, item.key))
+            .collect(),
+        Err(_) => return,
+    };
+    keys.sort_by(|left, right| left.0.partial_cmp(&right.0).unwrap_or(std::cmp::Ordering::Equal));
+    let keep = keep.clamp(1, 50) as usize;
+    if keys.len() > keep {
+        for (_, key) in &keys[..keys.len() - keep] {
+            let _ = storage.delete(key);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1831,7 +1859,7 @@ mod tests {
             hex(&mac),
             "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"
         );
-        // ключ длиннее блока (case 6 RFC 4231)
+        // ключ длиннее блока (тестовый вектор 6 RFC 4231)
         let key = [0xaau8; 131];
         let mac = hmac_sha256(
             &key,
@@ -1870,7 +1898,7 @@ mod tests {
             validated_url("https://dav.example/remote.php/dav/files/u/").unwrap(),
             "https://dav.example/remote.php/dav/files/u"
         );
-        // без пути слэша не появляется (urlunsplit-семантика)
+        // для URL без пути завершающий слэш не добавляется
         assert_eq!(
             validated_url("https://dav.example").unwrap(),
             "https://dav.example"
@@ -1894,7 +1922,7 @@ mod tests {
     #[test]
     fn http_date_parses_known_timestamps() {
         assert_eq!(parse_http_date("Thu, 01 Jan 1970 00:00:00 GMT"), 0.0);
-        // 2026-01-01 = 1767225600; +304 дня (янв–окт) + 12:34:56
+        // проверяет дату 1 ноября 2026 года с известной Unix-меткой времени
         assert_eq!(
             parse_http_date("Sun, 01 Nov 2026 12:34:56 GMT"),
             1_793_536_496.0

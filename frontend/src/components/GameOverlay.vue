@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// игровой оверлей Nivora (как оверлей Steam). Открывается глобальной
+// игровой оверлей Nivora (как оверлей Steam); открывается глобальной
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { emit } from '@tauri-apps/api/event'
 import { bridge } from '../services/bridge'
@@ -110,7 +110,7 @@ async function refreshState() {
   if (chatVisible.value) void pollChat()
 }
 
-// хвост консоли сервера: те же операции, что и в панели серверов.
+// хвост консоли сервера: те же операции, что и в панели серверов
 async function pollChat() {
   const name = serverName.value
   if (!name || !isServerInstance.value) return
@@ -120,7 +120,7 @@ async function pollChat() {
     if (result.lines.length) chatLines.value = [...chatLines.value, ...result.lines].slice(-40)
     if (typeof result.cursor === 'number') chatCursor.value = result.cursor
   } catch {
-    // сервер мог остановиться — тихо ждём следующего тика
+    // сервер мог остановиться; повторяем опрос на следующем тике
   }
 }
 
@@ -198,7 +198,7 @@ function handleVisibility() {
 
 function closeOverlay() {
   // состояние видимости оверлея живёт в главном окне (там же глобальные
-  // клавиши), поэтому просим его скрыть нас через событие.
+  // клавиши), поэтому просим его скрыть нас через событие
   emit('nivora-overlay-close').catch(() => undefined)
 }
 
@@ -213,7 +213,7 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
-  // возврат того, что заняли: класс и заголовок. Иначе после внутриоконного
+  // возврат того, что заняли: класс и заголовок; иначе после внутриоконного
   window.removeEventListener('keydown', handleKeydown)
   document.removeEventListener('visibilitychange', handleVisibility)
   stopTimers()
@@ -224,8 +224,6 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="overlay-root" :class="rootClasses" :style="rootStyle">
-    <!-- Часы и счётчики времени: закреплены сверху по центру; в настройках
-         оверлея их можно скрыть, но не передвинуть. -->
     <header v-if="overlaySettings?.show_clock !== false" class="overlay-clock">
       <div class="overlay-clock__time">{{ clockLabel }}</div>
       <div class="overlay-clock__counters">
@@ -235,14 +233,11 @@ onBeforeUnmount(() => {
       </div>
     </header>
 
-    <!-- Открыли оверлей без запущенной игры: честно говорим об этом, а не
-         показываем пустые виджеты, которые выглядят сломанными. -->
     <div v-if="snapshot && !snapshot.running" class="overlay-idle">
       <strong>Нет активной игры</strong>
       <small>Запустите Minecraft из Nivora — здесь появятся сессия, моды и метрики. Esc — закрыть.</small>
     </div>
 
-    <!-- Системные метрики в стиле Afterburner: позиция и состав настраиваются. -->
     <section
       v-if="overlaySettings?.show_system_metrics && systemMetrics"
       class="overlay-system"
@@ -283,7 +278,6 @@ onBeforeUnmount(() => {
       </div>
     </section>
 
-    <!-- Виджет модов: отдельная панель слева. -->
     <aside v-if="overlaySettings?.show_mods !== false" class="overlay-panel overlay-panel--mods">
       <div class="overlay-panel__head">
         <strong>Моды</strong>
@@ -304,7 +298,6 @@ onBeforeUnmount(() => {
       </ul>
     </aside>
 
-    <!-- Метрики RAM / CPU / Диск в одном виджете + управление записью. -->
     <aside class="overlay-side">
       <section v-if="overlaySettings?.show_metrics !== false" class="overlay-panel overlay-panel--metrics">
         <div class="overlay-panel__head">
@@ -354,7 +347,6 @@ onBeforeUnmount(() => {
       <p v-if="loadError" class="overlay-error">{{ loadError }}</p>
     </aside>
 
-    <!-- Быстрый чат сервера: хвост консоли + команды, только для серверов. -->
     <section v-if="chatVisible" class="overlay-chat">
       <div class="overlay-chat__head">
         <strong>Консоль сервера</strong>
@@ -385,34 +377,30 @@ onBeforeUnmount(() => {
 .overlay-root {
   position: fixed;
   inset: 0;
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) max-content minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr) auto auto;
+  align-items: start;
   gap: 14px;
   padding: 22px 26px 18px;
   color: var(--text);
   font-family: var(--font-family);
-  /* Прозрачное окно поверх игры: backdrop-filter здесь ничего не размывает
-     (за окном чужой процесс), только жрёт кадры — оставляем плотный тинт.
-     Под тинтом — сплошная подложка: на X11 без композитора и на XWayland
-     полупрозрачный фон окна порой не рисуется вовсе («видны только
-     виджеты»), сплошной слой читается всегда. */
+  /* backdrop-filter не размывает чужое окно и снижает FPS */
+  /* непрозрачная подложка нужна, если X11 или XWayland не отрисует прозрачность */
   background:
     linear-gradient(rgba(12, 13, 11, var(--overlay-tint, 0.72)), rgba(12, 13, 11, var(--overlay-tint, 0.72))),
     linear-gradient(#0c0d0b, #0c0d0b);
 }
 
-/* Компактный режим: меньше воздуха, больше игры видно. */
 .overlay-root--compact { gap: 8px; padding: 14px 16px 12px; font-size: 13px; }
 .overlay-root--compact .overlay-clock { padding: 6px 18px 8px; }
 .overlay-root--compact .overlay-clock__time { font-size: 30px; }
 
-/* --- Системные метрики (Afterburner-style) --- */
 .overlay-system {
-  position: absolute;
   display: flex;
   flex-direction: column;
   gap: 6px;
-  width: min(300px, 30vw);
+  width: min(280px, 27vw);
   max-height: min(64vh, 560px);
   overflow: auto;
   overscroll-behavior: contain;
@@ -426,14 +414,10 @@ onBeforeUnmount(() => {
   font-variant-numeric: tabular-nums;
 }
 
-.overlay-root--pos-top-left .overlay-system { top: 22px; left: 26px; }
-.overlay-root--pos-top-right .overlay-system { top: 22px; right: 26px; }
-.overlay-root--pos-bottom-left .overlay-system { bottom: 46px; left: 26px; }
-.overlay-root--pos-bottom-right .overlay-system { bottom: 46px; right: 26px; }
-
-/* Метрики не наезжают на панель модов слева. */
-.overlay-root--pos-top-left .overlay-panel--mods,
-.overlay-root--pos-bottom-left .overlay-panel--mods { top: auto; bottom: 24px; transform: none; }
+.overlay-root--pos-top-left .overlay-system { grid-row: 1; grid-column: 1; justify-self: start; }
+.overlay-root--pos-top-right .overlay-system { grid-row: 1; grid-column: 3; justify-self: end; }
+.overlay-root--pos-bottom-left .overlay-system { grid-row: 3; grid-column: 1; align-self: end; justify-self: start; }
+.overlay-root--pos-bottom-right .overlay-system { grid-row: 3; grid-column: 3; align-self: end; justify-self: end; }
 
 .overlay-system__head {
   display: flex;
@@ -455,19 +439,19 @@ onBeforeUnmount(() => {
 .overlay-system__temp { color: var(--warning, #f5c451); font-size: 11px; }
 
 .overlay-system__bar { grid-column: 2 / 4; width: 100%; height: 4px; border-radius: 999px; background: rgba(255, 255, 255, 0.12); overflow: hidden; }
-.overlay-system__bar i { display: block; height: 100%; border-radius: 999px; background: var(--accent, #c5a274); }
+.overlay-system__bar i { display: block; height: 100%; border-radius: 999px; background: var(--accent, #5b8dd9); }
 
 .overlay-system__cores { display: flex; align-items: flex-end; gap: 2px; height: 18px; }
-.overlay-system__cores i { flex: 1 1 0; min-width: 2px; max-width: 6px; border-radius: 1px; background: color-mix(in srgb, var(--accent, #c5a274) 75%, transparent); }
+.overlay-system__cores i { flex: 1 1 0; min-width: 2px; max-width: 6px; border-radius: 1px; background: color-mix(in srgb, var(--accent, #5b8dd9) 75%, transparent); }
 
-/* --- Быстрый чат сервера --- */
 .overlay-chat {
-  position: absolute;
-  left: 26px;
-  bottom: 52px;
+  grid-row: 4;
+  grid-column: 1;
+  align-self: end;
+  justify-self: start;
   display: flex;
   flex-direction: column;
-  width: min(420px, 44vw);
+  width: min(360px, 32vw);
   max-height: 40vh;
   border: 1px solid var(--line);
   border-radius: var(--radius-card, 10px);
@@ -487,10 +471,7 @@ onBeforeUnmount(() => {
 .overlay-chat__head strong { font-size: 12.5px; }
 
 .overlay-chat__toggle { border: none; background: none; color: var(--muted); font-size: 11px; cursor: pointer; }
-/* Hover-эффектов в оверлее нет ВООБЩЕ: любое :hover-перекрашивание в
-   оверлейном окне WebKitGTK запускает перерисовку, которая на NVIDIA
-   «замораживает» окно. Обратная связь — только смена курсора (она на
-   стороне композитора и перерисовки не требует). */
+/* hover-перекраска может заморозить оверлей WebKitGTK на NVIDIA */
 
 .overlay-chat__log {
   flex: 1 1 auto;
@@ -525,7 +506,7 @@ onBeforeUnmount(() => {
   padding: 6px 12px;
   border: 1px solid var(--line-strong);
   border-radius: 7px;
-  background: var(--accent, #c5a274);
+  background: var(--accent, #5b8dd9);
   color: #14140f;
   font-size: 12px;
   cursor: pointer;
@@ -534,9 +515,10 @@ onBeforeUnmount(() => {
 .overlay-chat__form button:disabled { opacity: 0.5; cursor: default; }
 
 .overlay-chat__open {
-  position: absolute;
-  left: 26px;
-  bottom: 52px;
+  grid-row: 4;
+  grid-column: 1;
+  align-self: end;
+  justify-self: start;
   padding: 8px 14px;
   border: 1px solid var(--line);
   border-radius: 999px;
@@ -546,15 +528,14 @@ onBeforeUnmount(() => {
   cursor: pointer;
 }
 
-/* --- Закреплённые часы --- */
 .overlay-idle {
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
+  grid-row: 2;
+  grid-column: 2;
+  place-self: center;
   display: grid;
   gap: 6px;
   justify-items: center;
+  max-width: min(380px, 90vw);
   padding: 18px 30px;
   border: 1px solid var(--line);
   border-radius: var(--radius-card, 10px);
@@ -568,14 +549,14 @@ onBeforeUnmount(() => {
 .overlay-idle small { color: var(--muted); font-size: 11px; line-height: 1.5; }
 
 .overlay-clock {
-  position: absolute;
-  top: 18px;
-  left: 50%;
-  transform: translateX(-50%);
+  grid-row: 1;
+  grid-column: 2;
+  justify-self: center;
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 2px;
+  max-width: 100%;
   padding: 10px 26px 12px;
   border: 1px solid var(--line);
   border-radius: var(--radius-card, 10px);
@@ -611,17 +592,15 @@ onBeforeUnmount(() => {
   opacity: 0.6;
 }
 
-/* --- Панели-виджеты --- */
 .overlay-panel {
   display: flex;
   flex-direction: column;
   min-width: 0;
   border: 1px solid var(--line);
   border-radius: var(--radius-card, 10px);
-  /* Сплошная подложка под полупрозрачностью — см. .overlay-root */
   background:
     linear-gradient(rgba(25, 26, 23, 0.82), rgba(25, 26, 23, 0.82)),
-    linear-gradient(#191a17, #191a17);
+    linear-gradient(#0b1220, #0b1220);
   box-shadow: 0 12px 36px rgba(0, 0, 0, 0.4);
   overflow: hidden;
 }
@@ -648,11 +627,11 @@ onBeforeUnmount(() => {
 }
 
 .overlay-panel--mods {
-  position: absolute;
-  left: 26px;
-  top: 50%;
-  transform: translateY(-50%);
-  width: min(320px, 34vw);
+  grid-row: 2;
+  grid-column: 1;
+  align-self: center;
+  justify-self: start;
+  width: min(300px, 27vw);
   max-height: min(56vh, 520px);
 }
 
@@ -720,16 +699,15 @@ onBeforeUnmount(() => {
   font-size: 12.5px;
 }
 
-/* --- Правая колонка: метрики + запись --- */
 .overlay-side {
-  position: absolute;
-  right: 26px;
-  top: 50%;
-  transform: translateY(-50%);
+  grid-row: 2;
+  grid-column: 3;
+  align-self: center;
+  justify-self: end;
   display: flex;
   flex-direction: column;
   gap: 12px;
-  width: min(300px, 30vw);
+  width: min(280px, 27vw);
 }
 
 .overlay-metrics {
@@ -764,9 +742,7 @@ onBeforeUnmount(() => {
   height: 100%;
   border-radius: 999px;
   background: linear-gradient(90deg, var(--green), var(--blue-bright));
-  /* Без transition: WebKitGTK в оверлейном окне после CSS-анимаций
-     перестаёт перерисовывать слои — «живой» остаётся только элемент под
-     курсором, панель пропадает до пересоздания окна. */
+  /* css-анимации могут остановить перерисовку слоёв оверлея WebKitGTK */
 }
 
 .overlay-metric__bar-fill--ram {
@@ -807,7 +783,6 @@ onBeforeUnmount(() => {
   font-variant-numeric: tabular-nums;
 }
 
-/* --- Запись --- */
 .overlay-panel--recording {
   padding-bottom: 12px;
 }
@@ -846,13 +821,9 @@ onBeforeUnmount(() => {
   font-size: 12.5px;
   cursor: pointer;
   background: var(--panel-soft);
-  /* Анимации кнопок отключены намеренно: в WebKitGTK-оверлее transition
-     после hover «замораживал» перерисовку окна (см. .overlay-metric__bar). */
+  /* transition кнопок может заморозить перерисовку оверлея WebKitGTK */
 }
 
-/* Ни :hover, ни transition у кнопок оверлея: перекрашивание по наведению
-   «замораживало» перерисовку всего окна в WebKitGTK (см. комментарий у
-   .overlay-chat__toggle). Состояние видно по :active и блокировке. */
 .overlay-button:active:not(:disabled) {
 
 }
@@ -891,12 +862,11 @@ onBeforeUnmount(() => {
   font-size: 12px;
 }
 
-/* --- Подсказка снизу --- */
 .overlay-hint {
-  position: absolute;
-  bottom: 14px;
-  left: 50%;
-  transform: translateX(-50%);
+  grid-row: 4;
+  grid-column: 2;
+  justify-self: center;
+  align-self: end;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -921,11 +891,19 @@ onBeforeUnmount(() => {
   opacity: 0.5;
 }
 
-@media (max-width: 900px) {
-  .overlay-panel--mods,
-  .overlay-side {
-    width: min(280px, 44vw);
+@media (max-width: 1024px) {
+  .overlay-root {
+    grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
+    grid-template-rows: auto auto auto minmax(0, 1fr) auto auto;
   }
+
+  .overlay-clock { grid-row: 1; grid-column: 1 / -1; }
+  .overlay-system { grid-row: 2 !important; grid-column: 1 / -1; justify-self: stretch; width: 100%; max-height: 18vh; }
+  .overlay-panel--mods { grid-row: 3; grid-column: 1; align-self: start; width: min(280px, 33vw); }
+  .overlay-side { grid-row: 3; grid-column: 2; align-self: start; width: min(320px, 49vw); }
+  .overlay-idle { grid-row: 4; grid-column: 1 / -1; justify-self: center; }
+  .overlay-chat, .overlay-chat__open { grid-row: 5; grid-column: 1 / -1; width: min(100%, 420px); max-height: 22vh; }
+  .overlay-hint { grid-row: 6; grid-column: 1 / -1; justify-self: center; white-space: normal; }
 
   .overlay-clock__time {
     font-size: 32px;

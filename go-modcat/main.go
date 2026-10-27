@@ -1,12 +1,4 @@
-// nivora-modcat — каталог Modrinth: поиск, карточка проекта, совместимые
-// версии и батч-проверка обновлений. Раньше это был Python-модуль mods.py,
-// теперь один статический бинарник без внешних зависимостей.
-//
-// Протокол: JSON-запрос на stdin, JSON-ответ на stdout:
-//   {"ok": true, "data": ...} | {"ok": false, "error": "..."}
-//
-// Батч-проверка гоняет запросы к Modrinth горутинами — на сотне
-// установленных модов это секунды вместо последовательного опроса.
+// json CLI для поиска проектов Modrinth, совместимости версий и обновлений
 package main
 
 import (
@@ -169,7 +161,7 @@ func fieldString(object map[string]any, key string) string {
 	return strings.TrimSpace(text)
 }
 
-// пустой project_type у элемента означает «любой» — как в Python-версии
+// пустой project_type пропускает проекты любого типа
 func matchesProjectType(value map[string]any, expected string) bool {
 	actual := fieldString(value, "project_type")
 	return actual == "" || actual == expected

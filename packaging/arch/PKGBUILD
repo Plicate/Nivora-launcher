@@ -1,12 +1,12 @@
 pkgname=nivora-launcher
-pkgver=1.1.0
-pkgrel=1
+pkgver=2.0.0
+pkgrel=4
 pkgdesc='Universal Minecraft launcher'
 arch=('x86_64')
 license=('GPL-3.0-only')
-depends=('python' 'python-defusedxml' 'python-psutil' 'libsecret' 'gnome-keyring' 'gtk3' 'libayatana-appindicator' 'qt6-base' 'qt6-svg' 'webkit2gtk-4.1' 'bubblewrap' 'java-runtime')
-makedepends=('base-devel' 'nodejs' 'npm' 'rust')
-# Native C/assembly objects from Rust dependencies must remain ordinary ELF.
+depends=('libsecret' 'gnome-keyring' 'gtk3' 'libayatana-appindicator' 'webkit2gtk-4.1' 'bubblewrap' 'java-runtime')
+makedepends=('base-devel' 'nodejs' 'npm' 'rust' 'go')
+# объекты C/assembly из Rust-зависимостей должны оставаться обычными ELF
 options=('!lto')
 optdepends=('java-runtime: use a system Java runtime'
             'xdg-utils: open the Minecraft folder')
@@ -17,21 +17,22 @@ sha256sums=("${NIVORA_LAUNCHER_SOURCE_SHA256}")
 build() {
   cd "${srcdir}/${pkgname}"
   if command -v npm >/dev/null 2>&1 && command -v cargo >/dev/null 2>&1; then
-    install -Dm755 packaging/arch/nivora-launcher-backend \
-      frontend/src-tauri/resources/backend/nivora-launcher-backend
+    ./scripts/build_turbo.sh
+    ./scripts/build_modcat.sh
+    install -Dm644 java/ModScan.java frontend/src-tauri/resources/backend/ModScan.java
     (
       cd frontend
       npm install --no-audit --no-fund
-      # npm 11 may block esbuild's postinstall script; explicitly approve and rebuild it.
+      # npm 11 может блокировать postinstall esbuild, поэтому разрешаем его и пересобираем пакет
       if npm install-scripts ls >/dev/null 2>&1; then
         npm install-scripts approve esbuild
       fi
       npm rebuild esbuild --no-audit --no-fund
       npm run tauri -- icon src/assets/uni.png --output src-tauri/icons
     )
-    # Isolate native compiler flags, including cc-rs target-specific overrides.
-    # Merely appending -fuse-ld=bfd does not repair native LTO objects in rlibs.
-    python scripts/arch_native_build.py || return $?
+    # убираем LTO-флаги и задаём BFD, включая переопределения cc-rs
+    # добавление -fuse-ld=bfd не исправляет LTO-объекты в rlibs
+    bash scripts/arch_native_build.sh || return $?
   else
     install -dm755 cpp-ui/build
     g++ -std=c++17 -O2 -pipe -fPIC -pie -Wall -Wextra \
@@ -45,10 +46,12 @@ build() {
 package() {
   cd "${srcdir}/${pkgname}"
   install -dm755 "${pkgdir}/usr/lib/${pkgname}"
-  cp -r nivora_launcher "${pkgdir}/usr/lib/${pkgname}/"
   if [[ -x frontend/src-tauri/target/release/nivora-launcher ]]; then
     install -Dm755 frontend/src-tauri/target/release/nivora-launcher "${pkgdir}/usr/lib/${pkgname}/nivora-launcher-gui"
-    install -Dm755 frontend/src-tauri/resources/backend/nivora-launcher-backend "${pkgdir}/usr/lib/${pkgname}/resources/backend/nivora-launcher-backend"
+    install -Dm755 frontend/src-tauri/resources/backend/nivora-turbo "${pkgdir}/usr/lib/${pkgname}/resources/backend/nivora-turbo"
+    install -Dm755 frontend/src-tauri/resources/backend/nivora-modcat "${pkgdir}/usr/lib/${pkgname}/resources/backend/nivora-modcat"
+    install -Dm644 frontend/src-tauri/resources/backend/ModScan.java "${pkgdir}/usr/lib/${pkgname}/resources/backend/ModScan.java"
+    install -Dm644 frontend/src-tauri/resources/vendor/bedrock-on-linux-2.2.9.pyz "${pkgdir}/usr/lib/${pkgname}/resources/vendor/bedrock-on-linux-2.2.9.pyz"
   else
     install -Dm755 cpp-ui/build/nivora-launcher-gui "${pkgdir}/usr/lib/${pkgname}/nivora-launcher-gui"
   fi
@@ -58,7 +61,7 @@ package() {
   install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
   install -Dm755 nivora-launcher "${pkgdir}/usr/bin/nivora-launcher"
   install -Dm644 packaging/arch/nivora-launcher.desktop "${pkgdir}/usr/share/applications/nivora-launcher.desktop"
-  # Иконки hicolor: без них .desktop без Icon= показывал заглушку в меню.
+  # без иконок hicolor меню показывает заглушку вместо приложения
   for size in 32x32 128x128 256x256; do
     if [[ -f "frontend/src-tauri/icons/${size}.png" ]]; then
       install -Dm644 "frontend/src-tauri/icons/${size}.png" \

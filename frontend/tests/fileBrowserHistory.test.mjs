@@ -2,10 +2,6 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { readFileSync } from 'node:fs'
 
-// История навигации проводника (PathHistory в services/fileBrowser.ts)
-// проверяется транспиляцией исходника: класс чистый, DOM не нужен.
-// Vue-зависимости файла не тянем: извлекаем только тело класса.
-
 function loadPathHistory() {
   const source = readFileSync(new URL('../src/services/fileBrowser.ts', import.meta.url), 'utf8')
   const start = source.indexOf('export class PathHistory')

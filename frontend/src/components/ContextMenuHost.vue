@@ -1,5 +1,4 @@
 <script setup lang="ts">
-// хост контекстного меню: единственный экземпляр в App.vue, состояние —
 import { computed, nextTick, ref, watch } from 'vue'
 import Icon from './Icon.vue'
 import { closeContextMenu, contextMenu } from '../services/contextMenu'
@@ -33,19 +32,20 @@ function run(action: () => void) {
     <Transition name="dropdown">
       <nav v-if="contextMenu.open" ref="menuElement" class="context-menu" :class="{ 'context-menu--flipped': flipped }" :style="style" role="menu" @contextmenu.prevent>
         <div v-if="contextMenu.title" class="context-menu-title">{{ contextMenu.title }}</div>
-        <button
-          v-for="item in contextMenu.items"
-          :key="item.id"
-          type="button"
-          class="context-menu-item"
-          :class="{ 'context-menu-item--danger': item.danger }"
-          role="menuitem"
-          :disabled="item.disabled"
-          @click="run(item.action)"
-        >
-          <Icon v-if="item.icon" :name="item.icon" :size="14" />
-          <span>{{ item.label }}</span>
-        </button>
+        <template v-for="item in contextMenu.items" :key="item.id">
+          <button
+            type="button"
+            class="context-menu-item"
+            :class="{ 'context-menu-item--danger': item.danger }"
+            role="menuitem"
+            :disabled="item.disabled"
+            @click="run(item.action)"
+          >
+            <Icon v-if="item.icon" :name="item.icon" :size="14" />
+            <span>{{ item.label }}</span>
+          </button>
+          <div v-if="item.separatorAfter" class="context-menu-separator" role="separator" />
+        </template>
       </nav>
     </Transition>
   </Teleport>

@@ -23,7 +23,7 @@ The manifest key is device-local. A backup can currently be verified and restore
 
 ---
 
-<!-- Русская версия / Russian version -->
+<!-- русская версия / Russian version -->
 
 # Облачная синхронизация
 

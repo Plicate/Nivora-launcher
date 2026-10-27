@@ -1,11 +1,10 @@
-// запросы на перезагрузку в режиме разработчика. Никогда не обходят ни
-// целостность пакета, ни доверие к исполнению.
+// запросы на перезагрузку в режиме разработчика; никогда не обходят ни
+// целостность пакета, ни доверие к исполнению
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
 use super::config::ConfigStore;
-use super::net::atomic_json_write;
 use super::plugins::PluginStore;
 
 const IDENTITY: &str = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}\z";
@@ -33,8 +32,7 @@ fn load_requests(config: &ConfigStore) -> Result<Map<String, Value>, String> {
         return Err("Unsafe developer reload file".to_owned());
     }
     let raw = std::fs::read(&path).map_err(|_| "Unsafe developer reload file".to_owned())?;
-    // отличие от Python: битый JSON здесь даёт понятную ошибку реестра,
-    // а не сырой ValueError из json.loads.
+    // при повреждённом JSON возвращаем понятную ошибку реестра
     let value: Value = serde_json::from_slice(&raw).map_err(|_| "Invalid reload registry".to_owned())?;
     let Some(fields) = value.as_object() else {
         return Err("Invalid reload registry".to_owned());
@@ -43,7 +41,7 @@ fn load_requests(config: &ConfigStore) -> Result<Map<String, Value>, String> {
         return Err("Invalid reload registry".to_owned());
     }
     for (key, value) in fields {
-        // bool и дробные — не int, ровно как type(value) is int в Python.
+        // принимаем только целые числа; логические и дробные значения отклоняем
         let Value::Number(number) = value else {
             return Err("Invalid reload identity or timestamp".to_owned());
         };
@@ -57,36 +55,7 @@ fn load_requests(config: &ConfigStore) -> Result<Map<String, Value>, String> {
     Ok(fields.clone())
 }
 
-pub(crate) fn request_reload(plugin_id: &str, config: Option<&ConfigStore>) -> Result<Value, String> {
-    let owned;
-    let config = match config {
-        Some(config) => config,
-        None => {
-            owned = ConfigStore::load()?;
-            &owned
-        }
-    };
-    if !config.bool_setting("developer_mode") {
-        return Err("Plugin reload requires developer mode".to_owned());
-    }
-    let store = PluginStore::new(config)?;
-    // явный запрос перезагрузки — не молчаливое разрешение исполнять
-    // отредактированный или неподписанный код.
-    store.runtime_source(plugin_id)?;
-    let mut requests = load_requests(config)?;
-    if requests.len() >= 128 && !requests.contains_key(plugin_id) {
-        return Err("Reload registry is full".to_owned());
-    }
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|value| value.as_nanos() as i64)
-        .unwrap_or(0);
-    requests.insert(plugin_id.to_owned(), json!(timestamp));
-    atomic_json_write(&reload_path(config), &Value::Object(requests), true)?;
-    Ok(json!(timestamp))
-}
-
-/// точка входа должна быть безопасным относительным путём внутри пакета.
+/// точка входа должна быть безопасным относительным путём внутри пакета
 fn entrypoint_parts(entrypoint: &str) -> Result<Vec<String>, String> {
     if entrypoint.is_empty()
         || entrypoint.len() > 256
@@ -129,7 +98,7 @@ pub(crate) fn changes(config: &ConfigStore) -> Result<Value, String> {
     }
     let store = PluginStore::new(config)?;
     let mut entries: Vec<(String, String, i64, i64)> = Vec::new();
-    // скрипты входа — однофайловые пакеты; рекурсивного обхода каталогов нет.
+    // скрипты входа поставляются отдельными файлами, без обхода каталогов
     let mut seen = 0usize;
     let directory = std::fs::read_dir(&store.root).map_err(|error| error.to_string())?;
     for entry in directory {
@@ -188,7 +157,7 @@ pub(crate) fn changes(config: &ConfigStore) -> Result<Value, String> {
     Ok(json!({"enabled": true, "generation": generation, "requests": requests}))
 }
 
-/// json.dumps(..., sort_keys=True) с разделителями по умолчанию: «, » и «: ».
+/// стабильный JSON с отсортированными ключами и стандартными пробелами
 fn python_dumps_sorted(value: &Value) -> String {
     match value {
         Value::Array(items) => format!(
@@ -283,7 +252,7 @@ mod tests {
                 String::from_utf8_lossy(bad)
             );
         }
-        // 2**63 — первое запрещённое значение: i64 его уже не вмещает.
+        // значение 2^63 не помещается в `i64`
         std::fs::write(&registry, br#"{"demo": 9223372036854775808}"#).unwrap();
         assert_eq!(load_requests(&config).unwrap_err(), "Invalid reload identity or timestamp");
 

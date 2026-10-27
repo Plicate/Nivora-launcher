@@ -189,7 +189,7 @@ function updateHighlight() {
 async function measureTourStep() {
   if (props.phase !== 'tour') return
   const target = document.querySelector<HTMLElement>(`[data-tour="${activeTourStep.value.target}"]`)
-  // цель может быть за пределами вьюпорта — сначала подкатываем её в кадр.
+  // элемент может быть вне экрана, поэтому сначала прокручиваем к нему
   target?.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'instant' as ScrollBehavior })
   await nextTick()
   updateHighlight()
@@ -283,7 +283,7 @@ onBeforeUnmount(() => {
           </div>
 
           <div v-else-if="phase === 'account'" key="account" class="first-run-content">
-            <span class="eyebrow">Шаг 2 · Аккаунт</span>
+            
             <h1 id="first-run-title">Игровой профиль</h1>
             <p class="first-run-lead">Выберите, от чьего имени запускать игру. Аккаунт можно добавить или сменить позже.</p>
 
@@ -326,7 +326,7 @@ onBeforeUnmount(() => {
           </div>
 
           <div v-else-if="phase === 'basics'" key="basics" class="first-run-content">
-            <span class="eyebrow">Шаг 3 · Базовая настройка</span>
+            
             <h1 id="first-run-title">Основные параметры</h1>
             <p class="first-run-lead">Рекомендованные значения уже выбраны — можно просто сохранить.</p>
             <label class="first-run-field"><span><strong>Папка игры</strong><small>Здесь будут храниться версии, моды и сохранения.</small></span><input v-model="gameDirectoryDraft" type="text" autocomplete="off" spellcheck="false" placeholder="Папка игры" /></label>
@@ -413,7 +413,6 @@ onBeforeUnmount(() => {
 .first-run-content > p { max-width: 500px; margin: 0; color: var(--muted, #9aa9c0); font-size: 13px; line-height: 1.6; }
 .first-run-content .eyebrow { color: var(--accent, #9bb6ff); font-size: 12px; font-weight: 600; }
 .first-run-roadmap { display: grid; width: min(100%, 440px); gap: 8px; margin: 4px 0; text-align: left; }
-/* Шаг выбора языка: две крупные кнопки-плитки на всю ширину карточки. */
 .first-run-language-options { gap: 10px; }
 .first-run-language-option { display: grid; justify-items: start; gap: 4px; padding: 14px 18px; }
 .first-run-language-option strong { font-size: 15px; }

@@ -1,6 +1,4 @@
-// порт python-модуля turbo.py: пакетное SHA-256 через внешний бинарник
-// nivora-turbo (cpp-turbo/). Одна пачка файлов — один запуск процесса;
-// при любом сбое возвращаем None и вызывающий считает хеши сам.
+// пакетный SHA-256 через nivora-turbo; при сбое вызывающая сторона считает хеши на Rust
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -9,15 +7,12 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 const TURBO_TIMEOUT_SECONDS: u64 = 600;
-// меньше этого размера пачка не стоит запуска процесса.
+// для меньших пачек не запускаем отдельный процесс
 const MIN_BATCH_FILES: usize = 4;
 
 static CACHED_BINARY: OnceLock<Option<PathBuf>> = OnceLock::new();
 
-/// путь к nivora-turbo: env NIVORA_TURBO_BIN, каталог рядом с бинарником
-/// лаунчера, resources/backend упакованной сборки, системные пути.
-/// Результат кешируется — как `_cached_resolved` в Python.
-#[allow(dead_code)] // станет горячим после порта cloud_storage.py
+/// ищет и кеширует путь к `nivora-turbo`
 pub(crate) fn turbo_binary() -> Option<PathBuf> {
     CACHED_BINARY.get_or_init(discover_turbo_binary).clone()
 }
@@ -42,7 +37,6 @@ fn is_executable(path: &Path) -> bool {
     }
 }
 
-/// shutil.which(): первый исполняемый файл в PATH.
 pub(crate) fn find_in_path(name: &str) -> Option<PathBuf> {
     #[cfg(windows)]
     let names = [format!("{name}.exe"), name.to_owned()];
@@ -57,11 +51,176 @@ pub(crate) fn find_in_path(name: &str) -> Option<PathBuf> {
     })
 }
 
-/// хеширует список файлов одним запуском nivora-turbo. None — бинарника
-/// нет, пачка мала или процесс не смог: вызывающий делает fallback.
-#[allow(dead_code)] // станет горячим после порта cloud_storage.py
+/// хеширует пачку одним запуском; при `None` используется обход на Rust
 pub(crate) fn sha256_batch(paths: &[PathBuf]) -> Option<HashMap<PathBuf, (String, u64)>> {
     sha256_batch_with(turbo_binary()?, paths)
+}
+
+/// сканирует экземпляр одной командой `instance-manifest`; при сбое возвращает `None`
+pub(crate) fn instance_manifest(directory: &Path) -> Option<Vec<serde_json::Value>> {
+    let binary = turbo_binary()?;
+    let output = super::platform::command(&binary)
+        .arg("instance-manifest")
+        .arg(directory)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(parse_manifest_entries(&String::from_utf8_lossy(&output.stdout)))
+}
+
+/// результат анализа одного JAR
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ModScan {
+    pub(crate) loaders: Vec<String>,
+    pub(crate) mod_id: String,
+    pub(crate) mixins: Vec<String>,
+    pub(crate) packages: Vec<String>,
+    pub(crate) corrupted: bool,
+}
+
+/// анализирует пачку JAR одним запуском; при сбое возвращает `None`
+pub(crate) fn scan_mods(paths: &[PathBuf]) -> Option<Vec<ModScan>> {
+    if paths.is_empty() {
+        return Some(Vec::new());
+    }
+    let binary = turbo_binary()?;
+    let mut command = super::platform::command(&binary);
+    command
+        .arg("scan-mods")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null());
+    for path in paths {
+        command.arg(path);
+    }
+    let output = command.output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut results = Vec::with_capacity(paths.len());
+    for (index, line) in stdout.lines().enumerate() {
+        if index >= paths.len() {
+            break;
+        }
+        results.push(parse_mod_scan(line));
+    }
+    (results.len() == paths.len()).then_some(results)
+}
+
+fn parse_mod_scan(line: &str) -> ModScan {
+    let split_list = |value: &str| -> Vec<String> {
+        if value.is_empty() || value == "-" {
+            Vec::new()
+        } else {
+            value.split('+').map(str::to_owned).collect()
+        }
+    };
+    let parts: Vec<&str> = line.split('\t').collect();
+    let field = |index: usize| -> String {
+        parts
+            .get(index)
+            .map(|value| if *value == "-" { "" } else { value })
+            .unwrap_or_default()
+            .to_owned()
+    };
+    ModScan {
+        loaders: split_list(&field(0)),
+        mod_id: field(1),
+        mixins: split_list(&field(4)),
+        packages: split_list(&field(5)),
+        corrupted: field(6) == "1",
+    }
+}
+
+#[cfg(test)]
+mod scan_mods_tests {
+    use super::*;
+
+    #[test]
+    fn mod_scan_line_parses_lists_and_corruption() {
+        let scan = parse_mod_scan("fabric+forge\tiris\tIris\t1.7\tiris.mixins.json+a.mixins.json\tnet/irisshaders+com/example\t0\t/mods/iris.jar");
+        assert_eq!(scan.loaders, vec!["fabric".to_owned(), "forge".to_owned()]);
+        assert_eq!(scan.mod_id, "iris");
+        assert_eq!(scan.mixins.len(), 2);
+        assert_eq!(scan.packages.len(), 2);
+        assert!(!scan.corrupted);
+    }
+
+    #[test]
+    fn empty_fields_are_dashes() {
+        let scan = parse_mod_scan("-\t-\t-\t-\t-\t-\t1\t/mods/broken.jar");
+        assert!(scan.loaders.is_empty());
+        assert!(scan.mixins.is_empty());
+        assert!(scan.packages.is_empty());
+        assert!(scan.corrupted);
+    }
+}
+
+fn parse_manifest_entries(stdout: &str) -> Vec<serde_json::Value> {
+    let mut entries = Vec::new();
+    for line in stdout.lines() {
+        // дефис обозначает пустое строковое поле; число классов и распакованный размер обязательны
+        let parts: Vec<&str> = line.split('\t').collect();
+        fn dash(value: &str) -> &str {
+            if value == "-" { "" } else { value }
+        }
+        let kind = parts.first().copied().unwrap_or_default();
+        let entry = match (kind, parts.len()) {
+            ("V", 3) => Some(serde_json::json!({
+                "kind": "meta", "key": parts[1], "value": parts[2],
+            })),
+            ("O", 3) => Some(serde_json::json!({
+                "kind": "option", "key": parts[1], "value": parts[2],
+            })),
+            ("M", 10) => match (parts[8].parse::<i64>(), parts[9].parse::<i64>(), parts[2].parse::<u64>()) {
+                (Ok(classes), Ok(unpacked), Ok(size)) => Some(serde_json::json!({
+                    "kind": "mod",
+                    "path": parts[1],
+                    "size": size,
+                    "sha256": parts[3],
+                    "loader": dash(parts[4]),
+                    "mod_id": dash(parts[5]),
+                    "name": dash(parts[6]),
+                    "version": dash(parts[7]),
+                    "classes": classes,
+                    "unpacked": unpacked,
+                })),
+                _ => None,
+            },
+            ("P", 4) => parts[2].parse::<u64>().ok().map(|size| serde_json::json!({
+                "kind": "resourcepack",
+                "path": parts[1],
+                "size": size,
+                "sha256": parts[3],
+            })),
+            ("S", 6) => match (parts[4].parse::<i64>(), parts[5].parse::<i64>(), parts[2].parse::<u64>()) {
+                (Ok(programs), Ok(files), Ok(size)) => Some(serde_json::json!({
+                    "kind": "shaderpack",
+                    "path": parts[1],
+                    "size": size,
+                    "sha256": parts[3],
+                    "programs": programs,
+                    "files": files,
+                })),
+                _ => None,
+            },
+            ("C", 4) => parts[2].parse::<u64>().ok().map(|size| serde_json::json!({
+                "kind": "config",
+                "path": parts[1],
+                "size": size,
+                "sha256": parts[3],
+            })),
+            _ => None,
+        };
+        if let Some(entry) = entry {
+            entries.push(entry);
+        }
+    }
+    entries
 }
 
 fn sha256_batch_with(
@@ -71,7 +230,7 @@ fn sha256_batch_with(
     if paths.len() < MIN_BATCH_FILES {
         return None;
     }
-    // dict.fromkeys: уникальные пути с сохранением порядка.
+    // убираем повторы, сохраняя порядок путей
     let mut unique: Vec<PathBuf> = Vec::new();
     for path in paths {
         if !unique.contains(path) {
@@ -106,7 +265,7 @@ fn sha256_batch_with(
     child.stdout.take()?.read_to_string(&mut stdout).ok()?;
     let mut digests: HashMap<PathBuf, (String, u64)> = HashMap::new();
     for line in stdout.lines() {
-        // контракт nivora-turbo: digest \t size \t path
+        // формат ответа: хеш, размер и путь через табуляцию
         let mut parts = line.splitn(3, '\t');
         let (digest, size, raw_path) = match (parts.next(), parts.next(), parts.next()) {
             (Some(digest), Some(size), Some(raw_path)) if parts.next().is_none() => {
@@ -138,11 +297,9 @@ mod tests {
         dir
     }
 
-    // фиктивный nivora-turbo: печатает «digest \t size \t path» для каждого
-    // аргумента; отсутствующему файлу соответствует прочерк (как у боевого).
     fn fake_turbo(dir: &Path) -> Option<PathBuf> {
         if find_in_path("sha256sum").is_none() {
-            return None; // фиктиву нужен coreutils; без него тест пропускаем
+            return None; // без `coreutils` тест пропускается
         }
         let script = dir.join("fake-nivora-turbo");
         std::fs::write(
@@ -190,7 +347,6 @@ mod tests {
     #[test]
     fn small_batch_is_rejected_without_spawn() {
         let root = temp_root("small");
-        // «бинарник» — заведомо несуществующий: до него дело не дойдёт.
         let paths: Vec<PathBuf> = vec![root.join("a"), root.join("b"), root.join("c")];
         assert!(sha256_batch_with(root.join("missing-turbo"), &paths).is_none());
     }
@@ -204,8 +360,6 @@ mod tests {
         let paths: Vec<PathBuf> = (0..4)
             .map(|index| root.join(format!("absent{index}")))
             .collect();
-        // фиктивный бинарник печатает «-» для отсутствующих файлов —
-        // по контракту это ошибка всей пачки, а не пропуск файла.
         assert!(sha256_batch_with(binary, &paths).is_none());
     }
 
@@ -224,5 +378,45 @@ mod tests {
             paths.push(path);
         }
         assert!(sha256_batch_with(binary, &paths).is_none());
+    }
+
+    /// разбирает протокол `nivora-turbo` (V/M/P/S/C/O); некорректные строки пропускаются
+    #[test]
+    fn instance_manifest_parses_turbo_protocol() {
+        let stdout = concat!(
+            "V\t1.21.4-fabric\t1.21.4\n",
+            "O\trenderDistance\t24\n",
+            "M\tmods/sodium.jar\t1024\tab12\tfabric\tsodium\tSodium\t0.6\t900\t500000\n",
+            "M\tmods/broken.jar\t2048\tcd34\tforge\t-\t-\t-\tx\t9\n",
+            "P\tresourcepacks/pack.zip\t32\tef56\n",
+            "S\tshaderpacks/bsl.zip\t64\t09ab\t42\t60\n",
+            "C\tconfig/create.cfg\t16\t1234\n",
+            "X\tgarbage\n",
+        );
+        let entries = parse_manifest_entries(stdout);
+        assert_eq!(entries.len(), 6);
+        assert_eq!(entries[0]["kind"], serde_json::json!("meta"));
+        assert_eq!(entries[0]["value"], serde_json::json!("1.21.4"));
+        assert_eq!(entries[1]["kind"], serde_json::json!("option"));
+        let mod_entry = &entries[2];
+        assert_eq!(mod_entry["path"], serde_json::json!("mods/sodium.jar"));
+        assert_eq!(mod_entry["mod_id"], serde_json::json!("sodium"));
+        assert_eq!(mod_entry["classes"], serde_json::json!(900));
+        assert_eq!(mod_entry["size"], serde_json::json!(1024));
+        let shader = &entries[4];
+        assert_eq!(shader["kind"], serde_json::json!("shaderpack"));
+        assert_eq!(shader["programs"], serde_json::json!(42));
+        let config = &entries[5];
+        assert_eq!(config["path"], serde_json::json!("config/create.cfg"));
+    }
+
+    #[test]
+    fn dash_fields_map_to_empty_strings() {
+        let stdout = "M\tmods/x.jar\t10\tabcd\t-\t-\t-\t-\t0\t0\n";
+        let entries = parse_manifest_entries(stdout);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["mod_id"], serde_json::json!(""));
+        assert_eq!(entries[0]["loader"], serde_json::json!(""));
+        assert_eq!(entries[0]["classes"], serde_json::json!(0));
     }
 }

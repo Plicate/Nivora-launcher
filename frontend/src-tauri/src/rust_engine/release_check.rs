@@ -1,4 +1,4 @@
-// фолбэк-проверка обновлений через GitHub Releases API — порт
+// проверка обновлений через GitHub Releases
 use serde_json::{json, Value};
 
 use super::constants::{APP_VERSION, GITHUB_RELEASES_API_URL, GITHUB_RELEASES_PAGE_URL};
@@ -12,14 +12,13 @@ fn app_version_key(version: &str) -> (u64, u64, u64) {
         .strip_prefix('v')
         .or_else(|| trimmed.strip_prefix('V'))
         .unwrap_or(trimmed);
-    // отделяем prerelease/build-суффикс: 1.0.3-1 -> 1.0.3
+    // отбрасываем prerelease и build-суффиксы
     let base = stripped.split(['-', '+']).next().unwrap_or(stripped);
     let mut parts = base.split('.');
     let major = parts.next().and_then(|value| value.parse().ok()).unwrap_or(0);
     let minor = parts.next().and_then(|value| value.parse().ok()).unwrap_or(0);
     let patch = parts.next().and_then(|value| value.parse().ok()).unwrap_or(0);
-    // четвёртый сегмент и нечисловые части игнорируем, как regex в Python
-    // (\d+)(\.(\d+))?(\.(\d+))? — максимум три группы.
+    // учитываем только три числовых сегмента версии
     (major, minor, patch)
 }
 

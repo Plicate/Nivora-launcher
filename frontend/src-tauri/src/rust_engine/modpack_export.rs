@@ -1,4 +1,4 @@
-// экспорт экземпляра в формат Modrinth (.mrpack). Моды с Modrinth-метаданными
+// экспорт экземпляра в формат Modrinth (.mrpack)
 use serde_json::{json, Value};
 use std::fs::{self, File};
 use std::io::{Read, Write};
@@ -110,7 +110,7 @@ fn is_symlink(path: &Path) -> bool {
     fs::symlink_metadata(path).map(|meta| meta.is_symlink()).unwrap_or(false)
 }
 
-/// локальная метка времени вида 2026.10.13-1442 — как time.strftime.
+/// локальная метка времени в формате `YYYY.MM.DD-HHMM`
 fn local_timestamp() -> String {
     #[cfg(unix)]
     unsafe {
@@ -130,7 +130,7 @@ fn local_timestamp() -> String {
     }
     #[cfg(not(unix))]
     {
-        // localtime_r нет — считаем UTC вручную (дни → гражданская дата).
+        // без localtime_r преобразуем количество дней в календарную дату вручную
         let seconds = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|value| value.as_secs() as i64)
@@ -185,8 +185,7 @@ pub(crate) fn export_instance_as_mrpack(
     destination_dir: &Path,
     display_name: &str,
     version_label: &str,
-) -> Result<Value, String> {
-    if instance.game_edition != "java" {
+) -> Result<Value, String> {    if instance.game_edition != "java" {
         return Err("Экспорт модпака поддерживается только для Java-экземпляров".to_owned());
     }
     let loader = loader_from_version(&instance.version_id, &instance.loader);
@@ -273,7 +272,7 @@ pub(crate) fn export_instance_as_mrpack(
         dependencies[loader_key] = json!(resolved_loader_version);
     }
 
-    // как в Python: выбор по истинности (пустая строка — ложь), без trim.
+    // пустое имя считается отсутствующим; пробелы сохраняются
     let name = if !display_name.is_empty() {
         display_name.to_owned()
     } else if !instance.display_name.is_empty() {
@@ -392,6 +391,24 @@ fn write_mrpack(
     Ok(())
 }
 
+/// создаёт `.mrpack` в каталоге exports и отправляет событие `modpack-exported`
+pub(crate) fn export_modpack(request: &Value) -> Result<Value, String> {
+    let config = super::config::ConfigStore::load()?;
+    let store = super::instances::InstanceStore::new(&config)?;
+    let name = request.get("name").and_then(Value::as_str).unwrap_or_default();
+    let info = store.get(name)?;
+    let http = super::net::client_from_settings(config.settings(), "")?;
+    let destination = config.data_home_game_dir().join("exports");
+    let display_name = request.get("display_name").and_then(Value::as_str).unwrap_or("");
+    let version_label = request.get("version_label").and_then(Value::as_str).unwrap_or("");
+    let result = export_instance_as_mrpack(&http, &info, &destination, display_name, version_label)?;
+    super::events::emit_status_event(
+        "modpack-exported",
+        &format!("Модпак собран: {}", result.get("file_name").and_then(Value::as_str).unwrap_or_default()),
+    );
+    Ok(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -410,14 +427,13 @@ mod tests {
             loader_version("fabric-loader-0.92.2-1.20.4", "1.20.4"),
             "0.92.2"
         );
-        // без версии игры паттерн жадный и забирает всё до конца, как в Python.
+        // без версии игры суффикс загрузчика включает оставшуюся часть строки
         assert_eq!(loader_version("neoforge-47.1.3-1.20.4", ""), "47.1.3-1.20.4");
         assert_eq!(loader_version("vanilla", ""), "");
     }
 
     #[test]
     fn archive_slug_is_safe_and_bounded() {
-        // кириллица не попадает в [A-Za-z0-9._-] — всё схлопывается в fallback.
         assert_eq!(archive_slug("Мой крутой пак!", "fallback"), "fallback");
         assert_eq!(archive_slug("Cool Pack v2", "fallback"), "Cool-Pack-v2");
         assert_eq!(archive_slug("...---", "fallback"), "fallback");
@@ -427,7 +443,6 @@ mod tests {
     #[test]
     fn timestamp_shape_matches_strftime() {
         let value = local_timestamp();
-        // %Y.%m.%d-%H%M — три точки-части и одна «HHMM» после дефиса.
         let parts: Vec<&str> = value.split(['.', '-']).collect();
         assert_eq!(parts.len(), 4, "формат {value}");
         let year: i64 = parts[0].parse().unwrap();

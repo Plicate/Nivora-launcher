@@ -11,10 +11,10 @@ export const FIRST_RUN_SETUP_STAGES = [
   { phase: 'finish', label: 'Завершение' },
 ] as const
 
-export type FirstRunSetupPhase = typeof FIRST_RUN_SETUP_STAGES[number]['phase']
+type FirstRunSetupPhase = typeof FIRST_RUN_SETUP_STAGES[number]['phase']
 export type FirstRunPhase = FirstRunSetupPhase | 'tour'
 
-export interface FirstRunStorage {
+interface FirstRunStorage {
   getItem(key: string): string | null
   setItem(key: string, value: string): void
 }
@@ -52,8 +52,7 @@ export function readFirstRunExperience(storage?: FirstRunStorage): FirstRunExper
 }
 
 export function initialFirstRunPhase(state: FirstRunExperienceState): FirstRunPhase | null {
-  // язык — самый первый шаг первоначальной настройки: до приветствия,
-  // чтобы весь визард сразу был на языке пользователя.
+  // выбираем язык до приветствия, чтобы сразу перевести настройку
   if (!state.setupCompleted) return 'language'
   if (!state.tourCompleted) return 'tour'
   return null

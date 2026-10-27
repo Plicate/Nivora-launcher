@@ -1,4 +1,4 @@
-// HTTP-клиент лаунчера: только HTTPS, проверка адресов перед запросом
+// клиент HTTP лаунчера проверяет адреса и поддерживает только HTTPS
 use serde_json::Value;
 use sha1::Sha1;
 use sha2::{Digest, Sha256, Sha512};
@@ -44,8 +44,7 @@ fn rate_limits() -> &'static Mutex<HashMap<String, Instant>> {
 }
 
 pub type Progress = Box<dyn Fn(u64, Option<u64>) + Send + Sync>;
-// наблюдатели — Arc, не Box: клон клиента (например, в параллельных
-// загрузчиках) обязан сохранять мост прогресса в UI, а не терять его.
+// arc сохраняет связь с прогрессом UI при клонировании клиента
 pub type DownloadObserver = std::sync::Arc<dyn Fn(&str, &str, &Path, u64, Option<u64>) + Send + Sync>;
 pub type RequestObserver = std::sync::Arc<dyn Fn(&str, &str, u32) + Send + Sync>;
 pub type RedirectValidator<'a> = &'a dyn Fn(&str) -> Result<(), String>;
@@ -129,12 +128,11 @@ struct Candidate {
     mirror: bool,
 }
 
-/// ошибка одного источника: можно ли пробовать следующий источник.
+/// ошибка одного источника: можно ли пробовать следующий источник
 enum SourceError {
-    /// отмена пользователем, нехватка места, ошибка записи на диск —
-    /// другой источник не поможет.
+    /// отмена, нехватка места и ошибки записи не исправятся при смене источника
     Fatal(String),
-    /// источник не отдал файл (сеть, таймаут, 4xx/5xx, битый хеш).
+    /// источник не отдал файл (сеть, таймаут, 4xx/5xx, битый хеш)
     Failed { message: String, status: Option<u16> },
 }
 
@@ -142,21 +140,27 @@ struct PreferIpv4Resolver {
     strict: bool,
 }
 
+fn filter_resolved_addresses(
+    mut addresses: Vec<std::net::SocketAddr>,
+    strict: bool,
+) -> std::io::Result<Vec<std::net::SocketAddr>> {
+    addresses.sort_by_key(|address| if address.is_ipv4() { 0 } else { 1 });
+    addresses.dedup();
+    if strict {
+        addresses.retain(|address| !is_local_address(&address.ip()));
+        if addresses.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "DNS вернул только непубличные адреса",
+            ));
+        }
+    }
+    Ok(addresses)
+}
+
 impl ureq::Resolver for PreferIpv4Resolver {
     fn resolve(&self, netloc: &str) -> std::io::Result<Vec<std::net::SocketAddr>> {
-        let mut addresses: Vec<std::net::SocketAddr> = netloc.to_socket_addrs()?.collect();
-        addresses.sort_by_key(|address| if address.is_ipv4() { 0 } else { 1 });
-        addresses.dedup();
-        if self.strict {
-            addresses.retain(|address| !is_local_address(&address.ip()));
-            if addresses.is_empty() {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::PermissionDenied,
-                    "DNS вернул только непубличные адреса",
-                ));
-            }
-        }
-        Ok(addresses)
+        filter_resolved_addresses(netloc.to_socket_addrs()?.collect(), self.strict)
     }
 }
 
@@ -199,8 +203,9 @@ impl HttpClient {
     ) -> Result<Self, String> {
         let proxy = proxy.trim();
         let idle = Duration::from_secs(timeout_seconds.max(1) as u64);
-        // таймаут — на простой соединения (нет байтов N секунд), а не на
+        // таймаут срабатывает после N секунд без байтов, а не по длительности загрузки
         let mut builder = ureq::AgentBuilder::new()
+            .try_proxy_from_env(false)
             .timeout_connect(Duration::from_secs(15))
             .timeout_read(idle)
             .timeout_write(idle)
@@ -210,8 +215,7 @@ impl HttpClient {
             builder = builder.tls_config(tls);
         }
         if !proxy.is_empty() {
-            // socks5h = SOCKS5 с remote-DNS; ureq различия не делает, DNS
-            // и так резолвит прокси.
+            // прокси SOCKS5 сам разрешает DNS, поэтому отдельного режима remote-DNS нет
             let normalized = proxy.replacen("socks5h://", "socks5://", 1);
             let parsed = ureq::Proxy::new(&normalized)
                 .map_err(|error| format!("Некорректный прокси {proxy}: {error}"))?;
@@ -363,7 +367,7 @@ impl HttpClient {
                         !matches!(name.to_ascii_lowercase().as_str(), "authorization" | "cookie" | "proxy-authorization")
                     });
                 }
-                // 303 и классика 301/302 для POST переводятся в GET — как в браузерах.
+                // после 301, 302 или 303 запрос POST повторяется методом GET
                 if status == 303 || ((status == 301 || status == 302) && method == "POST") {
                     method = "GET".to_owned();
                     body = None;
@@ -398,8 +402,7 @@ impl HttpClient {
                 Err(SourceError::Fatal(message)) => return Err(message),
                 Err(SourceError::Failed { message, status }) => {
                     self.check_cancelled()?;
-                    // 404/410 от официального сервера — это ответ, а не сбой:
-                    // зеркало такого файла тоже не найдёт.
+                    // при 404/410 официального сервера зеркало тоже не найдёт файл
                     let definitive = !candidate.mirror && matches!(status, Some(404) | Some(410));
                     if candidates.len() == 1 || definitive {
                         return Err(message);
@@ -683,8 +686,8 @@ impl HttpClient {
 
         let temporary = destination.with_file_name(format!(".{}.part", file_name_of(destination)));
         reject_symlink_path(&temporary)?;
-        // большой файл с известным размером и хешем качаем сегментами;
-        // при любой неудаче молча уходим в обычный одиночный режим
+        // большие файлы с известным размером и хешем качаем сегментами;
+        // при ошибке используем обычную загрузку
         if let Some(known_size) = size.filter(|value| *value >= PARALLEL_DOWNLOAD_MIN_BYTES) {
             let sha1_digest = sha1.filter(|value| !value.is_empty());
             if sha1_digest.is_some() {
@@ -769,7 +772,7 @@ impl HttpClient {
             self.notify_request("download", url, attempt);
             let mut headers_vec: Vec<(String, String)> = vec![
                 ("User-Agent".into(), self.user_agent.clone()),
-                // без gzip: иначе счётчик байтов не совпадает с Range-смещением.
+                // без gzip: иначе счётчик байтов не совпадает с Range-смещением
                 ("Accept-Encoding".into(), "identity".into()),
             ];
             headers_vec.extend(headers.unwrap_or(&[]).to_vec());
@@ -783,8 +786,7 @@ impl HttpClient {
                     last_status = status;
                     match status {
                         Some(416) if offset > 0 => {
-                            // сервер не принял докачку — начинаем файл заново,
-                            // попытку не засчитываем.
+                            // если сервер не принимает докачку, начинаем заново без учёта попытки
                             let _ = std::fs::remove_file(temporary);
                             offset = 0;
                             attempt -= 1;
@@ -799,8 +801,7 @@ impl HttpClient {
                             }
                             continue;
                         }
-                        // остальные 4xx повторять бессмысленно — сразу к
-                        // следующему источнику.
+                        // не повторяем прочие 4xx, а сразу пробуем следующий источник
                         Some(code) if (400..500).contains(&code) && code != 408 => {
                             return Err(SourceError::Failed { message: last_error, status });
                         }
@@ -877,7 +878,7 @@ impl HttpClient {
             if let Some(message) = interrupted {
                 last_error = message;
                 last_status = None;
-                // сохранённая часть докачивается следующей попыткой.
+                // сохранённая часть докачивается следующей попыткой
                 offset = std::fs::metadata(temporary).map(|meta| meta.len()).unwrap_or(0);
                 if offset > MAX_DOWNLOAD_BYTES {
                     offset = 0;
@@ -894,7 +895,7 @@ impl HttpClient {
                 offset = 0;
                 last_error = format!("Проверка хеша не пройдена: {url}");
                 last_status = None;
-                // битая докачка заслуживает одну чистую попытку с нуля.
+                // битая докачка заслуживает одну чистую попытку с нуля
                 if resumed && integrity_restarts == 0 {
                     integrity_restarts += 1;
                     continue;
@@ -1022,7 +1023,7 @@ impl HttpClient {
             }
             first_result
         });
-        // сборка сегментов в итоговый файл — только когда всё скачалось
+        // собираем сегменты только после завершения всех загрузок
         match result {
             Ok(()) if !failed.load(std::sync::atomic::Ordering::Relaxed) => {
                 let mut assembled = File::create(temporary)
@@ -1061,7 +1062,7 @@ impl HttpClient {
         }
     }
 
-    /// ответ в виде потока — для download(); редиректы обрабатывает open_once_raw.
+    /// возвращает поток ответа; редиректы обрабатывает `open_once_raw`
     fn open_stream(
         &self,
         url: &str,
@@ -1318,8 +1319,7 @@ pub fn verify_file(
 
 pub fn validate_public_https_url(url: &str) -> Result<(), String> {
     let parsed = url::Url::parse(url).map_err(|_| format!("Некорректный сетевой адрес: {url}"))?;
-    // host_str для IPv6-литералов возвращает адрес В СКОБКАХ («[2606::…]»),
-    // из-за чего парс IpAddr падал и публичные IPv6-URL отвергались.
+    // `host_str` оставляет квадратные скобки IPv6-литерала; снимаем их перед разбором
     let host = parsed
         .host_str()
         .unwrap_or_default()
@@ -1357,7 +1357,7 @@ fn check_public_address(address: &IpAddr, host: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn is_local_address(address: &IpAddr) -> bool {
+pub(super) fn is_local_address(address: &IpAddr) -> bool {
     match address {
         IpAddr::V4(value) => is_local_v4(*value),
         IpAddr::V6(value) => {
@@ -1378,7 +1378,7 @@ fn is_local_address(address: &IpAddr) -> bool {
                 );
                 return is_local_v4(compatible);
             }
-            // ULA fc00::/7
+            // префикс ULA fc00::/7
             if (segments[0] & 0xfe00) == 0xfc00 {
                 return true;
             }
@@ -1386,13 +1386,32 @@ fn is_local_address(address: &IpAddr) -> bool {
             if (segments[0] & 0xffc0) == 0xfe80 {
                 return true;
             }
-            // documentation 2001:db8::/32
-            if segments[0] == 0x2001 && segments[1] == 0x0db8 {
+            // специальный диапазон IETF и адреса для документации
+            if segments[0] == 0x2001 && ((segments[1] & 0xfe00) == 0 || segments[1] == 0x0db8) {
                 return true;
             }
-            // teredo 2001::/32
-            if segments[0] == 0x2001 && segments[1] == 0x0000 {
+            // диапазон адресов для документации
+            if segments[0] == 0x3fff && (segments[1] & 0xf000) == 0 {
                 return true;
+            }
+            // устаревший диапазон локальных адресов узла
+            if (segments[0] & 0xffc0) == 0xfec0 {
+                return true;
+            }
+            // префиксы NAT64 из RFC 6052 (well-known) и RFC 8215 (local-use)
+            if segments[0] == 0x0064 && segments[1] == 0xff9b {
+                if segments[2] == 0x0001 {
+                    return true;
+                }
+                if segments[2..6] == [0, 0, 0, 0] {
+                    let translated = Ipv4Addr::new(
+                        (segments[6] >> 8) as u8,
+                        segments[6] as u8,
+                        (segments[7] >> 8) as u8,
+                        segments[7] as u8,
+                    );
+                    return is_local_v4(translated);
+                }
             }
             // 6to4 2002::/16
             if segments[0] == 0x2002 {
@@ -1415,15 +1434,15 @@ fn is_local_v4(value: Ipv4Addr) -> bool {
         || value.is_broadcast()
         || value.is_multicast()
         || value.is_documentation()
-        // CGNAT 100.64.0.0/10 — «серый» адрес за провайдерским NAT
+        // диапазон CGNAT: адреса за NAT провайдера
         || (octets[0] == 100 && (64..=127).contains(&octets[1]))
-        // benchmarking 198.18.0.0/15
+        // адреса для тестирования производительности
         || (octets[0] == 198 && (18..=19).contains(&octets[1]))
-        // 0.0.0.0/8 — «this network», весь блок, не только 0.0.0.0
+        // весь диапазон "эта сеть", а не только адрес 0.0.0.0
         || octets[0] == 0
-        // 240.0.0.0/4 reserved
+        // зарезервированный диапазон
         || octets[0] >= 240
-        // 192.0.0.0/24 — IETF protocol assignments
+        // диапазон назначений протоколов IETF
         || (octets[0] == 192 && octets[1] == 0 && octets[2] == 0)
 }
 
@@ -1467,7 +1486,7 @@ impl Clone for HttpClient {
     }
 }
 
-// запись JSON с атомарной заменой и правами 0600.
+// запись JSON с атомарной заменой и правами 0600
 pub fn atomic_json_write(path: &Path, value: &Value, private: bool) -> Result<(), String> {
     let directory = path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(directory).map_err(|error| format!("Не удалось создать каталог {}: {error}", directory.display()))?;
@@ -1528,11 +1547,12 @@ mod tests {
     fn local_ipv6_matrix() {
         let blocked = [
             "::1", "::", "fe80::1", "fc00::1", "fd12:3456:789a::1",
-            "2001:db8::1", "ff02::1",
+            "2001:db8::1", "ff02::1", "fec0::1", "2001:1::1", "3fff::1",
+            "64:ff9b::a00:1", "64:ff9b:1::1",
             "100::1",
-            // IPv4-mapped: раньше проходили как «публичные» IPv6
+            // адреса IPv4-mapped раньше проходили как "публичные" IPv6
             "::ffff:10.0.0.1", "::ffff:127.0.0.1", "::ffff:192.168.0.1", "::ffff:169.254.0.1",
-            // 6to4 и teredo блокируются целиком — как is_private в CPython
+            // блокируем диапазоны 6to4 и Teredo целиком
             "2002:0a00:0001::1",
             "2002:5db8:d822::1",
             "2001:0000:0000:0000:0000:0000:3f57:fffe",
@@ -1545,6 +1565,7 @@ mod tests {
             "2606:4700:4700::1111",
             "2a00:1450:4002::1",
             "::ffff:93.184.216.34",
+            "64:ff9b::5db8:d822",
         ];
         for text in public {
             let address: IpAddr = text.parse().expect(text);
@@ -1565,15 +1586,14 @@ mod tests {
     }
 
     #[test]
-    fn resolver_keeps_public_and_drops_local_addresses() {
-        // та же таблица, что использует строгий резолвер: публичный остаётся,
-        // приватный и mapped отбрасываются до подключения
-        let public: IpAddr = "93.184.216.34".parse().unwrap();
-        let private: IpAddr = "10.0.0.8".parse().unwrap();
-        let mapped: IpAddr = "::ffff:127.0.0.1".parse().unwrap();
-        assert!(!is_local_address(&public));
-        assert!(is_local_address(&private));
-        assert!(is_local_address(&mapped));
+    fn strict_resolver_filters_each_dns_result_before_connecting() {
+        let public = "93.184.216.34:443".parse().unwrap();
+        let private = "10.0.0.8:443".parse().unwrap();
+        let mapped = "[::ffff:127.0.0.1]:443".parse().unwrap();
+        let nat64_local = "[64:ff9b::a00:1]:443".parse().unwrap();
+        assert_eq!(filter_resolved_addresses(vec![private, mapped, nat64_local, public], true).unwrap(), vec![public]);
+        assert!(filter_resolved_addresses(vec![private, mapped, nat64_local], true).is_err());
+        assert_eq!(filter_resolved_addresses(vec![private], false).unwrap(), vec![private]);
     }
 
     #[test]
@@ -1619,7 +1639,7 @@ mod tests {
         assert_eq!(DownloadSource::parse("weird"), DownloadSource::Auto);
     }
 
-    /// реальная сеть: `cargo test --lib net::tests::live -- --ignored`.
+    /// реальная сеть: `cargo test --lib net::tests::live -- --ignored`
     #[test]
     #[ignore]
     fn live_download_official_and_mirror() {

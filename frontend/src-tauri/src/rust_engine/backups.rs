@@ -1,10 +1,11 @@
-// резервные копии игровых миров: ZIP-архивы только игрового содержимого
 use serde_json::{json, Map, Value};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use super::cloud::{backup_cloud_delete, backup_cloud_get, backup_cloud_list, backup_cloud_prune, backup_cloud_put};
+use super::config::ConfigStore;
 use super::state::{instance_kind_of, instance_running, launcher_roots, read_bounded_json, resolve_instance_path, safe_instance_name, settings_game_dir};
 
 const BACKUP_CONFIG_FILE: &str = ".nivora-launcher-backups.json";
@@ -23,8 +24,8 @@ fn epoch_seconds() -> f64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|value| value.as_secs_f64()).unwrap_or(0.0)
 }
 
-/// локальное время в формате %Y%m%d-%H%M%S (как time.strftime).
-fn timestamp() -> String {
+/// локальное время в формате %Y%m%d-%H%M%S
+pub(crate) fn timestamp() -> String {
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or(Duration::ZERO);
     let seconds = now.as_secs() as i64;
     match local_datetime(seconds) {
@@ -54,7 +55,7 @@ fn local_datetime(seconds: i64) -> Option<(i64, u32, u32, u32, u32, u32)> {
     let bias_minutes: i64 = unsafe {
         let mut info: TIME_ZONE_INFORMATION = std::mem::zeroed();
         let status = GetTimeZoneInformation(&mut info);
-        // bias = UTC − local; в дневном свете действует DaylightBias.
+        // смещение UTC относительно местного времени; учитываем летнее время
         let extra = if status == TIME_ZONE_ID_DAYLIGHT { info.DaylightBias } else { info.StandardBias };
         (info.Bias + extra) as i64
     };
@@ -97,7 +98,7 @@ fn settings(config_home: &Path) -> Value {
     read_bounded_json(&config_home.join("settings.json"), 1024 * 1024).unwrap_or(Value::Null)
 }
 
-/// приведение bool как в настройках: true/1/yes/on и false/0/no/off.
+/// приведение bool как в настройках: true/1/yes/on и false/0/no/off
 fn coerce_bool(value: Option<&Value>, fallback: bool) -> bool {
     match value {
         Some(Value::Bool(flag)) => *flag,
@@ -112,7 +113,6 @@ fn coerce_bool(value: Option<&Value>, fallback: bool) -> bool {
 }
 
 fn py_int(value: Option<&Value>) -> Option<i64> {
-    // int(x) в Python принимает числа и строки; иначе исключение.
     match value {
         Some(Value::Number(number)) => number.as_f64().map(|value| value as i64),
         Some(Value::String(text)) => text.trim().parse::<i64>().ok(),
@@ -226,7 +226,7 @@ fn local_root(game_dir: &Path, name: &str) -> Result<PathBuf, String> {
     Ok(root)
 }
 
-/// список локальных ZIP-копий: свежие первыми.
+/// список локальных ZIP-копий: свежие первыми
 fn local_backups(game_dir: &Path, name: &str) -> Result<Vec<Value>, String> {
     let root = local_root(game_dir, name)?;
     let mut names: Vec<String> = fs::read_dir(&root)
@@ -251,6 +251,20 @@ fn local_backups(game_dir: &Path, name: &str) -> Result<Vec<Value>, String> {
             "size_bytes": meta.len(),
             "destination": "local",
         }));
+    }
+    result.sort_by(|a, b| {
+        let left = a["created_at"].as_f64().unwrap_or(0.0);
+        let right = b["created_at"].as_f64().unwrap_or(0.0);
+        right.partial_cmp(&left).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    Ok(result)
+}
+
+/// локальные + облачные копии (ошибки облака молча пропускаются), свежие первыми
+fn combined_backups(game_dir: &Path, name: &str) -> Result<Vec<Value>, String> {
+    let mut result = local_backups(game_dir, name)?;
+    if let Ok(store) = ConfigStore::load() {
+        result.extend(backup_cloud_list(&store, name));
     }
     result.sort_by(|a, b| {
         let left = a["created_at"].as_f64().unwrap_or(0.0);
@@ -337,7 +351,7 @@ fn write_archive(archive_path: &Path, instance_name: &str, kind: &str, worlds: &
                 state.0 += 1;
                 state.1 += size;
             }
-            // подкаталоги — после файлов текущего уровня (rglob обходит вглубь).
+            // подкаталоги обходятся после файлов текущего уровня
             for entry in entries {
                 if entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false)
                     && !fs::symlink_metadata(entry.path()).map(|meta| meta.is_symlink()).unwrap_or(false)
@@ -407,13 +421,14 @@ pub fn world_backup_list(request: &Value) -> Result<Value, String> {
     let name = request.get("name").and_then(Value::as_str).unwrap_or_default();
     let (config_home, game_dir) = roots();
     Ok(json!({
-        "backups": local_backups(&game_dir, &resolve_instance(&game_dir, name)?.name)?,
+        "backups": combined_backups(&game_dir, &resolve_instance(&game_dir, name)?.name)?,
         "schedule": schedule_for(&config_home, &game_dir, name)?,
     }))
 }
 
 pub fn world_backup_create(request: &Value) -> Result<Value, String> {
     let name = request.get("name").and_then(Value::as_str).unwrap_or_default();
+    let destination = request.get("destination").and_then(Value::as_str).unwrap_or("local").trim().to_owned();
     let reason: String = request
         .get("reason")
         .and_then(Value::as_str)
@@ -436,9 +451,19 @@ pub fn world_backup_create(request: &Value) -> Result<Value, String> {
     let archive_path = destination_root.join(format!("{backup_id}.zip"));
     let files = write_archive(&archive_path, &instance.name, &instance.kind, &worlds)?;
     let size_bytes = fs::symlink_metadata(&archive_path).map(|meta| meta.len()).unwrap_or(0);
+    if destination == "cloud" {
+        let store = ConfigStore::load()?;
+        backup_cloud_put(&store, &instance.name, &format!("{backup_id}.zip"), &archive_path)?;
+    }
     let schedule_value = schedule_for(&config_home, &game_dir, name)?;
     let keep = schedule_value.get("keep").and_then(Value::as_i64).unwrap_or(5);
-    prune_local(&game_dir, &instance, keep)?;
+    if destination == "cloud" {
+        if let Ok(store) = ConfigStore::load() {
+            backup_cloud_prune(&store, &instance.name, keep);
+        }
+    } else {
+        prune_local(&game_dir, &instance, keep)?;
+    }
     let mut values = Map::new();
     values.insert("last_run".into(), json!(epoch_seconds()));
     values.insert("last_status".into(), json!(format!("сохранено {files} файлов")));
@@ -448,7 +473,10 @@ pub fn world_backup_create(request: &Value) -> Result<Value, String> {
             "backup_id": backup_id,
             "size_bytes": size_bytes,
             "files": files,
-            "backups": local_backups(&game_dir, &instance.name)?,
+            // путь нужен, чтобы открыть архив во встроенном проводнике
+            "path": archive_path.to_string_lossy(),
+            "dir": destination_root.to_string_lossy(),
+            "backups": combined_backups(&game_dir, &instance.name)?,
         },
         "schedule": schedule_for(&config_home, &game_dir, name)?,
     }))
@@ -462,17 +490,39 @@ pub fn world_backup_restore(request: &Value) -> Result<Value, String> {
     if instance_running(&instance.path) {
         return Err(err("Остановите экземпляр перед восстановлением мира"));
     }
-    let archive_path = local_root(&game_dir, &instance.name)?.join(format!("{backup_id}.zip"));
-    let is_present = fs::symlink_metadata(&archive_path).map(|meta| meta.is_file()).unwrap_or(false);
-    if !is_present {
-        return Err(err("Резервная копия не найдена"));
+    // облачная копия скачивается во временный файл перед распаковкой
+    let cloud_path: Option<PathBuf> = if let Some(cloud_id) = backup_id.strip_suffix("@cloud") {
+        let store = ConfigStore::load()?;
+        let content = backup_cloud_get(&store, &instance.name, cloud_id)?;
+        if content.len() as u64 > MAX_BACKUP_BYTES {
+            return Err(err("Резервная копия слишком велика для восстановления"));
+        }
+        let temporary = std::env::temp_dir().join(format!("nivora-backup-{}-{cloud_id}.zip", std::process::id()));
+        fs::write(&temporary, &content).map_err(|error| format!("Не удалось восстановить мир: {error}"))?;
+        Some(temporary)
+    } else {
+        None
+    };
+    let archive_path = match cloud_path.clone() {
+        Some(path) => path,
+        None => local_root(&game_dir, &instance.name)?.join(format!("{backup_id}.zip")),
+    };
+    let result = (|| {
+        let is_present = fs::symlink_metadata(&archive_path).map(|meta| meta.is_file()).unwrap_or(false);
+        if !is_present {
+            return Err(err("Резервная копия не найдена"));
+        }
+        let worlds_root = worlds_root(&instance);
+        fs::create_dir_all(&worlds_root).map_err(|error| format!("Не удалось восстановить мир: {error}"))?;
+        super::platform::restrict_dir(&worlds_root);
+        let suffix = format!(".pre-restore-{}", timestamp());
+        let restored = restore_entries(&archive_path, &worlds_root, &suffix)?;
+        Ok(json!({ "restored": restored, "backups": combined_backups(&game_dir, &instance.name)? }))
+    })();
+    if let Some(temporary) = cloud_path {
+        let _ = fs::remove_file(temporary);
     }
-    let worlds_root = worlds_root(&instance);
-    fs::create_dir_all(&worlds_root).map_err(|error| format!("Не удалось восстановить мир: {error}"))?;
-    super::platform::restrict_dir(&worlds_root);
-    let suffix = format!(".pre-restore-{}", timestamp());
-    let restored = restore_entries(&archive_path, &worlds_root, &suffix)?;
-    Ok(json!({ "restored": restored, "backups": local_backups(&game_dir, &instance.name)? }))
+    result
 }
 
 fn restore_entries(archive_path: &Path, worlds_root: &Path, suffix: &str) -> Result<Vec<String>, String> {
@@ -484,7 +534,7 @@ fn restore_entries(archive_path: &Path, worlds_root: &Path, suffix: &str) -> Res
         if member.is_dir() {
             continue;
         }
-        names.push(member.name().to_owned());
+        names.push(member.name().map(|v| v.to_string()).unwrap_or_default());
     }
     if names.len() > MAX_BACKUP_FILES {
         return Err(err("Резервная копия слишком велика для восстановления"));
@@ -539,15 +589,20 @@ pub fn world_backup_delete(request: &Value) -> Result<Value, String> {
     let backup_id = request.get("backup_id").and_then(Value::as_str).unwrap_or_default();
     let (_config_home, game_dir) = roots();
     let instance = resolve_instance(&game_dir, name)?;
-    let path = local_root(&game_dir, &instance.name)?.join(format!("{backup_id}.zip"));
-    let Ok(meta) = fs::symlink_metadata(&path) else {
-        return Err(err("Резервная копия не найдена"));
-    };
-    if meta.is_symlink() || !meta.is_file() {
-        return Err(err("Резервная копия не найдена"));
+    if let Some(cloud_id) = backup_id.strip_suffix("@cloud") {
+        let store = ConfigStore::load()?;
+        backup_cloud_delete(&store, &instance.name, cloud_id)?;
+    } else {
+        let path = local_root(&game_dir, &instance.name)?.join(format!("{backup_id}.zip"));
+        let Ok(meta) = fs::symlink_metadata(&path) else {
+            return Err(err("Резервная копия не найдена"));
+        };
+        if meta.is_symlink() || !meta.is_file() {
+            return Err(err("Резервная копия не найдена"));
+        }
+        fs::remove_file(&path).map_err(|error| format!("Не удалось удалить копию: {error}"))?;
     }
-    fs::remove_file(&path).map_err(|error| format!("Не удалось удалить копию: {error}"))?;
-    Ok(json!({ "backups": local_backups(&game_dir, &instance.name)? }))
+    Ok(json!({ "backups": combined_backups(&game_dir, &instance.name)? }))
 }
 
 pub fn world_backup_schedule_get(request: &Value) -> Result<Value, String> {
@@ -595,8 +650,9 @@ fn apply_schedule_values(config_home: &Path, game_dir: &Path, raw_name: &str, va
     schedule_for(config_home, game_dir, raw_name)
 }
 
-pub(crate) fn cloud_configured(config_home: &Path) -> bool {
-    let settings = settings(config_home);
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn cloud_configured(config_home: &Path) -> bool {    let settings = settings(config_home);
     let url = settings.get("cloud_url").and_then(Value::as_str).unwrap_or_default().trim();
     let username = settings.get("cloud_username").and_then(Value::as_str).unwrap_or_default().trim();
     !url.is_empty() && !username.is_empty()
@@ -661,18 +717,18 @@ mod tests {
         assert_eq!(schedule["override"], json!(true));
         assert_eq!(schedule["interval_hours"], json!(12));
 
-        // глобальные настройки без override не видны в итоге.
+        // глобальные настройки без override не видны в итоге
         let values = json!({ "interval_hours": 48, "weird_key": 1 });
         let updated = apply_schedule_values(&root, &game, "alpha", &values, Some(false)).expect("обновление");
         assert_eq!(updated["override"], json!(false));
         // override выключен: schedule() показывает глобальные 24 часа,
-        // хотя в хранилище записано 48.
+        // хотя в хранилище записано 48
         assert_eq!(updated["interval_hours"], json!(24));
         let stored_after = read_stored_schedule(&instance);
         assert_eq!(stored_after["interval_hours"], json!(48));
         assert!(stored_after.get("weird_key").is_none(), "неизвестные ключи не пишутся");
 
-        // включение override поднимает сохранённые 48 часов.
+        // включение override поднимает сохранённые 48 часов
         let flipped = apply_schedule_values(&root, &game, "alpha", &json!({ "enabled": true }), Some(true)).expect("override");
         assert_eq!(flipped["override"], json!(true));
         assert_eq!(flipped["interval_hours"], json!(48));
@@ -699,7 +755,7 @@ mod tests {
         assert!(instance.join("saves").join("survival.pre-restore-test").is_dir());
         assert!(instance.join("saves").join("creative.pre-restore-test").is_dir());
 
-        // список видит копию; prune с keep=1 удаляет старейшую.
+        // список видит копию; prune с keep=1 удаляет старейшую
         let listed = local_backups(&game, "beta").expect("список");
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0]["id"], json!("manual-copy"));

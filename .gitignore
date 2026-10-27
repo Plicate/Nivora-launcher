@@ -6,7 +6,15 @@ dist/
 # Локальные данные лаунчера
 *.log
 
-# Android: ключи подписи и локальные параметры Gradle (см. docs/ANDROID-RELEASE.ru.md)
+# результаты тестов, не исходные тесты
+coverage
+test-results
+playwright-report
+.cache/
+.DS_Store
+Thumbs.db
+
+# Android: ключи подписи и локальные параметры Gradle
 frontend/src-tauri/keys/
 *.keystore
 keystore.properties

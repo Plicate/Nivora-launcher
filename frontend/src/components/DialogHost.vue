@@ -80,7 +80,7 @@ function handleDialogKeydown(event: KeyboardEvent) {
           <div class="dialog-icon" :class="{ 'dialog-icon--danger': current.danger }"><Icon :name="current.danger ? 'warning' : current.kind === 'prompt' ? 'edit' : 'info'" :size="18" /></div>
           <div class="dialog-copy">
             <div class="dialog-heading">
-              <div><span class="eyebrow">TRIAL LAUNCHER</span><h2 :id="`dialog-title-${current.id}`">{{ current.title || (current.kind === 'confirm' ? 'Подтвердите действие' : current.kind === 'prompt' ? 'Введите значение' : 'Сообщение') }}</h2></div>
+              <div><h2 :id="`dialog-title-${current.id}`">{{ current.title || (current.kind === 'confirm' ? 'Подтвердите действие' : current.kind === 'prompt' ? 'Введите значение' : 'Сообщение') }}</h2></div>
               <button class="icon-button" type="button" aria-label="Закрыть" @click="cancel"><Icon name="close" :size="16" /></button>
             </div>
             <p>{{ current.message }}</p>

@@ -1,5 +1,4 @@
-// одиночный клиентский или серверный процесс на экземпляр — общий для всех
-// воркеров лаунчера. flock на unix, LockFileEx на Windows.
+// один клиентский или серверный процесс на экземпляр; flock на Unix, LockFileEx на Windows
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -15,7 +14,6 @@ pub(crate) struct InstanceProcessLock {
 
 impl InstanceProcessLock {
     pub(crate) fn new(data_home: &Path, instance_name: &str) -> Self {
-        // имя файла блокировки безопасно для любой ФС: запрещённые символы -> "_".
         let mut sanitized = String::new();
         let mut in_run = false;
         for character in instance_name.chars() {
@@ -187,7 +185,6 @@ mod tests {
         fs::create_dir_all(&base).unwrap();
         let mut first = InstanceProcessLock::new(&base, "solo");
         first.acquire().unwrap();
-        // второй fd того же процесса обязан увидеть конфликт flock.
         let mut second = InstanceProcessLock::new(&base, "solo");
         assert_eq!(second.acquire().unwrap_err(), "Экземпляр уже запущен");
         first.release();

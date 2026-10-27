@@ -1,9 +1,8 @@
-// доступ к файлам одного клиентского профиля без следования по ссылкам:
-// цепочки openat с O_NOFOLLOW на unix, safe_path на Windows.
+// защищённый доступ к файлам: O_NOFOLLOW на Unix и safe_path на Windows
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+#[cfg(any(windows, test))]
 use std::fs;
-// seek + read_to_end используются только в Windows-ветках чтения логов.
 #[cfg(windows)]
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -11,9 +10,10 @@ use std::sync::Arc;
 
 use super::config::ConfigStore;
 use super::instances::{InstanceInfo, InstanceStore};
-use super::platform_support::{is_reparse_point, process_exists};
-use super::portable_fs::{atomic_write, remove_tree, safe_path};
+use super::platform_support::process_exists;
 use super::process_guard::InstanceProcessLock;
+#[cfg(windows)]
+use super::portable_fs::{atomic_write, remove_tree, safe_path};
 
 pub(crate) const MAX_INSTANCE_TEXT_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_INSTANCE_PREVIEW_BYTES: u64 = 8 * 1024 * 1024;
@@ -31,7 +31,7 @@ pub(crate) fn instance_log_hash(name: &str) -> String {
     digest.iter().take(12).map(|byte| format!("{byte:02x}")).collect()
 }
 
-/// простой идентификатор UTF-8 текста.
+/// простой идентификатор UTF-8 текста
 const IMAGE_MIMES: &[(&[u8], &str)] = &[
     (b"\x89PNG\r\n\x1a\n", "image/png"),
     (b"GIF87a", "image/gif"),
@@ -59,6 +59,22 @@ pub(crate) fn reserved_name(name: &str) -> bool {
     ) || lowered.starts_with(".trial-launcher")
 }
 
+
+#[cfg(windows)]
+fn as_parts(parts: &[String]) -> Vec<&str> {
+    parts.iter().map(String::as_str).collect()
+}
+
+#[cfg(windows)]
+fn modified_seconds_meta(metadata: &fs::Metadata) -> f64 {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs_f64())
+        .unwrap_or(0.0)
+}
+
 pub(crate) fn path_parts(raw: &str, allow_root: bool) -> Result<Vec<String>, String> {
     if raw.is_empty() && allow_root {
         return Ok(Vec::new());
@@ -80,10 +96,6 @@ pub(crate) fn path_parts(raw: &str, allow_root: bool) -> Result<Vec<String>, Str
         return Err("Путь содержит недопустимый компонент".to_owned());
     }
     Ok(parts)
-}
-
-fn as_parts(parts: &[String]) -> Vec<&str> {
-    parts.iter().map(String::as_str).collect()
 }
 
 #[cfg(unix)]
@@ -119,7 +131,7 @@ mod fd {
         Ok(fd)
     }
 
-    /// цепочка открытых каталогов: каждый шаг атомарно проверяет «не ссылка».
+    /// цепочка открытых каталогов: каждый шаг атомарно проверяет "не ссылка"
     pub(super) fn open_directory_chain(root: i32, parts: &[String]) -> io::Result<i32> {
         let mut current = unsafe { libc::dup(root) };
         if current < 0 {
@@ -164,7 +176,7 @@ mod fd {
         value.st_mtime as f64 + value.st_mtime_nsec as f64 / 1e9
     }
 
-    /// список записей каталога с lstat-данными каждого элемента.
+    /// список записей каталога с lstat-данными каждого элемента
     pub(super) fn scan_directory(fd: i32) -> io::Result<Vec<(String, libc::stat)>> {
         let duplicate = unsafe { libc::dup(fd) };
         if duplicate < 0 {
@@ -178,7 +190,7 @@ mod fd {
         let mut entries = Vec::new();
         unsafe {
             loop {
-                // каноничная идиома readdir: errno=0 до вызова, проверка после NULL.
+                // каноничная идиома readdir: errno=0 до вызова, проверка после NULL
                 *libc::__errno_location() = 0;
                 let entry = libc::readdir(directory);
                 if entry.is_null() {
@@ -234,7 +246,7 @@ mod fd {
         Ok(fd)
     }
 
-    /// временный файл: только создание с нуля, без следования ссылкам.
+    /// временный файл: только создание с нуля, без следования ссылкам
     pub(super) fn openat_exclusive(parent: i32, name: &str) -> io::Result<i32> {
         let cname = c_string(name)?;
         let flags = libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC;
@@ -429,7 +441,7 @@ impl InstanceFiles {
             outcome?;
         }
         values.sort_by(|left, right| {
-            // как в Python: (kind != "directory", name.casefold()) — каталоги первыми.
+            // сначала каталоги, затем имена без учёта регистра
             let left_dir = left["kind"].as_str() != Some("directory");
             let right_dir = right["kind"].as_str() != Some("directory");
             left_dir
@@ -521,16 +533,7 @@ fn finish_read(content: Vec<u8>, encoding: &str) -> Result<Value, String> {
     }))
 }
 
-fn modified_seconds_meta(metadata: &fs::Metadata) -> f64 {
-    metadata
-        .modified()
-        .ok()
-        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|duration| duration.as_secs_f64())
-        .unwrap_or(0.0)
-}
-
-/// casefold-сравнение имён, как sorted(..., key=name.casefold()).
+/// сравнивает имена без учёта регистра
 fn sort_key(value: &Value) -> String {
     value["name"].as_str().unwrap_or("").to_casefold()
 }
@@ -564,7 +567,7 @@ impl From<std::io::Error> for FdFailure {
     }
 }
 
-/// os.replace поверх каталога-назначения: сначала проверка «не ссылка».
+/// заменяет файл, предварительно проверив, что цель не ссылка
 #[cfg(unix)]
 fn ensure_regular_destination(parent_fd: i32, file_name: &str) -> Result<(), FdFailure> {
     match fd::stat_at(parent_fd, file_name) {
@@ -585,7 +588,7 @@ fn atomic_write_at(parent_fd: i32, file_name: &str, content: &[u8]) -> Result<()
         fd::fsync_fd(fd)?;
         ensure_regular_destination(parent_fd, file_name)?;
         fd::rename_at(parent_fd, &temporary, file_name)?;
-        // отказ fsync каталога не считается ошибкой записи, как в Python.
+        // ошибка синхронизации каталога не отменяет успешную запись файла
         let _ = fd::fsync_fd(parent_fd);
         Ok(())
     })();
@@ -668,7 +671,7 @@ fn map_fd_failure(failure: FdFailure, message: &str) -> String {
 }
 
 impl InstanceFiles {
-    /// блокировка экземпляра + проверка «не запущен» перед любыми изменениями.
+    /// блокировка экземпляра + проверка "не запущен" перед любыми изменениями
     fn with_mutation<R>(
         &self,
         name: &str,
@@ -905,7 +908,7 @@ impl InstanceFiles {
                     let offset = offset.min(file_size);
                     let content = fd::read_at(file_fd, limit as usize, offset as u64)
                         .map_err(|_| "Не удалось безопасно прочитать архив лога".to_owned())?;
-                    // размер берётся повторно: лог может расти во время чтения.
+                    // размер берётся повторно: лог может расти во время чтения
                     let file_size = fd::fstat(file_fd)
                         .map_err(|_| "Не удалось безопасно прочитать архив лога".to_owned())?
                         .st_size;
@@ -978,7 +981,7 @@ impl InstanceFiles {
     }
 }
 
-/// открывает родителя цепочкой и возвращает (fd, имя последнего компонента).
+/// открывает родителя цепочкой и возвращает (fd, имя последнего компонента)
 #[cfg(unix)]
 fn open_parent_chain(root_fd: i32, parts: &[String]) -> Result<(i32, String), FdFailure> {
     let Some(last) = parts.last() else {
@@ -1102,7 +1105,7 @@ fn log_read_range(offset: &Value, limit: &Value) -> Result<(i64, i64), String> {
     Ok((normalized_offset, normalized_limit))
 }
 
-/// int() из Python: число, строка, bool; дробная часть отбрасывается.
+/// разбирает число, строку или логическое значение, отбрасывая дробную часть
 pub(crate) fn coerce_int(value: &Value) -> Option<i64> {
     match value {
         Value::Number(number) => number
@@ -1137,7 +1140,7 @@ fn pid_from_value(value: &Value) -> Result<i64, ()> {
     }
 }
 
-/// живой маркер запуска: pid<=0 без процесса считается «работает».
+/// живой маркер запуска: pid<=0 без процесса считается "работает"
 pub(crate) fn instance_process_running(root: &Path) -> Result<bool, String> {
     #[cfg(windows)]
     {
@@ -1202,7 +1205,7 @@ pub(crate) fn instance_process_running(root: &Path) -> Result<bool, String> {
     }
 }
 
-/// декодирование куска лога: обрыв мультибайта на границе не теряет строки.
+/// декодирование куска лога: обрыв мультибайта на границе не теряет строки
 pub(crate) fn decode_log_chunk(content: &[u8], offset: usize, file_size: i64) -> (String, usize, bool) {
     let mut next_offset = offset + content.len();
     let mut eof = next_offset as i64 >= file_size;
@@ -1225,7 +1228,7 @@ pub(crate) fn decode_log_chunk(content: &[u8], offset: usize, file_size: i64) ->
     (text, next_offset, eof)
 }
 
-/// хвост лога: потерянная первая строка после пропуска байт — норма.
+/// после пропуска байтов первая строка хвоста может быть неполной
 pub(crate) fn tail_lines(content: &[u8], offset: i64, line_limit: usize) -> Vec<String> {
     let text = String::from_utf8_lossy(content).replace('\r', "");
     let text = if offset > 0 {
@@ -1244,7 +1247,7 @@ pub(crate) fn tail_lines(content: &[u8], offset: i64, line_limit: usize) -> Vec<
     lines
 }
 
-/// str.splitlines из Python: границы строк — не только перевод строки.
+/// делит текст по переводам строк и другим поддерживаемым границам строк
 fn python_splitlines(text: &str) -> Vec<String> {
     let mut lines = Vec::new();
     let mut current = String::new();
@@ -1266,7 +1269,9 @@ fn python_splitlines(text: &str) -> Vec<String> {
 
 fn files_with_config() -> Result<InstanceFiles, String> {
     let config = ConfigStore::load()?;
-    InstanceFiles::new(&config, None)
+    // путь данных Bedrock определяется профилем BoL или официальной игры
+    let resolver: BedrockProfileResolver = std::sync::Arc::new(|info| super::bedrock::profile_path_for(info));
+    InstanceFiles::new(&config, Some(resolver))
 }
 
 pub fn instance_file_list(request: &Value) -> Result<Value, String> {
@@ -1421,7 +1426,7 @@ mod tests {
         assert!(!log_id_matches("a.log.txt"));
         assert!(!log_id_matches("a/../b.log"));
         assert!(!log_id_matches(""));
-        // хвост версии — 10 hex-символов, как в Python (_LOG_VERSION_TAIL_RE).
+        // суффикс версии содержит ровно 10 шестнадцатеричных символов
         assert!(LOG_VERSION_TAIL_RE.is_match("Name-123-0123456789.log"));
         assert!(!LOG_VERSION_TAIL_RE.is_match("Name-123-0123456789ab.log"));
         assert!(!LOG_VERSION_TAIL_RE.is_match("Name-123-0123456789.log.bak"));
@@ -1431,7 +1436,7 @@ mod tests {
 
     #[test]
     fn log_component_normalizes_like_python() {
-        // непрерывный запуск запрещённых символов схлопывается в один «_».
+        // непрерывный запуск запрещённых символов схлопывается в один "_"
         assert_eq!(log_component("Мой сервер"), "launcher");
         assert_eq!(log_component("сервер 1.20"), "1.20");
         assert_eq!(log_component("Alpha..___---"), "Alpha");
@@ -1443,12 +1448,11 @@ mod tests {
 
     #[test]
     fn chunk_decoder_trims_incomplete_multibyte() {
-        // «Д» обрезана посередине, за куском есть ещё данные.
+        // "Д" обрезана посередине, за куском есть ещё данные
         let full = "строка".as_bytes();
         let cut = &full[..full.len() - 1];
         let (text, next_offset, eof) = decode_log_chunk(cut, 0, full.len() as i64);
-        // 11 байт из 12: «строк» + обрыв первого байта «а» — неполный
-        // символ отброшен, следующее чтение начнётся с его начала.
+        // символ отброшен, следующее чтение начнётся с его начала
         assert_eq!(text, "строк");
         assert_eq!(next_offset, "строк".len());
         assert!(!eof);
@@ -1458,7 +1462,7 @@ mod tests {
         assert_eq!(text, "");
         assert_eq!(next_offset, 10);
 
-        // конец файла: неполный символ заменяется, а не отбрасывается.
+        // конец файла: неполный символ заменяется, а не отбрасывается
         let tail_only = &full[full.len() - 1..];
         let (text, _, eof) = decode_log_chunk(tail_only, 0, tail_only.len() as i64);
         assert_eq!(text, "\u{fffd}");
@@ -1474,7 +1478,6 @@ mod tests {
         assert_eq!(tail_lines(content, 100, 10), vec!["second", "third", "fourth"]);
         assert_eq!(tail_lines(content, 100, 2), vec!["third", "fourth"]);
         assert_eq!(tail_lines(content, 0, 10), vec!["first", "second", "third", "fourth"]);
-        // пропущенные байты без перевода строки — строк нет вовсе.
         assert!(tail_lines(content, 100, 10).iter().all(|line| !line.contains("partial")));
         assert_eq!(tail_lines(b"no-newline", 5, 10), Vec::<String>::new());
         assert_eq!(tail_lines(b"crlf\r\nline", 0, 10), vec!["crlf", "line"]);

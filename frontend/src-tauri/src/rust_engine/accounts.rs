@@ -1,4 +1,3 @@
-// учётные записи: файл accounts.json с приватной записью (indent-2 JSON),
 use serde_json::{json, Map, Value};
 use std::fs;
 use std::io::Write;
@@ -14,6 +13,9 @@ use super::state::{launcher_roots, read_bounded_json};
 const ACCOUNTS_FILE_MAX_BYTES: u64 = 4 * 1024 * 1024;
 const STATUS_FILE_MAX_BYTES: u64 = 256 * 1024;
 const STATUS_FILE: &str = "microsoft-login.json";
+const ELY_AUTHENTICATE_URL: &str = "https://authserver.ely.by/auth/authenticate";
+const ELY_VALIDATE_URL: &str = "https://authserver.ely.by/auth/validate";
+const ELY_REFRESH_URL: &str = "https://authserver.ely.by/auth/refresh";
 
 fn err(message: &str) -> String {
     message.to_owned()
@@ -74,7 +76,6 @@ fn records_value(records: &[Map<String, Value>]) -> Value {
 }
 
 fn record_str(record: &Map<String, Value>, key: &str) -> String {
-    // str(value.get(key, "")): отсутствующий ключ — пустая строка.
     match record.get(key) {
         None | Some(Value::Null) => String::new(),
         Some(Value::String(text)) => text.clone(),
@@ -87,7 +88,6 @@ fn record_f64(record: &Map<String, Value>, key: &str) -> f64 {
 }
 
 fn record_i64(record: &Map<String, Value>, key: &str) -> i64 {
-    // int(x): строки тоже приводятся, дробные отбрасывают дробную часть.
     match record.get(key) {
         Some(Value::Number(number)) => number.as_f64().map(|value| value as i64).unwrap_or(0),
         Some(Value::String(text)) => text.trim().parse::<f64>().ok().map(|value| value as i64).unwrap_or(0),
@@ -95,7 +95,7 @@ fn record_i64(record: &Map<String, Value>, key: &str) -> i64 {
     }
 }
 
-/// публичное представление аккаунта без токенов.
+/// публичное представление аккаунта без токенов
 fn account_public(record: &Map<String, Value>) -> Value {
     let alias = record_str(record, "alias");
     let username = record_str(record, "username");
@@ -112,7 +112,7 @@ fn account_public(record: &Map<String, Value>) -> Value {
     })
 }
 
-/// публичный список аккаунтов без токенов — компактный ответ для bootstrap.
+/// публичный список аккаунтов без токенов для быстрого bootstrap-ответа
 pub(crate) fn public_accounts(config_home: &Path) -> Result<Vec<Value>, String> {
     Ok(read_records(config_home)?
         .iter()
@@ -120,13 +120,60 @@ pub(crate) fn public_accounts(config_home: &Path) -> Result<Vec<Value>, String> 
         .collect())
 }
 
-pub(crate) fn has_legacy_tokens(config_home: &Path) -> bool {    let Ok(records) = read_records(config_home) else {
-        return false;
-    };
-    records.iter().any(|record| {
-        record_str(record, "kind") == "microsoft" && (!record_str(record, "access_token").is_empty() || !record_str(record, "refresh_token").is_empty())
-    })
+
+/// сбрасывает пробный лимит перед запуском; возвращает ошибку, если аккаунта нет
+pub(crate) fn offline_debug_account(config_home: &Path) -> Result<Map<String, Value>, String> {
+    let mut records = read_records(config_home)?;
+    let index = records
+        .iter()
+        .position(|record| record_str(record, "account_id") == "offline-debug")
+        .ok_or_else(|| "Debug-аккаунт ещё не создан. Используйте: account debug <имя>".to_owned())?;
+    if record_i64(&records[index], "limit_seconds") > 0 {
+        records[index].insert("limit_seconds".into(), json!(0));
+        records[index].insert("used_seconds".into(), json!(0));
+        write_private_json(&accounts_file(config_home), &stored_value(&records))?;
+    }
+    Ok(records[index].clone())
 }
+
+/// остаток пробного времени; `None` означает отсутствие лимита
+pub(crate) fn offline_remaining(record: &Map<String, Value>) -> Option<i64> {
+    let limit = record_i64(record, "limit_seconds");
+    if limit <= 0 {
+        return None;
+    }
+    Some((limit - record_i64(record, "used_seconds")).max(0))
+}
+
+/// зачисляет сыгранное время и возвращает остаток; `None` означает отсутствие лимита
+pub(crate) fn offline_finish(config_home: &Path, record: &Map<String, Value>, elapsed_seconds: i64) -> Option<i64> {
+    let account_id = record_str(record, "account_id");
+    let limit = record_i64(record, "limit_seconds");
+    let elapsed = elapsed_seconds.max(0);
+    let updated_used = if limit <= 0 {
+        record_i64(record, "used_seconds")
+    } else {
+        (record_i64(record, "used_seconds") + elapsed).min(limit)
+    };
+    let mut records = read_records(config_home).unwrap_or_default();
+    for item in records.iter_mut() {
+        if record_str(item, "account_id") == account_id {
+            item.insert("used_seconds".into(), json!(updated_used));
+            if limit <= 0 {
+                let _ = write_private_json(&accounts_file(config_home), &stored_value(&records));
+                return None;
+            }
+            let _ = write_private_json(&accounts_file(config_home), &stored_value(&records));
+            return Some((limit - updated_used).max(0));
+        }
+    }
+    if limit <= 0 {
+        None
+    } else {
+        Some(limit.max(0))
+    }
+}
+
 
 pub(crate) fn validate_nickname(value: &str) -> Result<String, String> {
     if value.is_empty() {
@@ -174,9 +221,10 @@ pub(crate) fn create_offline_account_in(config_home: &Path, request: &Value) -> 
     let username = py_str(request, "username", "Player");
     let safe_name = validate_nickname(&username)?;
     let uuid = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, format!("nivora-launcher:{safe_name}").as_bytes()).simple().to_string();
+    migrate_legacy_token_records(config_home);
     let mut records = read_records(config_home)?;
     let mut record = Map::new();
-    // порядок ключей — как to_dict() у Account: файл байт-в-байт тот же.
+    // порядок ключей сохраняет прежний формат файла
     record.insert("account_id".into(), json!("offline-debug"));
     record.insert("kind".into(), json!("offline"));
     record.insert("username".into(), json!(safe_name));
@@ -210,6 +258,7 @@ pub fn delete_account(request: &Value) -> Result<Value, String> {
 
 pub(crate) fn delete_account_in(config_home: &Path, request: &Value) -> Result<Value, String> {
     let account_id = py_str(request, "account_id", "");
+    migrate_legacy_token_records(config_home);
     let records = read_records(config_home)?;
     let updated: Vec<Map<String, Value>> = records.iter().filter(|item| record_str(item, "account_id") != account_id).cloned().collect();
     if updated.len() == records.len() {
@@ -229,6 +278,7 @@ pub fn set_default_account(request: &Value) -> Result<Value, String> {
 
 pub(crate) fn set_default_account_in(config_home: &Path, request: &Value) -> Result<Value, String> {
     let account_id = py_str(request, "account_id", "");
+    migrate_legacy_token_records(config_home);
     let mut records = read_records(config_home)?;
     let mut selected: Option<Map<String, Value>> = None;
     for item in records.iter_mut() {
@@ -256,12 +306,13 @@ pub fn move_account(request: &Value) -> Result<Value, String> {
 pub(crate) fn move_account_in(config_home: &Path, request: &Value) -> Result<Value, String> {
     let account_id = py_str(request, "account_id", "");
     let direction = py_str(request, "direction", "down");
+    migrate_legacy_token_records(config_home);
     let mut records = read_records(config_home)?;
     let index = records.iter().position(|item| record_str(item, "account_id") == account_id);
     let Some(index) = index else {
         return Err(err(&format!("Аккаунт не найден: {account_id}")));
     };
-    // выход за границы — просто бездействие, как в Python (без записи файла).
+    // индекс вне списка не меняет порядок
     let target: i64 = if direction == "up" {
         index as i64 - 1
     } else if direction == "down" {
@@ -381,8 +432,7 @@ fn run_secret_tool(arguments: &[&str], input_text: Option<&str>) -> Result<ToolO
     if first.code == 0 {
         return Ok(first);
     }
-    // у minimal-сессий libsecret бывает установлен, пока Secret Service ещё
-    // не запущен: поднимаем только компонент secrets и повторяем запрос.
+    // если Secret Service не запущен, активируем компонент secrets и повторяем запрос
     let keyring = std::env::var_os("PATH").and_then(|paths| {
         std::env::split_paths(&paths)
             .map(|directory| directory.join("gnome-keyring-daemon"))
@@ -464,7 +514,7 @@ fn value_to_text(value: &Value) -> String {
     }
 }
 
-/// bool() из Python: пустая строка/ноль/null — ложь, остальное — истина.
+/// пустые строки, ноль и null считаются ложью; остальные значения считаются истиной
 fn py_bool(value: Option<&Value>) -> bool {
     match value {
         None | Some(Value::Null) => false,
@@ -481,7 +531,7 @@ pub(crate) fn write_microsoft_status(cache_home: &Path, value: &Value) -> Result
     write_private_json(&cache_home.join(STATUS_FILE), &Value::Object(object))
 }
 
-/// аккаунт Microsoft с токенами в памяти: в файл пишется публичная часть.
+/// аккаунт Microsoft с токенами в памяти; в файл попадает только публичная часть
 pub(crate) struct MicrosoftAccount {
     pub(crate) account_id: String,
     pub(crate) username: String,
@@ -494,7 +544,7 @@ pub(crate) struct MicrosoftAccount {
     pub(crate) is_default: bool,
 }
 
-/// каноническая запись to_dict(): порядок ключей фиксирован, токенов нет.
+/// запись аккаунта без токенов с фиксированным порядком ключей
 fn microsoft_stored_record(account: &MicrosoftAccount) -> Map<String, Value> {
     let mut record = Map::new();
     record.insert("account_id".into(), json!(account.account_id));
@@ -555,8 +605,7 @@ fn lookup_secret_payload(account_id: &str) -> String {
     if let Some(payload) = lookup(KEYRING_SERVICE) {
         return payload;
     }
-    // лечение переходного периода: токен нашли под старым именем —
-    // переносим в каноническое и убираем дубль.
+    // при найденном старом токене сохраняем каноническую запись и удаляем прежнюю
     if let Some(payload) = lookup(LEGACY_KEYRING_SERVICE) {
         if store_secret_payload(account_id, &payload).is_ok() {
             let _ = run_secret_tool(&["clear", "service", LEGACY_KEYRING_SERVICE, "account-id", account_id], None);
@@ -572,10 +621,9 @@ fn lookup_secret_payload(account_id: &str) -> String {
     if !canonical.is_empty() {
         return canonical;
     }
-    // лечение переходного периода: токен нашли под старым именем —
-    // переносим в каноническое и убираем дубль.
+    // при найденном старом токене сохраняем каноническую запись и удаляем прежнюю
     let mut legacy = windows_keyring::get(LEGACY_KEYRING_SERVICE, account_id);
-    // токены, сохранённые прежним Python-бэкендом через пакет keyring.
+    // резервно проверяем старые записи keyring
     if legacy.is_empty() {
         legacy = windows_keyring::get_target(&format!("{account_id}@{KEYRING_SERVICE}"), None);
     }
@@ -593,8 +641,7 @@ fn lookup_secret_payload(account_id: &str) -> String {
 
 #[cfg(not(windows))]
 fn store_secret_payload(account_id: &str, payload: &str) -> Result<(), String> {
-    // secret Service допускает дубликаты с теми же атрибутами: сначала
-    // чистим, чтобы lookup не вернул протухший токен после refresh.
+    // удаляем дубликаты: Secret Service допускает одинаковые атрибуты
     clear_secret_payload(account_id)?;
     let output = run_secret_tool(
         &["store", "--label", "Nivora Launcher Microsoft", "service", KEYRING_SERVICE, "account-id", account_id],
@@ -636,10 +683,14 @@ fn clear_secret_payload_if_available(account_id: &str) -> Result<(), String> {
     clear_secret_payload(account_id)
 }
 
+#[cfg_attr(not(windows), allow(dead_code))]
 const CHUNK_MARKER: &str = "nivora-chunked:";
+#[cfg_attr(not(windows), allow(dead_code))]
 const CHUNK_CHARS: usize = 1000;
+#[cfg_attr(not(windows), allow(dead_code))]
 const MAX_CHUNKS: usize = 32;
 
+#[cfg_attr(not(windows), allow(dead_code))]
 fn split_secret(payload: &str) -> Vec<String> {
     let chars: Vec<char> = payload.chars().collect();
     if chars.len() <= CHUNK_CHARS {
@@ -648,10 +699,12 @@ fn split_secret(payload: &str) -> Vec<String> {
     chars.chunks(CHUNK_CHARS).map(|part| part.iter().collect()).collect()
 }
 
+#[cfg_attr(not(windows), allow(dead_code))]
 fn chunk_count(main: &str) -> Option<usize> {
     main.strip_prefix(CHUNK_MARKER)?.trim().parse::<usize>().ok().filter(|count| (1..=MAX_CHUNKS).contains(count))
 }
 
+#[cfg_attr(not(windows), allow(dead_code))]
 fn chunk_user(account_id: &str, index: usize) -> String {
     format!("{account_id}:part{index}")
 }
@@ -746,7 +799,7 @@ fn lookup_file_tokens(config_home: &Path, account_id: &str) -> String {
         .unwrap_or_default()
 }
 
-/// сохранилось ли значение в постоянной коллекции Secret Service.
+/// сохранилось ли значение в постоянной коллекции Secret Service
 #[cfg(not(windows))]
 fn secret_is_persistent(account_id: &str, payload: &str) -> bool {
     if let Ok(search) = run_secret_tool(&["search", "--all", "service", KEYRING_SERVICE, "account-id", account_id], None) {
@@ -780,15 +833,55 @@ fn store_account_tokens(config_home: &Path, account: &MicrosoftAccount) -> Resul
     .unwrap_or_default();
     match store_secret_payload(&account.account_id, &payload) {
         Ok(()) if secret_is_persistent(&account.account_id, &payload) => {
-            // хранилище надёжно — резервная копия больше не нужна.
+            // после надёжной записи резервную копию можно удалить
             remove_file_tokens(config_home, &account.account_id)
         }
         _ => store_file_tokens(config_home, &account.account_id, &payload),
     }
 }
 
-fn load_account_tokens(config_home: &Path, account_id: &str) -> (String, String) {
-    let mut payload = lookup_secret_payload(account_id);
+/// переносит токены в Secret Service; при его недоступности сохраняет файловый резерв
+pub(crate) fn migrate_legacy_token_records(config_home: &Path) {
+    let Ok(mut records) = read_records(config_home) else {
+        return;
+    };
+    let mut changed = false;
+    for record in records.iter_mut() {
+        let kind = record_str(record, "kind");
+        if kind != "microsoft" && kind != "ely" {
+            continue;
+        }
+        let access_token = record_str(record, "access_token");
+        let refresh_token = record_str(record, "refresh_token");
+        if access_token.is_empty() && refresh_token.is_empty() {
+            continue;
+        }
+        let account_id = record_str(record, "account_id");
+        let client_token = record_str(record, "client_token");
+        let payload = serde_json::to_string(&json!({
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "client_token": client_token,
+        }))
+        .unwrap_or_default();
+        let persistent = store_secret_payload(&account_id, &payload)
+            .map(|_| secret_is_persistent(&account_id, &payload))
+            .unwrap_or(false);
+        if persistent {
+            let _ = remove_file_tokens(config_home, &account_id);
+        } else {
+            let _ = store_file_tokens(config_home, &account_id, &payload);
+        }
+        record.remove("access_token");
+        record.remove("refresh_token");
+        changed = true;
+    }
+    if changed {
+        let _ = write_private_json(&accounts_file(config_home), &stored_value(&records));
+    }
+}
+
+fn load_account_tokens(config_home: &Path, account_id: &str) -> (String, String) {    let mut payload = lookup_secret_payload(account_id);
     if payload.is_empty() && valid_account_id(account_id).is_ok() {
         payload = lookup_file_tokens(config_home, account_id);
     }
@@ -841,8 +934,7 @@ fn record_is_microsoft(record: &Map<String, Value>) -> bool {
     record_str(record, "kind") == "microsoft"
 }
 
-/// используется при запуске игры — см. launcher.rs (интеграция).
-#[allow(dead_code)]
+/// используется при запуске игры, см. `launcher.rs`
 fn item_to_account(record: &Map<String, Value>) -> MicrosoftAccount {
     MicrosoftAccount {
         account_id: record_str(record, "account_id"),
@@ -855,29 +947,6 @@ fn item_to_account(record: &Map<String, Value>) -> MicrosoftAccount {
         alias: record_str(record, "alias"),
         is_default: record_bool(record, "is_default"),
     }
-}
-
-pub(crate) fn pick_launch_account(
-    config_home: &Path,
-    settings: &Value,
-    http: &HttpClient,
-    account_id: &str,
-) -> Result<MicrosoftAccount, String> {
-    let records = load_accounts_with_tokens(config_home)?;
-    let mut found = if account_id.is_empty() { None } else {
-        records.iter().find(|record| record_str(record, "account_id") == account_id)
-    };
-    if found.is_none() {
-        found = records
-            .iter()
-            .find(|record| record_bool(record, "is_default"))
-            .or_else(|| records.first());
-    }
-    let record = found.ok_or_else(|| "Аккаунт не найден: создайте оффлайн-аккаунт или войдите в Microsoft".to_owned())?;
-    if record_is_microsoft(record) {
-        return get_valid_account(config_home, settings, http, &record_str(record, "account_id"), false);
-    }
-    Ok(item_to_account(record))
 }
 
 fn save_microsoft_account(config_home: &Path, account: &MicrosoftAccount) -> Result<Map<String, Value>, String> {
@@ -1123,10 +1192,13 @@ pub(crate) fn login_device_code(
         &format!("{login_api_url}/devicecode"),
         &[("client_id".to_owned(), client_id.clone()), ("scope".to_owned(), MSA_SCOPE.to_owned())],
     )?;
-    let verification_uri = str_field(&response, "verification_uri")
-        .is_empty()
-        .then(|| str_field(&response, "verification_uri_complete"))
-        .unwrap_or_else(|| str_field(&response, "verification_uri"));
+    // если сервер не отдал verification_uri, берём verification_uri_complete
+    let primary_uri = str_field(&response, "verification_uri");
+    let verification_uri = if primary_uri.is_empty() {
+        str_field(&response, "verification_uri_complete")
+    } else {
+        primary_uri
+    };
     let user_code = str_field(&response, "user_code");
     let device_code = str_field(&response, "device_code");
     if verification_uri.is_empty() || user_code.is_empty() || device_code.is_empty() {
@@ -1154,7 +1226,6 @@ pub(crate) fn login_device_code(
     Ok(account)
 }
 
-#[allow(dead_code)]
 pub(crate) fn get_valid_account(
     config_home: &Path,
     settings: &Value,
@@ -1170,8 +1241,7 @@ pub(crate) fn get_valid_account(
             .find(|record| record_is_microsoft(record) && record_bool(record, "is_default"))
             .or_else(|| records.iter().find(|record| record_is_microsoft(record)))
     };
-    // пара (аккаунт, найден ли он как Microsoft): по id может прилететь и
-    // оффлайн-аккаунт — тогда это ошибка, а не замена, как в Python.
+    // не подменяем офлайн-аккаунт аккаунтом Microsoft
     let mut found: Option<(MicrosoftAccount, bool)> = if !account_id.is_empty() {
         by_id(account_id).map(|record| (item_to_account(record), record_is_microsoft(record)))
     } else {
@@ -1243,15 +1313,14 @@ pub(crate) fn login_microsoft_with(settings: &Value, proxy: &str, request: &Valu
         proxy,
         cancellation,
     )?;
-    // refCell: замыкание уведомлений должно быть Fn, а не FnMut.
+    // уведомление требует `Fn`, поэтому состояние хранится в RefCell
     let messages = std::cell::RefCell::new(Vec::<String>::new());
     let notify = |message: &str| messages.borrow_mut().push(message.to_owned());
     let roots = launcher_roots();
     let account = match login_device_code(&roots.config_home, &roots.cache_home, settings, &http, &notify) {
         Ok(account) => account,
         Err(error) => {
-            // без этого окно входа продолжало показывать код устройства, и
-            // казалось, что лаунчер «молчит» после входа на сайте Microsoft.
+            // скрываем код устройства после успешного входа
             let _ = write_microsoft_status(&roots.cache_home, &json!({ "status": "failed", "error": error }));
             return Err(error);
         }
@@ -1263,6 +1332,32 @@ pub(crate) fn login_microsoft_with(settings: &Value, proxy: &str, request: &Valu
 
 fn setting_int(settings: &Value, key: &str, fallback: i64) -> i64 {
     settings.get(key).and_then(Value::as_i64).unwrap_or(fallback)
+}
+
+fn new_ely_client_token() -> Result<String, String> {
+    let mut bytes = [0u8; 16];
+    getrandom::fill(&mut bytes)
+        .map_err(|error| format!("Не удалось подготовить вход через ely.by: {error}"))?;
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Ok(uuid::Uuid::from_bytes(bytes).to_string())
+}
+
+fn ely_authenticate_payload(username: &str, password: &str, client_token: &str) -> Value {
+    json!({
+        "agent": { "name": "Minecraft", "version": 1 },
+        "username": username,
+        "password": password,
+        "clientToken": client_token,
+    })
+}
+
+fn ely_validate_payload(access_token: &str) -> Value {
+    json!({"accessToken": access_token})
+}
+
+fn ely_refresh_payload(access_token: &str, client_token: &str) -> Value {
+    json!({"accessToken": access_token, "clientToken": client_token})
 }
 
 pub fn login_ely(request: &Value) -> Result<Value, String> {
@@ -1287,12 +1382,9 @@ pub(crate) fn login_ely_with(settings: &Value, proxy: &str, request: &Value) -> 
         proxy,
         cancellation,
     )?;
-    let payload = json!({
-        "agent": { "name": "Minecraft", "version": 1 },
-        "username": username,
-        "password": password,
-    });
-    let (status, response) = http.post_json_soft("https://authserver.ely.by/api/authenticate", &payload)?;
+    let client_token = new_ely_client_token()?;
+    let payload = ely_authenticate_payload(&username, password, &client_token);
+    let (status, response) = http.post_json_soft(ELY_AUTHENTICATE_URL, &payload)?;
     let access_token = str_field(&response, "accessToken");
     let profile = response
         .get("selectedProfile")
@@ -1309,7 +1401,12 @@ pub(crate) fn login_ely_with(settings: &Value, proxy: &str, request: &Value) -> 
     if status >= 400 || profile_id.is_empty() || access_token.is_empty() {
         return Err(err(&ely_error(&response, "ely.by не выдал профиль аккаунта")));
     }
-    let client_token = str_field(&response, "clientToken");
+    let response_client_token = str_field(&response, "clientToken");
+    let client_token = if response_client_token.is_empty() {
+        client_token
+    } else {
+        response_client_token
+    };
     let mut record = Map::new();
     record.insert("account_id".into(), json!(format!("ely-{profile_id}")));
     record.insert("kind".into(), json!("ely"));
@@ -1339,11 +1436,71 @@ fn ely_error(response: &Value, fallback: &str) -> String {
     }
 }
 
+/// проверяет токен ely.by и при необходимости обновляет его по clientToken
+pub(crate) fn get_valid_ely_account(
+    config_home: &Path,
+    http: &HttpClient,
+    account_id: &str,
+) -> Result<Map<String, Value>, String> {
+    let records = load_accounts_with_tokens(config_home)?;
+    let Some(record) = records
+        .iter()
+        .find(|item| record_str(item, "kind") == "ely" && record_str(item, "account_id") == account_id)
+    else {
+        return Err(err("Аккаунт ely.by не найден. Войдите через «Войти через ely.by»"));
+    };
+    let mut record = record.clone();
+    let access_token = record_str(&record, "access_token");
+    let client_token = record_str(&record, "client_token");
+    if !access_token.is_empty() {
+        // validate у Yggdrasil-серверов отвечает 204 без тела, поэтому
+        // смотрим статус сырого ответа, а не парсим JSON
+        let payload = serde_json::to_vec(&ely_validate_payload(&access_token)).unwrap_or_default();
+        let validated = http
+            .request_detailed(
+                ELY_VALIDATE_URL,
+                "POST",
+                Some(&payload),
+                Some(&[
+                    ("Content-Type".to_owned(), "application/json".to_owned()),
+                    ("Accept".to_owned(), "application/json".to_owned()),
+                ]),
+                None,
+                None,
+            )
+            .map(|response| (200..300).contains(&response.status))
+            .unwrap_or(false);
+        if validated {
+            return Ok(record);
+        }
+    }
+    if client_token.is_empty() {
+        return Err(err("Токен ely.by не обновляется без повторного входа. Войдите заново."));
+    }
+    let (status, refreshed) = http.post_json_soft(
+        ELY_REFRESH_URL,
+        &ely_refresh_payload(&access_token, &client_token),
+    )?;
+    if !(200..300).contains(&status) {
+        return Err(err(&ely_error(&refreshed, "ely.by отказался обновлять токен; войдите заново")));
+    }
+    let token = str_field(&refreshed, "accessToken");
+    if token.is_empty() {
+        return Err(err(&ely_error(&refreshed, "ely.by отказался обновлять токен; войдите заново")));
+    }
+    record.insert("access_token".into(), json!(token));
+    let refreshed_client = str_field(&refreshed, "clientToken");
+    if !refreshed_client.is_empty() {
+        record.insert("client_token".into(), json!(refreshed_client));
+    }
+    save_ely_account(config_home, &mut record)
+}
+
 fn save_ely_account(config_home: &Path, record: &mut Map<String, Value>) -> Result<Map<String, Value>, String> {
     let account_id = record_str(record, "account_id");
     let uuid = record_str(record, "uuid").replace('-', "").to_lowercase();
     let mut records = read_records(config_home)?;
-    // тот же игрок мог быть записан под старым account_id — ищем по uuid
+    // при смене account_id ищем игрока по UUID
     let existing = records.iter().find(|item| {
         record_str(item, "kind") == "ely" && (record_str(item, "account_id") == account_id || record_str(item, "uuid").replace('-', "").to_lowercase() == uuid)
     });
@@ -1395,13 +1552,11 @@ mod tests {
         let uuid_first = fs::read_to_string(accounts_file(&config)).unwrap();
         assert!(uuid_first.contains("\"kind\": \"offline\""));
 
-        // повторное создание с тем же именем замещает запись, а не дублирует.
+        // повторное создание с тем же именем замещает запись, а не дублирует
         create_offline_account_in(&config, &json!({ "username": "Steve_77" })).expect("повторное создание");
         let raw = fs::read_to_string(accounts_file(&config)).unwrap();
         let parsed: Value = serde_json::from_str(&raw).unwrap();
         assert_eq!(parsed.as_array().unwrap().len(), 1);
-        // формат записи: indent 2 (элементы массива — 4) и завершающий
-        // перевод строки, как json.dump в Python.
         assert!(raw.ends_with("]\n") && raw.contains("\n    \"account_id\": \"offline-debug\","));
 
         let second = create_offline_account_in(&config, &json!({ "username": "Steve_77" })).expect("ещё раз");
@@ -1410,7 +1565,6 @@ mod tests {
         assert_eq!(first["account"]["is_default"], json!(true));
         assert_eq!(second["account"]["is_default"], json!(false));
 
-        // недопустимые для Minecraft ники отвергаются, а не обрезаются молча.
         let error = create_offline_account_in(&config, &json!({ "username": "  Steve_77!  " })).unwrap_err();
         assert_eq!(error, "Ник содержит недопустимые символы: «пробел», «!». Разрешены только латинские буквы, цифры и _");
         let error = create_offline_account_in(&config, &json!({ "username": "Игрок" })).unwrap_err();
@@ -1418,6 +1572,55 @@ mod tests {
         assert_eq!(create_offline_account_in(&config, &json!({ "username": "ab" })).unwrap_err(), "Ник должен быть не короче 3 символов");
         assert_eq!(create_offline_account_in(&config, &json!({ "username": "a".repeat(17) })).unwrap_err(), "Ник должен быть не длиннее 16 символов");
         assert_eq!(create_offline_account_in(&config, &json!({ "username": "" })).unwrap_err(), "Введите ник");
+    }
+
+    #[test]
+    fn ely_authentication_uses_documented_endpoints_and_client_token() {
+        assert_eq!(
+            ELY_AUTHENTICATE_URL,
+            "https://authserver.ely.by/auth/authenticate"
+        );
+        assert_eq!(ELY_VALIDATE_URL, "https://authserver.ely.by/auth/validate");
+        assert_eq!(ELY_REFRESH_URL, "https://authserver.ely.by/auth/refresh");
+
+        let payload = ely_authenticate_payload("player@example.org", "password", "launcher-client-id");
+        assert_eq!(payload["username"], json!("player@example.org"));
+        assert_eq!(payload["password"], json!("password"));
+        assert_eq!(payload["clientToken"], json!("launcher-client-id"));
+        assert_eq!(payload["agent"]["name"], json!("Minecraft"));
+        assert_eq!(
+            ely_validate_payload("access-token"),
+            json!({"accessToken": "access-token"})
+        );
+        assert_eq!(
+            ely_refresh_payload("access-token", "client-token"),
+            json!({"accessToken": "access-token", "clientToken": "client-token"})
+        );
+    }
+
+    #[test]
+    fn ely_client_token_is_a_version_four_uuid() {
+        let token = new_ely_client_token().expect("client token");
+        let parsed = uuid::Uuid::parse_str(&token).expect("valid UUID");
+        assert_eq!(parsed.get_version_num(), 4);
+    }
+
+    #[test]
+    fn ely_valid_account_errors_match_python() {
+        let config = temp_root("ely-valid");
+        write_accounts(
+            &config,
+            json!([
+                { "account_id": "ely-abc", "kind": "ely", "username": "ElyUser", "alias": "", "is_default": true,
+                  "uuid": "069a79f444e94726a5befca4e03a75cd", "access_token": "", "client_token": "" },
+            ]),
+        );
+        let http = HttpClient::new(5, 1, "", None).expect("http");
+        let error = get_valid_ely_account(&config, &http, "ely-missing").unwrap_err();
+        assert_eq!(error, "Аккаунт ely.by не найден. Войдите через «Войти через ely.by»");
+        let error = get_valid_ely_account(&config, &http, "ely-abc").unwrap_err();
+        assert_eq!(error, "Токен ely.by не обновляется без повторного входа. Войдите заново.");
+        let _ = fs::remove_dir_all(&config);
     }
 
     #[test]
@@ -1434,7 +1637,6 @@ mod tests {
         let moved = move_account_in(&config, &json!({ "account_id": "beta", "direction": "up" })).expect("сдвиг");
         let order: Vec<&str> = moved["accounts"].as_array().unwrap().iter().map(|item| item["account_id"].as_str().unwrap()).collect();
         assert_eq!(order, vec!["beta", "alpha"]);
-        // display_name берётся из alias, когда он есть.
         assert_eq!(moved["accounts"][0]["display_name"], json!("Бета"));
 
         let default = set_default_account_in(&config, &json!({ "account_id": "beta" })).expect("default");
@@ -1452,22 +1654,22 @@ mod tests {
     }
 
     #[test]
-    fn legacy_token_gate_detects_microsoft_records_only() {
-        let config = temp_root("legacy");
-        assert!(!has_legacy_tokens(&config));
+    fn legacy_token_migration_strips_records_and_falls_back_to_file() {
+        let config = temp_root("legacy-migrate");
         write_accounts(
             &config,
             json!([
                 { "account_id": "offline-debug", "kind": "offline", "username": "S", "access_token": "nivora-launcher-offline" },
-                { "account_id": "msid", "kind": "microsoft", "username": "M", "access_token": "", "refresh_token": "" },
+                { "account_id": "msid", "kind": "microsoft", "username": "M", "access_token": "at", "refresh_token": "rt", "client_token": "ct" },
             ]),
         );
-        assert!(!has_legacy_tokens(&config), "пустые токены Microsoft — не legacy");
-        write_accounts(
-            &config,
-            json!([{ "account_id": "msid", "kind": "microsoft", "username": "M", "access_token": "", "refresh_token": "rt" }]),
-        );
-        assert!(has_legacy_tokens(&config));
+        migrate_legacy_token_records(&config);
+        let raw = fs::read_to_string(config.join("accounts.json")).expect("accounts");
+        let records: Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(records[0]["access_token"], json!("nivora-launcher-offline"));
+        assert!(records[1].get("access_token").is_none() || records[1]["access_token"] == json!(""));
+        let backup = fs::read_to_string(config.join("microsoft-tokens.json")).unwrap_or_default();
+        assert!(backup.contains("\"access_token\":\"at\"") || backup.contains("\"access_token\": \"at\""), "резерв: {backup}");
     }
 
     #[test]
@@ -1477,7 +1679,6 @@ mod tests {
         write_accounts(&config, json!([]));
         let error = read_records(&config);
         assert!(error.is_ok());
-        // символическая ссылка вместо файла.
         let linked = temp_root("linked");
         std::os::unix::fs::symlink(accounts_file(&config), accounts_file(&linked)).expect("ссылка");
         let error = read_records(&linked).unwrap_err();
@@ -1488,15 +1689,11 @@ mod tests {
     fn login_status_defaults_to_idle_and_passes_object_through() {
         let roots = temp_root("status");
         fs::create_dir_all(&roots).expect("корень");
-        // нет файла — idle.
         let value = microsoft_login_status(&json!({})).expect("статус");
         assert_eq!(value["status"], json!("idle"));
-        // повреждённый файл — idle.
         fs::write(roots.join(STATUS_FILE), "not-json").unwrap();
         assert_eq!(microsoft_login_status(&json!({})).unwrap()["status"], json!("idle"));
-        // корректный объект проходит как есть.
         fs::write(roots.join(STATUS_FILE), json!({ "status": "device_code", "code": "AB12" }).to_string()).unwrap();
-        // microsoft_login_status читает launcher_roots() — проверяем парсер напрямую.
         let parsed = read_bounded_json(&roots.join(STATUS_FILE), STATUS_FILE_MAX_BYTES).unwrap();
         assert_eq!(parsed["code"], json!("AB12"));
     }
@@ -1529,8 +1726,7 @@ pub(crate) mod windows_keyring {
     pub fn get_target(target: &str, expected_user: Option<&str>) -> String {
         let target = wide(target);
         let mut credential: *mut CREDENTIALW = std::ptr::null_mut();
-        // SAFETY: target — NUL-terminated буфер, credential — out-параметр.
-        // в windows-sys 0.59 у CredReadW четыре параметра (третий — flags).
+        // SAFETY: target завершён нулём; credential используется как out-параметр
         if unsafe { CredReadW(target.as_ptr(), CRED_TYPE_GENERIC, 0, &mut credential) } == 0 {
             return String::new();
         }
@@ -1580,7 +1776,7 @@ pub(crate) mod windows_keyring {
             TargetAlias: std::ptr::null_mut(),
             UserName: user.as_ptr() as *mut u16,
         };
-        // SAFETY: credential заполнен целиком, буферы живут до вызова.
+        // SAFETY: credential заполнен целиком, буферы живут до вызова
         if unsafe { CredWriteW(&credential, 0) } == 0 {
             return Err("Не удалось сохранить Microsoft-токен в диспетчере учётных данных Windows".into());
         }
@@ -1592,7 +1788,7 @@ pub(crate) mod windows_keyring {
             return Ok(());
         }
         let target = wide(&format!("{service}:{username}"));
-        // SAFETY: target — NUL-terminated буфер.
+        // SAFETY: `target` оканчивается нулевым байтом
         if unsafe { CredDeleteW(target.as_ptr(), CRED_TYPE_GENERIC, 0) } == 0 {
             return Err("Не удалось удалить Microsoft-токен из диспетчера учётных данных Windows".into());
         }
@@ -1619,7 +1815,6 @@ mod oauth_tests {
         };
         let record = microsoft_stored_record(&account);
         let keys: Vec<&str> = record.keys().map(String::as_str).collect();
-        // порядок to_dict() у Account — файл байт-в-байт как у Python.
         assert_eq!(keys, vec!["account_id", "kind", "username", "uuid", "expires_at", "xuid", "used_seconds", "limit_seconds", "alias", "is_default"]);
         let raw = serde_json::to_string(&stored_value(&[record])).unwrap();
         assert!(!raw.contains("secret") && !raw.contains("refresh"));
@@ -1652,7 +1847,6 @@ mod oauth_tests {
         assert!(matches!(&failed, PollOutcome::Failed(message) if message == "Microsoft OAuth завершился ошибкой: access_denied"));
         let unknown = classify_poll(400, &json!({}));
         assert!(matches!(&unknown, PollOutcome::Failed(message) if message == "Microsoft OAuth завершился ошибкой: неизвестная ошибка"));
-        // 200 без токена — не успех.
         assert!(matches!(classify_poll(200, &json!({})), PollOutcome::Failed(_)));
     }
 
@@ -1672,7 +1866,6 @@ mod oauth_tests {
         let parts: Vec<&str> = first.split('-').collect();
         assert_eq!(parts.len(), 5);
         assert_eq!(parts[0].len() + parts[1].len() + parts[2].len() + parts[3].len() + parts[4].len(), 32);
-        // версия 4 и вариант RFC 4122.
         let bytes: Vec<char> = first.chars().collect();
         assert_eq!(bytes[14], '4');
         assert!(matches!(bytes[19], '8'..='b'));
@@ -1746,7 +1939,7 @@ mod oauth_tests {
         assert!(py_bool(Some(&json!(0.5))));
         assert!(!py_bool(None));
         assert!(!py_bool(Some(&Value::Null)));
-        assert!(py_bool(Some(&json!({})))); // непустой контейнер — истина
+        assert!(py_bool(Some(&json!({})))); // непустой контейнер означает истину
     }
 
     #[test]
@@ -1755,7 +1948,6 @@ mod oauth_tests {
         let _ = fs::create_dir_all(&root);
         let (access, refresh) = load_account_tokens(&root, "not-an-id!");
         assert_eq!((access.as_str(), refresh.as_str()), ("", ""));
-        // валидный id, но хранилище в тестовой среде недоступно — пусто.
         let (access, refresh) = load_account_tokens(&root, "abc.123");
         assert_eq!((access.as_str(), refresh.as_str()), ("", ""));
         let _ = fs::remove_dir_all(&root);
@@ -1767,7 +1959,6 @@ mod oauth_tests {
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         store_file_tokens(&root, "abc.123", r#"{"access_token":"a","refresh_token":"r"}"#).unwrap();
-        // «Перезапуск»: читаем заново с диска.
         assert_eq!(load_account_tokens(&root, "abc.123"), ("a".to_owned(), "r".to_owned()));
         remove_file_tokens(&root, "abc.123").unwrap();
         assert!(!token_file(&root).exists());

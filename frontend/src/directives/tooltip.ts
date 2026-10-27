@@ -80,8 +80,7 @@ export const vTooltip: Directive<HTMLElement, string | undefined> = {
       show(element, current)
     }
     const leave = () => hideSoon()
-    // binding в этом замыкании мог устареть — актуальное значение приходит
-    // с событием из updated()
+    // значение binding обновляется в updated()
     const update = (event: Event) => {
       current = text((event as CustomEvent).detail)
       if (currentAnchor === element) {

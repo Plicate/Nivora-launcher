@@ -1,6 +1,4 @@
-// каталог Modrinth через Go-бинарник nivora-modcat: поиск, карточка проекта
-// и батч-проверка обновлений. Пока бинарника нет — операции проваливаются
-// в Python-воркер, как раньше.
+// каталог модов, ресурсов, модпаков и плагинов
 use serde_json::{json, Map, Value};
 use std::fs;
 use std::io::{Read, Write};
@@ -12,6 +10,11 @@ use std::time::Duration;
 
 use super::config::ConfigStore;
 use super::instances::{InstanceInfo, InstanceStore};
+use super::instance_workspace::InstanceWorkspace;
+use super::modpacks::ModpackProvider;
+use super::mods::ModrinthProvider;
+use super::net::client_from_settings;
+use super::plugin_catalogs::{plugin_catalog_for, PluginCatalog};
 
 const METADATA_SUFFIX: &str = ".trial-project.json";
 const MAX_METADATA_BYTES: u64 = 64 * 1024;
@@ -36,12 +39,9 @@ fn modcat_binary() -> Option<PathBuf> {
     super::platform::helper_path("nivora-modcat", "NIVORA_MODCAT_BIN").or_else(|| {
         let exe = std::env::current_exe().ok()?;
         let parent = exe.parent()?.parent()?;
-        [
-            parent.join("go-modcat").join("nivora-modcat"),
-            parent.join("nivora-launcher").join("go-modcat").join("nivora-modcat"),
-        ]
-        .into_iter()
-        .find(|path| path.is_file())
+        [parent.join("go-modcat").join("nivora-modcat")]
+            .into_iter()
+            .find(|path| path.is_file())
     })
 }
 
@@ -58,8 +58,7 @@ fn modcat_call(payload: &Value) -> Result<Value, String> {
         let mut guard = child.lock().unwrap_or_else(|poison| poison.into_inner());
         (guard.stdin.take(), guard.stdout.take())
     };
-    // сторожевой таймер: при зависании сети процесс снимается, иначе
-    // батч-проверка сотни модов могла бы тянуться неограниченно долго
+    // ограничиваем время пакетного запроса, чтобы сбой сети не задерживал ответ
     let (done_tx, done_rx) = mpsc::channel::<()>();
     let watchdog = child.clone();
     std::thread::spawn(move || {
@@ -70,17 +69,15 @@ fn modcat_call(payload: &Value) -> Result<Value, String> {
         }
     });
     let mut output = String::new();
-    let mut outcome: Result<(), String> = Ok(());
-    if let Some(mut stdin) = stdin {
+    let mut outcome: Result<(), String> = if let Some(mut stdin) = stdin {
         let body = serde_json::to_string(payload).unwrap_or_default();
-        outcome = stdin
+        stdin
             .write_all(body.as_bytes())
             .and_then(|_| stdin.flush())
-            .map_err(|error| format!("Не удалось передать запрос nivora-modcat: {error}"));
-        drop(stdin);
+            .map_err(|error| format!("Не удалось передать запрос nivora-modcat: {error}"))
     } else {
-        outcome = Err("Не удалось передать запрос nivora-modcat".to_owned());
-    }
+        Err("Не удалось передать запрос nivora-modcat".to_owned())
+    };
     if outcome.is_ok() {
         if let Some(stdout) = stdout.as_mut() {
             outcome = stdout
@@ -110,7 +107,7 @@ fn modcat_call(payload: &Value) -> Result<Value, String> {
     value.get("data").cloned().ok_or_else(|| "Некорректный ответ nivora-modcat".to_owned())
 }
 
-fn resource_catalog(config: &ConfigStore, catalog_id: &str) -> Result<Value, String> {
+pub(crate) fn resource_catalog(config: &ConfigStore, catalog_id: &str) -> Result<Value, String> {
     let settings = config.settings();
     let requested = catalog_id.trim().to_lowercase();
     let empty = Vec::new();
@@ -135,7 +132,7 @@ fn resource_catalog(config: &ConfigStore, catalog_id: &str) -> Result<Value, Str
     selected.cloned().ok_or_else(|| "Каталог ресурсов не настроен".to_owned())
 }
 
-fn instance_mod_context(info: &InstanceInfo) -> Result<(String, Option<String>), String> {
+pub(crate) fn instance_mod_context(info: &InstanceInfo) -> Result<(String, Option<String>), String> {
     if info.game_edition.trim().eq_ignore_ascii_case("bedrock") {
         return Err("Моды, ресурспаки и модпаки доступны только для Java-экземпляров".to_owned());
     }
@@ -252,47 +249,6 @@ fn scan_trusted_sidecars(
     result
 }
 
-// set project_id установленных ресурсов — как installed_projects в воркере
-fn installed_project_ids(directory: &Path, project_type: &str, catalog_id: &str) -> Vec<String> {
-    let mut ids: Vec<String> = Vec::new();
-    let Ok(items) = fs::read_dir(directory) else {
-        return ids;
-    };
-    for entry in items.filter_map(|entry| entry.ok()) {
-        let path = entry.path();
-        let name = entry.file_name().to_string_lossy().to_string();
-        if path.is_symlink() || !name.ends_with(METADATA_SUFFIX) || !name.starts_with('.') || !path.is_file() {
-            continue;
-        }
-        let Some(metadata) = read_sidecar(&path) else { continue };
-        let stored_type = sidecar_text(&metadata, "project_type").to_lowercase();
-        if stored_type != project_type {
-            continue;
-        }
-        let source = sidecar_text(&metadata, "source").to_lowercase();
-        let stored_catalog = match metadata.get("catalog_id").and_then(Value::as_str) {
-            Some(value) => value.trim().to_lowercase(),
-            None => match metadata.get("catalog").and_then(Value::as_str) {
-                Some(value) => value.trim().to_lowercase(),
-                None => {
-                    if source == "modrinth" {
-                        "modrinth".to_owned()
-                    } else {
-                        String::new()
-                    }
-                }
-            },
-        };
-        if stored_catalog != catalog_id.to_lowercase() {
-            continue;
-        }
-        let project_id = sidecar_text(&metadata, "project_id");
-        if !project_id.is_empty() {
-            ids.push(project_id);
-        }
-    }
-    ids
-}
 
 fn catalog_field(catalog: &Value, key: &str, fallback: &str) -> String {
     catalog
@@ -305,6 +261,10 @@ fn catalog_field(catalog: &Value, key: &str, fallback: &str) -> String {
 
 fn request_str(request: &Value, key: &str) -> String {
     request.get(key).and_then(Value::as_str).unwrap_or_default().trim().to_owned()
+}
+
+fn modrinth_category_supported(project_type: &str, catalog_kind: &str) -> bool {
+    project_type == "mod" && catalog_kind == "modrinth"
 }
 
 fn parse_bounded_int(request: &Value, key: &str, default: i64, min: i64, max: i64) -> Result<i64, String> {
@@ -323,86 +283,213 @@ pub fn mods_search(request: &Value) -> Result<Value, String> {
     if project_type.is_empty() {
         return Err("Неизвестный тип Modrinth-проекта".to_owned());
     }
-    if !NATIVE_PROJECT_TYPES.contains(&project_type.as_str()) {
-        return Err("Операция оставлена Python-воркеру".to_owned());
-    }
-    let catalog = resource_catalog(&config, &request_str(request, "catalog_id"))?;
-    if catalog_field(&catalog, "kind", "modrinth") != "modrinth" {
-        return Err("Операция оставлена Python-воркеру".to_owned());
-    }
+    // нумерация страниц начинается с нуля
     let page = parse_bounded_int(request, "page", 0, 0, 500)?;
     let page_size = parse_bounded_int(request, "limit", 12, 1, 30)?;
     let offset = page * page_size;
+    // у каталогов без смещения забираем начало выдачи и режем локально
+    let local_window = 30.min(offset + page_size);
 
     let store = InstanceStore::new(&config)?;
-    let mut server_core = request_str(request, "server_core");
-    let mut installed: Vec<String> = Vec::new();
-    let mut explicit_context = false;
+    let mut info: Option<InstanceInfo> = None;
     if !instance_name.is_empty() {
-        let info = store.get(&instance_name)?;
-        if info.game_edition.trim().eq_ignore_ascii_case("bedrock") {
+        let item = store.get(&instance_name)?;
+        if item.game_edition.trim().eq_ignore_ascii_case("bedrock") {
             // bedrock-профиль не может принимать Java-контент: ищем по явной версии
             instance_name = String::new();
-            explicit_context = true;
         } else {
-            if info.kind.trim().eq_ignore_ascii_case("server") {
+            info = Some(item);
+        }
+    }
+    let (game_version, loader) = match &info {
+        Some(item) => {
+            let kind = item.kind.trim().to_lowercase();
+            if project_type == "plugin" && kind != "server" {
+                return Err("Каталог плагинов доступен только для серверных экземпляров".to_owned());
+            }
+            if project_type != "plugin" && kind == "server" {
                 return Err("Каталог ресурсов доступен только для клиентских экземпляров".to_owned());
             }
-            if server_core.is_empty() {
-                server_core = info.server_core.trim().to_owned();
-            }
-            let directory = info
-                .path
-                .join(project_directory(&project_type).unwrap_or_default());
-            installed = installed_project_ids(&directory, &project_type, &catalog_field(&catalog, "id", "modrinth"));
+            instance_mod_context(item)?
         }
-    } else {
-        explicit_context = true;
-    }
-    let (game_version, loader) = if explicit_context {
-        explicit_mod_context(request)?
-    } else {
-        let info = store.get(&instance_name)?;
-        instance_mod_context(&info)?
+        None => explicit_mod_context(request)?,
     };
 
-    let mut payload = Map::new();
-    payload.insert("cmd".to_owned(), json!("search"));
-    payload.insert("query".to_owned(), json!(request_str(request, "query")));
-    payload.insert("game_version".to_owned(), json!(game_version));
-    payload.insert("loader".to_owned(), json!(loader.clone().unwrap_or_default()));
-    payload.insert("limit".to_owned(), json!(page_size));
-    payload.insert("project_type".to_owned(), json!(project_type));
-    payload.insert("sort_by".to_owned(), json!(request_str(request, "sort_by")));
-    if offset > 0 {
-        payload.insert("offset".to_owned(), json!(offset));
-    }
-    payload.insert("api_url".to_owned(), json!(catalog_field(&catalog, "api_url", "")));
-    let data = modcat_call(&Value::Object(payload))?;
-    let hits = data.get("hits").and_then(Value::as_array).cloned().unwrap_or_default();
-    let total = data.get("total").and_then(Value::as_i64);
-    let has_more = match total {
-        Some(total) => offset + (hits.len() as i64) < total,
-        None => hits.len() as i64 >= page_size,
+    let query = request_str(request, "query");
+    let requested_category = request_str(request, "category");
+    let sort_by = request_str(request, "sort_by");
+    let catalog = if project_type == "plugin" {
+        plugin_catalog_for(&config, &request_str(request, "catalog_id"))?
+    } else {
+        resource_catalog(&config, &request_str(request, "catalog_id"))?
     };
-    let results: Vec<Value> = hits
-        .iter()
-        .map(|hit| {
-            let mut object = hit.as_object().cloned().unwrap_or_default();
-            let project_id = hit
+    let catalog_id = catalog_field(&catalog, "id", "modrinth");
+    let category = if modrinth_category_supported(&project_type, &catalog_field(&catalog, "kind", "modrinth")) {
+        requested_category
+    } else {
+        String::new()
+    };
+    let requested_core = request_str(request, "server_core");
+    let core = if !requested_core.is_empty() {
+        requested_core.to_lowercase()
+    } else {
+        info.as_ref()
+            .map(|item| item.server_core.trim().to_lowercase())
+            .unwrap_or_default()
+    };
+    let core = if core.is_empty() { "paper".to_owned() } else { core };
+    let http = client_from_settings(
+        config.settings(),
+        request.get("operation_id").and_then(Value::as_str).unwrap_or_default(),
+    )?;
+
+    let mut values: Vec<Value>;
+    let mut total: Option<i64> = None;
+    let mut local_sliced = false;
+    if project_type == "plugin" {
+        let provider = PluginCatalog::new(http.clone(), &catalog);
+        let fetch_limit = if page != 0 { local_window } else { page_size };
+        values = provider
+            .search(&query, &core, &game_version, fetch_limit, &sort_by)?
+            .iter()
+            .map(|item| {
+                let mut dict = item.as_dict();
+                dict.insert("project_type".to_owned(), json!("plugin"));
+                Value::Object(dict)
+            })
+            .collect();
+        local_sliced = true;
+    } else if project_type == "modpack" {
+        let provider = ModpackProvider::new(http.clone(), &catalog)?;
+        values = provider
+            .search(&query, &game_version, page_size, offset, &sort_by)?
+            .iter()
+            .map(|item| Value::Object(item.as_dict()))
+            .collect();
+        total = provider.last_total();
+    } else {
+        let kind = catalog_field(&catalog, "kind", "modrinth");
+        if kind == "ftb" || kind == "technic" {
+            return Err("Каталоги FTB и Technic предназначены для поиска модпаков".to_owned());
+        }
+        if available() && NATIVE_PROJECT_TYPES.contains(&project_type.as_str()) && category.is_empty() {
+            let mut payload = Map::new();
+            payload.insert("cmd".to_owned(), json!("search"));
+            payload.insert("query".to_owned(), json!(query));
+            payload.insert("game_version".to_owned(), json!(game_version));
+            payload.insert("loader".to_owned(), json!(loader.clone().unwrap_or_default()));
+            payload.insert("limit".to_owned(), json!(page_size));
+            payload.insert("project_type".to_owned(), json!(project_type));
+            payload.insert("sort_by".to_owned(), json!(sort_by));
+            if offset > 0 {
+                payload.insert("offset".to_owned(), json!(offset));
+            }
+            payload.insert("api_url".to_owned(), json!(catalog_field(&catalog, "api_url", "")));
+            let data = modcat_call(&Value::Object(payload))?;
+            values = data.get("hits").and_then(Value::as_array).cloned().unwrap_or_default();
+            total = data.get("total").and_then(Value::as_i64);
+        } else {
+            let provider = ModrinthProvider::new(http.clone(), &catalog_field(&catalog, "api_url", ""), &catalog_id);
+            values = provider.search(
+                &query,
+                Some(game_version.as_str()),
+                loader.as_deref(),
+                page_size,
+                if offset != 0 { offset } else { 0 },
+                &project_type,
+                if category.is_empty() { None } else { Some(category.as_str()) },
+                &sort_by,
+            )?;
+            total = provider.last_total();
+        }
+    }
+
+    let has_more = if local_sliced {
+        let fetched = values.len() as i64;
+        if page != 0 {
+            let start = (offset as usize).min(values.len());
+            let end = ((offset + page_size) as usize).min(values.len());
+            values = values[start..end].to_vec();
+        }
+        fetched >= local_window && offset + page_size < 30
+    } else if let Some(total) = total {
+        offset + (values.len() as i64) < total
+    } else {
+        values.len() as i64 >= page_size
+    };
+
+    let workspace = InstanceWorkspace::new()?;
+    let installed: Vec<String> = if !instance_name.is_empty() && project_type != "plugin" {
+        workspace.installed_projects(&instance_name, &project_type, Some(&catalog_id))?
+    } else {
+        Vec::new()
+    };
+    let mut installed_plugins: Map<String, Value> = Map::new();
+    if !instance_name.is_empty() && project_type == "plugin" {
+        if let Some(item) = &info {
+            for entry in PluginCatalog::new(http.clone(), &catalog)
+                .installed(&item.path.join("plugins"))
+                .unwrap_or_default()
+            {
+                let entry_id = entry.get("project_id").and_then(Value::as_str).unwrap_or_default().to_owned();
+                if !entry_id.is_empty() {
+                    installed_plugins.insert(entry_id, Value::Object(entry));
+                }
+            }
+        }
+    }
+    let raw_server_core = if !requested_core.is_empty() {
+        requested_core
+    } else {
+        info.as_ref()
+            .map(|item| item.server_core.trim().to_owned())
+            .unwrap_or_default()
+    };
+    let server_core = if raw_server_core.is_empty() { "paper".to_owned() } else { raw_server_core };
+    let results: Vec<Value> = values
+        .into_iter()
+        .filter(|value| value.is_object())
+        .map(|mut value| {
+            let object = value.as_object_mut().unwrap();
+            let project_id = object
                 .get("project_id")
-                .or_else(|| hit.get("id"))
+                .or_else(|| object.get("id"))
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_owned();
-            object.insert("icon_url".to_owned(), json!(hit.get("icon_url").or_else(|| hit.get("icon")).or_else(|| hit.get("logo_url")).and_then(Value::as_str).unwrap_or_default()));
-            object.insert("installed".to_owned(), json!(installed.contains(&project_id)));
-            object.insert(
-                "file_name".to_owned(),
-                json!(hit.get("file_name").and_then(Value::as_str).unwrap_or_default()),
-            );
-            object.insert("catalog_id".to_owned(), json!(catalog_field(&catalog, "id", "modrinth")));
-            Value::Object(object)
+            let icon_url = ["icon_url", "icon", "logo_url"]
+                .iter()
+                .find_map(|key| {
+                    object
+                        .get(*key)
+                        .and_then(Value::as_str)
+                        .filter(|text| !text.is_empty())
+                })
+                .unwrap_or_default()
+                .to_owned();
+            let installed_flag = if project_type == "plugin" {
+                installed_plugins.contains_key(&project_id)
+            } else {
+                installed.contains(&project_id)
+            };
+            let file_name = installed_plugins
+                .get(&project_id)
+                .and_then(|item| item.get("file_name").and_then(Value::as_str))
+                .filter(|text| !text.is_empty())
+                .map(str::to_owned)
+                .or_else(|| {
+                    object
+                        .get("file_name")
+                        .and_then(Value::as_str)
+                        .filter(|text| !text.is_empty())
+                        .map(str::to_owned)
+                })
+                .unwrap_or_default();
+            object.insert("icon_url".to_owned(), json!(icon_url));
+            object.insert("installed".to_owned(), json!(installed_flag));
+            object.insert("file_name".to_owned(), json!(file_name));
+            object.insert("catalog_id".to_owned(), json!(catalog_id));
+            value
         })
         .collect();
     Ok(json!({
@@ -414,8 +501,8 @@ pub fn mods_search(request: &Value) -> Result<Value, String> {
         "instance_name": instance_name,
         "game_version": game_version,
         "loader": loader.unwrap_or_else(|| "vanilla".to_owned()),
-        "catalog_id": catalog_field(&catalog, "id", "modrinth"),
-        "server_core": if server_core.is_empty() { "paper".to_owned() } else { server_core },
+        "catalog_id": catalog_id,
+        "server_core": server_core,
     }))
 }
 
@@ -430,40 +517,114 @@ fn explicit_mod_context(request: &Value) -> Result<(String, Option<String>), Str
 
 pub fn mods_details(request: &Value) -> Result<Value, String> {
     let config = ConfigStore::load()?;
-    let project_type = request_str(request, "project_type").to_lowercase();
-    if !NATIVE_PROJECT_TYPES.contains(&project_type.as_str()) {
-        return Err("Операция оставлена Python-воркеру".to_owned());
-    }
-    let catalog = resource_catalog(&config, &request_str(request, "catalog_id"))?;
-    if catalog_field(&catalog, "kind", "modrinth") != "modrinth" {
-        return Err("Операция оставлена Python-воркеру".to_owned());
-    }
+    let project_type = request
+        .get("project_type")
+        .and_then(Value::as_str)
+        .unwrap_or("mod")
+        .trim()
+        .to_lowercase();
     let store = InstanceStore::new(&config)?;
     let instance_name = request_str(request, "instance_name");
+    let mut info: Option<InstanceInfo> = None;
     let (game_version, loader) = if !instance_name.is_empty() {
-        let info = store.get(&instance_name)?;
-        if info.kind.trim().eq_ignore_ascii_case("server") {
+        let item = store.get(&instance_name)?;
+        let context = instance_mod_context(&item)?;
+        let kind = item.kind.trim().to_lowercase();
+        if project_type == "plugin" && kind != "server" {
+            return Err("Каталог плагинов доступен только для серверных экземпляров".to_owned());
+        }
+        if project_type != "plugin" && kind == "server" {
             return Err("Каталог ресурсов доступен только для клиентских экземпляров".to_owned());
         }
-        instance_mod_context(&info)?
+        info = Some(item);
+        context
     } else {
         let game_version = request_str(request, "game_version");
         let loader = request_str(request, "loader").to_lowercase();
         (game_version, if loader.is_empty() || loader == "vanilla" { None } else { Some(loader) })
     };
-    let mut payload = Map::new();
-    payload.insert("cmd".to_owned(), json!("details"));
-    payload.insert("project_id".to_owned(), json!(request_str(request, "project_id")));
-    payload.insert("game_version".to_owned(), json!(game_version));
-    payload.insert("loader".to_owned(), json!(loader.clone().unwrap_or_default()));
-    payload.insert("project_type".to_owned(), json!(project_type));
-    payload.insert("api_url".to_owned(), json!(catalog_field(&catalog, "api_url", "")));
-    let data = modcat_call(&Value::Object(payload))?;
-    let versions = data
-        .get("versions")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
+    let project_id = request_str(request, "project_id");
+    let http = client_from_settings(
+        config.settings(),
+        request.get("operation_id").and_then(Value::as_str).unwrap_or_default(),
+    )?;
+    if project_type == "plugin" {
+        let catalog = plugin_catalog_for(&config, &request_str(request, "catalog_id"))?;
+        let requested_core = request_str(request, "server_core");
+        let core = if !requested_core.is_empty() {
+            requested_core.to_lowercase()
+        } else {
+            info.as_ref()
+                .map(|item| item.server_core.trim().to_lowercase())
+                .unwrap_or_default()
+        };
+        let core = if core.is_empty() { "paper".to_owned() } else { core };
+        let details = PluginCatalog::new(http, &catalog).details(&project_id, &core, &game_version)?;
+        let mut payload = match details {
+            Value::Object(map) => map,
+            other => {
+                let mut map = Map::new();
+                map.insert("details".to_owned(), other);
+                map
+            }
+        };
+        payload.insert("project_type".to_owned(), json!("plugin"));
+        return Ok(json!({
+            "details": Value::Object(payload),
+            "compatible_versions": [],
+            "catalog_id": catalog_field(&catalog, "id", "modrinth"),
+        }));
+    }
+    let catalog = resource_catalog(&config, &request_str(request, "catalog_id"))?;
+    let catalog_id = catalog_field(&catalog, "id", "modrinth");
+    if project_type == "modpack" {
+        let details = ModpackProvider::new(http, &catalog)?.project_details(&project_id)?;
+        return Ok(json!({
+            "details": details,
+            "catalog_id": catalog_id,
+            "compatible_versions": [],
+        }));
+    }
+    let kind = catalog_field(&catalog, "kind", "modrinth");
+    if kind == "ftb" || kind == "technic" {
+        return Err("Этот каталог поддерживает только подробности модпаков".to_owned());
+    }
+    if available() && NATIVE_PROJECT_TYPES.contains(&project_type.as_str()) {
+        let mut payload = Map::new();
+        payload.insert("cmd".to_owned(), json!("details"));
+        payload.insert("project_id".to_owned(), json!(project_id));
+        payload.insert("game_version".to_owned(), json!(game_version));
+        payload.insert("loader".to_owned(), json!(loader.clone().unwrap_or_default()));
+        payload.insert("project_type".to_owned(), json!(project_type));
+        payload.insert("api_url".to_owned(), json!(catalog_field(&catalog, "api_url", "")));
+        let data = modcat_call(&Value::Object(payload))?;
+        let versions = data
+            .get("versions")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let compatible_versions: Vec<Value> = versions
+            .iter()
+            .map(|version| {
+                json!({
+                    "id": version.get("id").and_then(Value::as_str).unwrap_or_default(),
+                    "version_number": version.get("version_number").and_then(Value::as_str).unwrap_or_default(),
+                    "name": version.get("name").and_then(Value::as_str).unwrap_or_default(),
+                    "date_published": version.get("date_published").and_then(Value::as_str).unwrap_or_default(),
+                    "game_versions": version.get("game_versions").cloned().unwrap_or(json!([])),
+                    "loaders": version.get("loaders").cloned().unwrap_or(json!([])),
+                })
+            })
+            .collect();
+        return Ok(json!({
+            "details": data.get("details").cloned().unwrap_or(Value::Null),
+            "compatible_versions": compatible_versions,
+            "catalog_id": catalog_id,
+        }));
+    }
+    let provider = ModrinthProvider::new(http, &catalog_field(&catalog, "api_url", ""), &catalog_id);
+    let details = provider.project_details(&project_id, &project_type)?;
+    let versions = provider.compatible_versions(&project_id, &game_version, loader.as_deref(), &project_type)?;
     let compatible_versions: Vec<Value> = versions
         .iter()
         .map(|version| {
@@ -478,9 +639,9 @@ pub fn mods_details(request: &Value) -> Result<Value, String> {
         })
         .collect();
     Ok(json!({
-        "details": data.get("details").cloned().unwrap_or(Value::Null),
+        "details": details,
         "compatible_versions": compatible_versions,
-        "catalog_id": catalog_field(&catalog, "id", "modrinth"),
+        "catalog_id": catalog_id,
     }))
 }
 
@@ -488,8 +649,8 @@ pub fn mods_check_updates(request: &Value) -> Result<Value, String> {
     let config = ConfigStore::load()?;
     let name = request_str(request, "instance_name");
     let project_type = request_str(request, "project_type").to_lowercase();
-    if !["mod", "resourcepack", "shader"].contains(&project_type.as_str()) {
-        return Err("Операция оставлена Python-воркеру".to_owned());
+    if !["mod", "resourcepack", "shader", "datapack"].contains(&project_type.as_str()) {
+        return Err("Проверка обновлений доступна для модов, ресурспаков, шейдеров и датапаков".to_owned());
     }
     let store = InstanceStore::new(&config)?;
     let info = store.get(&name)?;
@@ -520,78 +681,129 @@ pub fn mods_check_updates(request: &Value) -> Result<Value, String> {
     }
     let mut updates: Vec<Value> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
-    let directory = info.path.join(project_directory(&project_type).unwrap_or_default());
-    for catalog in &catalogs {
-        let catalog_id = catalog_field(catalog, "id", "modrinth");
-        let catalog_url = catalog_field(catalog, "api_url", "");
-        let catalog_name = catalog_field(catalog, "name", &catalog_id);
-        let sidecars = scan_trusted_sidecars(&directory, &project_type, &catalog_id, &catalog_url);
-        if sidecars.is_empty() {
-            continue;
-        }
-        let mut payload = Map::new();
-        payload.insert("cmd".to_owned(), json!("check"));
-        payload.insert("game_version".to_owned(), json!(game_version));
-        payload.insert("loader".to_owned(), json!(loader.clone().unwrap_or_default()));
-        payload.insert("project_type".to_owned(), json!(project_type));
-        payload.insert("api_url".to_owned(), json!(catalog_url));
-        let projects: Vec<Value> = sidecars
-            .iter()
-            .map(|sidecar| json!({ "project_id": sidecar.project_id, "version_id": sidecar.version_id }))
-            .collect();
-        payload.insert("projects".to_owned(), Value::Array(projects));
-        let data = match modcat_call(&Value::Object(payload)) {
-            Ok(data) => data,
-            Err(error) => {
-                errors.push(format!("{catalog_name}: {error}"));
+    let http = client_from_settings(
+        config.settings(),
+        request.get("operation_id").and_then(Value::as_str).unwrap_or_default(),
+    )?;
+    if available() && project_type != "datapack" {
+        let directory = info.path.join(project_directory(&project_type).unwrap_or_default());
+        for catalog in &catalogs {
+            let catalog_id = catalog_field(catalog, "id", "modrinth");
+            let catalog_url = catalog_field(catalog, "api_url", "");
+            let catalog_name = catalog_field(catalog, "name", &catalog_id);
+            let sidecars = scan_trusted_sidecars(&directory, &project_type, &catalog_id, &catalog_url);
+            if sidecars.is_empty() {
                 continue;
             }
-        };
-        let outcomes = data.as_array().cloned().unwrap_or_default();
-        for (sidecar, outcome) in sidecars.iter().zip(outcomes.iter()) {
-            if !outcome.get("type_ok").and_then(Value::as_bool).unwrap_or(false) {
-                continue;
-            }
-            if let Some(error) = outcome.get("error").and_then(Value::as_str) {
-                if !error.is_empty() {
+            let mut payload = Map::new();
+            payload.insert("cmd".to_owned(), json!("check"));
+            payload.insert("game_version".to_owned(), json!(game_version));
+            payload.insert("loader".to_owned(), json!(loader.clone().unwrap_or_default()));
+            payload.insert("project_type".to_owned(), json!(project_type));
+            payload.insert("api_url".to_owned(), json!(catalog_url));
+            let projects: Vec<Value> = sidecars
+                .iter()
+                .map(|sidecar| json!({ "project_id": sidecar.project_id, "version_id": sidecar.version_id }))
+                .collect();
+            payload.insert("projects".to_owned(), Value::Array(projects));
+            let data = match modcat_call(&Value::Object(payload)) {
+                Ok(data) => data,
+                Err(error) => {
+                    errors.push(format!("{catalog_name}: {error}"));
                     continue;
                 }
-            }
-            let Some(latest) = outcome.get("latest").filter(|value| value.is_object()) else {
-                continue;
             };
-            let latest_version_id = latest
-                .get("id")
-                .or_else(|| latest.get("version_id"))
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .trim()
-                .to_owned();
-            if latest_version_id.is_empty() || latest_version_id == sidecar.version_id {
-                continue;
+            let outcomes = data.as_array().cloned().unwrap_or_default();
+            for (sidecar, outcome) in sidecars.iter().zip(outcomes.iter()) {
+                if !outcome.get("type_ok").and_then(Value::as_bool).unwrap_or(false) {
+                    continue;
+                }
+                if let Some(error) = outcome.get("error").and_then(Value::as_str) {
+                    if !error.is_empty() {
+                        continue;
+                    }
+                }
+                let Some(latest) = outcome.get("latest").filter(|value| value.is_object()) else {
+                    continue;
+                };
+                let latest_version_id = latest
+                    .get("id")
+                    .or_else(|| latest.get("version_id"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .trim()
+                    .to_owned();
+                if latest_version_id.is_empty() || latest_version_id == sidecar.version_id {
+                    continue;
+                }
+                let name_field = if !sidecar.display_name.is_empty() {
+                    sidecar.display_name.clone()
+                } else if !sidecar.name.is_empty() {
+                    sidecar.name.clone()
+                } else {
+                    sidecar.project_id.clone()
+                };
+                updates.push(json!({
+                    "source": "Modrinth",
+                    "catalog": "modrinth",
+                    "catalog_id": catalog_id,
+                    "project_id": sidecar.project_id,
+                    "project_type": project_type,
+                    "name": name_field,
+                    "current_version": sidecar.version,
+                    "current_version_id": sidecar.version_id,
+                    "version": latest.get("version_number").and_then(Value::as_str).unwrap_or_default(),
+                    "version_id": latest_version_id,
+                    "game_version": game_version,
+                    "loader": loader.clone().unwrap_or_else(|| "vanilla".to_owned()),
+                    "path": sidecar.target.to_string_lossy(),
+                }));
             }
-            let name_field = if !sidecar.display_name.is_empty() {
-                sidecar.display_name.clone()
-            } else if !sidecar.name.is_empty() {
-                sidecar.name.clone()
+        }
+    } else {
+        let workspace = InstanceWorkspace::new()?;
+        let worlds = if project_type == "datapack" {
+            workspace.list_worlds(&name)?
+        } else {
+            Vec::new()
+        };
+        for catalog in &catalogs {
+            let catalog_id = catalog_field(catalog, "id", "modrinth");
+            let catalog_url = catalog_field(catalog, "api_url", "");
+            let catalog_name = catalog_field(catalog, "name", &catalog_id);
+            let provider = ModrinthProvider::new(http.clone(), &catalog_url, &catalog_id);
+            let outcome: Result<Vec<Value>, String> = if project_type == "datapack" {
+                let mut collected: Vec<Value> = Vec::new();
+                for world in &worlds {
+                    let world_id = world.get("id").and_then(Value::as_str).unwrap_or_default().to_owned();
+                    if world_id.is_empty() {
+                        continue;
+                    }
+                    let target = workspace.world_directory(&name, &world_id)?;
+                    let items =
+                        provider.check_updates(&target, &game_version, loader.as_deref(), "datapack", Some(&target))?;
+                    let world_title = world
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .filter(|text| !text.trim().is_empty())
+                        .unwrap_or(&world_id)
+                        .to_owned();
+                    for mut item in items {
+                        if let Some(object) = item.as_object_mut() {
+                            object.insert("world_name".to_owned(), json!(world_id));
+                            object.insert("world_title".to_owned(), json!(world_title));
+                        }
+                        collected.push(item);
+                    }
+                }
+                Ok(collected)
             } else {
-                sidecar.project_id.clone()
+                provider.check_updates(&info.path, &game_version, loader.as_deref(), &project_type, None)
             };
-            updates.push(json!({
-                "source": "Modrinth",
-                "catalog": "modrinth",
-                "catalog_id": catalog_id,
-                "project_id": sidecar.project_id,
-                "project_type": project_type,
-                "name": name_field,
-                "current_version": sidecar.version,
-                "current_version_id": sidecar.version_id,
-                "version": latest.get("version_number").and_then(Value::as_str).unwrap_or_default(),
-                "version_id": latest_version_id,
-                "game_version": game_version,
-                "loader": loader.clone().unwrap_or_else(|| "vanilla".to_owned()),
-                "path": sidecar.target.to_string_lossy(),
-            }));
+            match outcome {
+                Ok(items) => updates.extend(items),
+                Err(error) => errors.push(format!("{catalog_name}: {error}")),
+            }
         }
     }
     let active_catalog_id = settings
@@ -616,30 +828,6 @@ pub fn mods_check_updates(request: &Value) -> Result<Value, String> {
     }))
 }
 
-pub fn native_possible(operation: &str, request: &Value) -> bool {
-    if !available() {
-        return false;
-    }
-    let project_type = request_str(request, "project_type").to_lowercase();
-    let native_types: &[&str] = match operation {
-        "mods_check_updates" => &["mod", "resourcepack", "shader"],
-        _ => NATIVE_PROJECT_TYPES,
-    };
-    if !native_types.contains(&project_type.as_str()) {
-        return false;
-    }
-    // тип и каталог узнаём без тяжёлых загрузок: каталоги ftb/technic и
-    // модпаки остаются за воркером
-    let Ok(config) = ConfigStore::load() else {
-        return false;
-    };
-    let catalog_id = request_str(request, "catalog_id");
-    let Ok(catalog) = resource_catalog(&config, &catalog_id) else {
-        return false;
-    };
-    catalog_field(&catalog, "kind", "modrinth") == "modrinth"
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -649,6 +837,18 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn catalog_page_and_limit_request_fields_keep_zero_based_pagination() {
+        let request = json!({ "page": "4", "limit": 30 });
+        let page = parse_bounded_int(&request, "page", 0, 0, 500).unwrap();
+        let page_size = parse_bounded_int(&request, "limit", 12, 1, 30).unwrap();
+        assert_eq!((page, page_size, page * page_size), (4, 30, 120));
+        assert_eq!(
+            parse_bounded_int(&json!({ "page": 999 }), "page", 0, 0, 500).unwrap(),
+            500
+        );
     }
 
     #[test]
@@ -673,16 +873,12 @@ mod tests {
     }
 
     #[test]
-    fn installed_ids_match_catalog_and_type() {
-        let dir = tmpdir("installed");
-        fs::write(dir.join(".a.jar.trial-project.json"), r#"{"project_type":"mod","source":"modrinth","catalog_id":"modrinth","project_id":"A"}"#).unwrap();
-        fs::write(dir.join(".b.jar.trial-project.json"), r#"{"project_type":"resourcepack","source":"modrinth","catalog_id":"modrinth","project_id":"B"}"#).unwrap();
-        fs::write(dir.join(".c.jar.trial-project.json"), r#"{"project_type":"mod","source":"modrinth","project_id":"C"}"#).unwrap();
-        let ids = installed_project_ids(&dir, "mod", "modrinth");
-        assert!(ids.contains(&"A".to_owned()));
-        assert!(ids.contains(&"C".to_owned()));
-        assert!(!ids.contains(&"B".to_owned()));
-        let _ = fs::remove_dir_all(&dir);
+    fn category_is_only_supported_for_modrinth_mod_projects() {
+        assert!(modrinth_category_supported("mod", "modrinth"));
+        for project_type in ["resourcepack", "shader", "datapack", "plugin", "modpack"] {
+            assert!(!modrinth_category_supported(project_type, "modrinth"));
+        }
+        assert!(!modrinth_category_supported("mod", "custom"));
     }
 
     #[test]

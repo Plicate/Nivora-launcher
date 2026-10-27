@@ -1,11 +1,7 @@
-// общие константы лаунчера. Держать в синхроне с frontend/src/services/bridge.ts
-// (FRONTEND_BUILD_STAMP сверяется с bootstrap-ответом).
-pub const APP_ID: &str = "nivora-launcher";
 pub const APP_NAME: &str = "Nivora Launcher";
-// держать в синхроне с pyproject.toml и Cargo.toml: рассинхрон версии
-// ломал User-Agent запросов и проверку обновлений (1.0.3 против 1.1.0).
-pub const APP_VERSION: &str = "1.1.0";
-pub const BUILD_STAMP: &str = "r40";
+// версия должна совпадать с frontend/package.json и Cargo.toml
+pub const APP_VERSION: &str = "2.0.0";
+pub const BUILD_STAMP: &str = "r42";
 
 pub const GITHUB_RELEASES_API_URL: &str = "https://api.github.com/repos/vedrooou0/Nivora-launcher/releases/latest";
 pub const GITHUB_RELEASES_PAGE_URL: &str = "https://github.com/vedrooou0/Nivora-launcher/releases/latest";
@@ -30,9 +26,7 @@ pub const MAX_INSTANCE_PROFILE_JSON_BYTES: u64 = 256 * 1024;
 pub const MAX_INSTANCE_LIVE_STATE_JSON_BYTES: u64 = 64 * 1024;
 pub const MAX_SERVER_CONFIG_JSON_BYTES: u64 = 256 * 1024;
 
-pub const GITHUB_PLUGIN_TOPIC: &str = "nivora-launcher-plugin";
-
-/// числовой ключ версии для сравнения поддерживаемого диапазона.
+/// числовой ключ версии для сравнения поддерживаемого диапазона
 pub fn version_key(version: &str) -> Vec<i64> {
     let release = regex::Regex::new(r"^([0-9]+(?:\.[0-9]+){1,2})(?:-(?:snapshot|rc|pre)(?:-?[0-9]+)?)?\z").unwrap();
     if let Some(captures) = release.captures(version) {
@@ -58,6 +52,6 @@ pub fn is_supported_version(version: &str) -> bool {
         return true;
     }
     let key = version_key(version);
-    // верхнюю границу не зашиваем: официальный manifest — источник истины.
+    // верхняя граница берётся из официального манифеста
     !key.is_empty() && key >= version_key("1.0")
 }

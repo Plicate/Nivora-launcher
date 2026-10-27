@@ -1,14 +1,14 @@
 import { reactive } from 'vue'
 
-export type DialogKind = 'alert' | 'confirm' | 'prompt' | 'choose'
+type DialogKind = 'alert' | 'confirm' | 'prompt' | 'choose'
 
-export interface DialogChoice {
+interface DialogChoice {
   value: string
   label: string
   description?: string
 }
 
-export interface DialogOptions {
+interface DialogOptions {
   title?: string
   detail?: string
   confirmLabel?: string
@@ -19,7 +19,7 @@ export interface DialogOptions {
   danger?: boolean
 }
 
-export interface DialogRequest extends DialogOptions {
+interface DialogRequest extends DialogOptions {
   id: number
   kind: DialogKind
   message: string

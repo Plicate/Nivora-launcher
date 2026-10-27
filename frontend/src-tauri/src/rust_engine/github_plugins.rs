@@ -1,8 +1,3 @@
-// порт python-модуля github_plugins.py + операции github_plugin_* из
-// gui_service.py: каталог плагинов в GitHub (поиск по topic, установка
-// релизных ZIP, OAuth device flow для публикации). Токен — в libsecret
-// (Linux) / Credential Manager (Windows), атрибуты и сообщения — дословно
-// из Python.
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -30,6 +25,9 @@ const GITHUB_OAUTH_SCOPE: &str = "public_repo";
 const GITHUB_API_VERSION: &str = "2022-11-28";
 const MAX_LICENSE_BYTES: u64 = 1024 * 1024;
 const MAX_GITHUB_JSON_BYTES: u64 = 4 * 1024 * 1024;
+// отдельная тема поиска и ограниченный размер ZIP для каталога тем
+const THEME_GITHUB_TOPIC: &str = "trial-launcher-theme";
+const THEME_MAX_ARCHIVE_BYTES: usize = 8 * 1024 * 1024;
 
 const API_HOSTS: [&str; 1] = ["api.github.com"];
 const OAUTH_HOSTS: [&str; 1] = ["github.com"];
@@ -41,7 +39,7 @@ const ASSET_HOSTS: [&str; 4] = [
     "release-assets.githubusercontent.com",
 ];
 
-/// матрица допустимых переходов редиректа при скачивании ассета.
+/// матрица допустимых переходов редиректа при скачивании ассета
 fn asset_redirect_targets(host: &str) -> &'static [&'static str] {
     match host {
         "api.github.com" => &[
@@ -117,7 +115,7 @@ fn valid_bearer_token(value: &str) -> bool {
             .all(|character| (33..=126).contains(&(character as u32)))
 }
 
-// ─── токен в системном хранилище (порт SecretToolTokenProvider) ─────────────
+// чтение токена GitHub из системного хранилища
 
 const GITHUB_SECRET_SERVICE: &str = "trial-launcher-github";
 
@@ -129,7 +127,7 @@ impl SecretToolTokenProvider {
         #[cfg(windows)]
         {
             // keyring-бэкенд Windows всегда активен, если Credential Manager
-            // доступен; его приоритет проверяется при первой же операции.
+            // доступен; его приоритет проверяется при первой же операции
             return true;
         }
         #[cfg(not(windows))]
@@ -228,7 +226,7 @@ impl SecretToolTokenProvider {
     }
 }
 
-/// secret-tool с таймаутом 10 секунд; allow_missing терпит код 1 (записи нет).
+/// secret-tool с таймаутом 10 секунд; allow_missing терпит код 1 (записи нет)
 #[cfg(not(windows))]
 fn run_secret_tool(
     arguments: &[&str],
@@ -286,7 +284,6 @@ fn run_secret_tool(
     }
 }
 
-// ─── вспомогательные проверки ───────────────────────────────────────────────
 
 fn validate_https_url(url: &str, allowed_hosts: &[&str]) -> Result<String, String> {
     let parsed = url::Url::parse(url).map_err(|_| "A GitHub URL is malformed.".to_owned())?;
@@ -318,7 +315,7 @@ fn required_text(value: Option<&Value>, field: &str, maximum: usize) -> Result<S
     Ok(text.to_owned())
 }
 
-/// int() из Python: bool → 0/1, число → усечение, строка → разбор.
+/// преобразует число, строку или логическое значение в целое число
 fn json_int(value: Option<&Value>) -> Option<i64> {
     match value {
         Some(Value::Number(number)) => number
@@ -559,7 +556,6 @@ fn verification_uri(value: Option<&Value>) -> Result<String, String> {
     Ok("https://github.com/login/device".to_owned())
 }
 
-// ─── проверка ZIP-архива плагина (порт _validate_plugin_archive) ────────────
 
 fn normalized_archive_name(name: &str, is_dir: bool) -> Result<String, String> {
     if name.is_empty() || name.contains('\0') {
@@ -629,7 +625,7 @@ fn validate_plugin_archive_inner(content: &[u8]) -> Result<Value, String> {
             .by_index(index)
             .map_err(|_| "Plugin ZIP is invalid or contains unreadable files.".to_owned())?;
         members.push(Member {
-            name: file.name().to_owned(),
+            name: file.name().map(|v| v.to_string()).unwrap_or_default(),
             is_dir: file.is_dir(),
             size: file.size(),
             mode: file.unix_mode().unwrap_or(0),
@@ -790,7 +786,6 @@ fn hex_lowercase(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-// ─── сервис GitHub (порт GitHubPluginService) ───────────────────────────────
 
 struct CatalogContext {
     repository: Value,
@@ -895,6 +890,189 @@ impl<'a> GitHubPluginService<'a> {
             }
         }
         Ok(result)
+    }
+
+    // поиск тем на GitHub
+
+    fn theme_search(&self, query: &str, page: i64) -> Result<Vec<Value>, String> {
+        let query = query.split_whitespace().collect::<Vec<_>>().join(" ");
+        if query.chars().count() > 120 || !search_query_valid(&query) {
+            return Err("Поисковый запрос содержит недопустимые символы или слишком длинный".to_owned());
+        }
+        if !(1..=10).contains(&page) {
+            return Err("Номер страницы должен быть от 1 до 10".to_owned());
+        }
+        let mut terms = vec![
+            format!("topic:{THEME_GITHUB_TOPIC}"),
+            "is:public".to_owned(),
+        ];
+        if !query.is_empty() {
+            terms.push(query);
+        }
+        let params = form_urlencoded(&[
+            ("q".to_owned(), terms.join(" ")),
+            ("sort".to_owned(), "updated".to_owned()),
+            ("order".to_owned(), "desc".to_owned()),
+            ("page".to_owned(), page.to_string()),
+            ("per_page".to_owned(), "30".to_owned()),
+        ]);
+        let (response, _) = self.api_json(
+            &format!("/search/repositories?{params}"),
+            "GET",
+            None,
+            None,
+            &[],
+            &[],
+        )?;
+        let items = response
+            .get("items")
+            .and_then(Value::as_array)
+            .ok_or_else(|| "GitHub вернул некорректный список тем".to_owned())?;
+        let mut result: Vec<Value> = Vec::new();
+        for item in items.iter().take(30) {
+            if !item.is_object() || item.get("private").and_then(Value::as_bool) == Some(true) {
+                continue;
+            }
+            // если GitHub прислал topics, проверяем их; иначе оставляем результат
+            let topics = item.get("topics");
+            if let Some(list) = topics.and_then(Value::as_array) {
+                if !list.iter().any(|topic| topic.as_str() == Some(THEME_GITHUB_TOPIC)) {
+                    continue;
+                }
+            }
+            let owner_name = item
+                .get("owner")
+                .filter(|value| value.is_object())
+                .and_then(|value| value.get("login"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            let repo = item.get("name").and_then(Value::as_str).unwrap_or_default().to_owned();
+            if !owner_name_valid(&owner_name) || !repo_name_valid(&repo) {
+                continue;
+            }
+            let stars = theme_bounded_int(item.get("stargazers_count"), 0, 2_000_000_000)?;
+            let topics = topics
+                .and_then(Value::as_array)
+                .map(|list| {
+                    Value::Array(
+                        list.iter()
+                            .filter_map(|topic| topic.as_str())
+                            .map(|topic| json!(topic.chars().take(100).collect::<String>()))
+                            .collect(),
+                    )
+                })
+                .unwrap_or_else(|| json!([]));
+            result.push(json!({
+                "owner": owner_name,
+                "repo": repo,
+                "full_name": format!("{owner_name}/{repo}"),
+                "name": item.get("name").and_then(Value::as_str).unwrap_or(&repo).chars().take(100).collect::<String>(),
+                "description": item.get("description").and_then(Value::as_str).unwrap_or("").chars().take(500).collect::<String>(),
+                "url": format!("https://github.com/{owner_name}/{repo}"),
+                "stars": stars,
+                "updated_at": item.get("updated_at").and_then(Value::as_str).unwrap_or("").chars().take(40).collect::<String>(),
+                "topics": topics,
+            }));
+        }
+        Ok(result)
+    }
+
+    fn theme_install(&self, owner: &str, repo: &str, replace: bool) -> Result<(Value, Value), String> {
+        theme_validate_repository_name(owner, repo)?;
+        let repo_path = repository_path(owner, repo)?;
+        let (repository, _) = self.api_json(&format!("/repos/{repo_path}"), "GET", None, None, &[], &[])?;
+        if !repository.is_object()
+            || repository.get("private").and_then(Value::as_bool) == Some(true)
+            || repository.get("visibility").and_then(Value::as_str).unwrap_or("public").to_lowercase() != "public"
+        {
+            return Err("Репозиторий с темой должен быть публичным".to_owned());
+        }
+        let mut topics_value = repository.get("topics").cloned();
+        if !topics_value.as_ref().map(Value::is_array).unwrap_or(false) {
+            let (topic_response, _) = self.api_json(
+                &format!("/repos/{repo_path}/topics"),
+                "GET",
+                None,
+                None,
+                &[],
+                &[],
+            )?;
+            topics_value = Some(topic_response.get("names").cloned().unwrap_or(json!([])));
+        }
+        let topics = topics_value
+            .and_then(|value| value.as_array().cloned())
+            .unwrap_or_default()
+            .iter()
+            .filter_map(Value::as_str)
+            .map(|topic| topic.to_lowercase())
+            .collect::<Vec<String>>();
+        if !topics.iter().any(|topic| topic == THEME_GITHUB_TOPIC) {
+            return Err("В репозитории отсутствует тема GitHub topic trial-launcher-theme".to_owned());
+        }
+        let (release, _) = self.api_json(
+            &format!("/repos/{repo_path}/releases/latest"),
+            "GET",
+            None,
+            None,
+            &[],
+            &[],
+        )?;
+        if !release.is_object()
+            || release.get("draft").and_then(Value::as_bool) == Some(true)
+            || release.get("prerelease").and_then(Value::as_bool) == Some(true)
+        {
+            return Err("У темы нет опубликованного стабильного GitHub Release".to_owned());
+        }
+        let tag = release.get("tag_name").and_then(Value::as_str).unwrap_or_default().trim().to_owned();
+        if tag.is_empty() || tag.chars().count() > 128 {
+            return Err("GitHub Release не содержит корректный тег версии".to_owned());
+        }
+        let asset = theme_select_asset(release.get("assets"), repo, &tag)?;
+        let asset_id = theme_bounded_int(asset.get("id"), 1, 2_147_483_647)?;
+        let asset_size = theme_bounded_int(asset.get("size"), 1, THEME_MAX_ARCHIVE_BYTES as i64)? as usize;
+        let asset_url = format!("{GITHUB_API_URL}/repos/{repo_path}/releases/assets/{asset_id}");
+        // заголовки github_headers, но Accept переопределён на octet-stream
+        let mut request_headers = self.github_headers(None);
+        for header in request_headers.iter_mut() {
+            if header.0 == "Accept" {
+                header.1 = "application/octet-stream".to_owned();
+            }
+        }
+        let (content, _) = self.request_raw(
+            &asset_url,
+            "GET",
+            None,
+            &request_headers,
+            THEME_MAX_ARCHIVE_BYTES as u64,
+            &ASSET_HOSTS,
+            &[],
+            Some(asset_redirect_targets),
+        )?;
+        if content.len() != asset_size {
+            return Err("Размер ZIP темы не совпадает с данными GitHub".to_owned());
+        }
+        let source_url = format!("https://github.com/{owner}/{repo}");
+        let archive = super::themes::read_archive(&content)?;
+        let theme = super::themes::normalize_theme(&archive.theme, &archive.metadata, "github", &source_url)?;
+        if theme.get("id").and_then(Value::as_str).unwrap_or_default().to_lowercase() != repo.to_lowercase() {
+            return Err("id в theme.json должен совпадать с именем репозитория GitHub".to_owned());
+        }
+        let release_version = if tag.starts_with('v') || tag.starts_with('V') { tag[1..].to_owned() } else { tag.clone() };
+        if theme.get("version").and_then(Value::as_str).unwrap_or_default() != release_version {
+            return Err("Версия в theme.yml должна совпадать с тегом GitHub Release".to_owned());
+        }
+        let installed = super::themes::persist(&super::themes::themes_root()?, &theme, replace)?;
+        use sha2::{Digest, Sha256};
+        let digest = Sha256::digest(&content);
+        let metadata = json!({
+            "full_name": format!("{owner}/{repo}"),
+            "version": theme.get("version").cloned().unwrap_or_default(),
+            "size": content.len(),
+            "sha256": digest.iter().map(|byte| format!("{byte:02x}")).collect::<String>(),
+            "url": source_url,
+        });
+        Ok((installed, metadata))
     }
 
     fn details(&self, owner: &str, repo: &str) -> Result<Value, String> {
@@ -1017,8 +1195,7 @@ impl<'a> GitHubPluginService<'a> {
             "{GITHUB_API_URL}/repos/{}/releases/assets/{asset_id}",
             repository_path(owner, repo)?
         );
-        // заголовки github_headers, но Accept переопределён на octet-stream
-        // (эквивалент слияния словарей `|` в Python)
+        // запрашиваем содержимое ZIP как двоичные данные
         let mut request_headers = self.github_headers(None);
         for header in request_headers.iter_mut() {
             if header.0 == "Accept" {
@@ -1426,7 +1603,7 @@ impl<'a> GitHubPluginService<'a> {
         Ok((parse_json_bytes(&raw, "GitHub OAuth")?, status))
     }
 
-    /// аргументы повторяют сигнатуру _request_raw из github_plugins.py
+    /// выполняет HTTP-запрос с ограничениями размера, хостов и кодов ответа
     #[allow(clippy::too_many_arguments)]
     fn request_raw(
         &self,
@@ -1564,7 +1741,6 @@ fn select_zip_asset(assets: Option<&Value>) -> Result<Value, String> {
     Err("The latest plugin release must contain a bounded ZIP asset.".to_owned())
 }
 
-// ─── операции GUI (порт блока github_plugin_* из gui_service.py) ────────────
 
 fn service_for(request: &Value) -> Result<(ConfigStore, std::sync::Arc<HttpClient>), String> {
     let store = ConfigStore::load()?;
@@ -1576,7 +1752,7 @@ fn service_for(request: &Value) -> Result<(ConfigStore, std::sync::Arc<HttpClien
     Ok((store, http))
 }
 
-/// _decode_base64 из gui_service.py: размер ограничен сверху, не фиксирован.
+/// декодирует base64 с проверкой максимального размера до и после декодирования
 fn decode_base64_bounded(
     value: Option<&Value>,
     limit: usize,
@@ -1608,6 +1784,89 @@ pub(crate) fn github_plugin_search(request: &Value) -> Result<Value, String> {
     let query = request.get("query").and_then(Value::as_str).unwrap_or("");
     let results = service.search(query, page, 30)?;
     Ok(json!({ "results": results, "page": page }))
+}
+
+
+/// проверяет целое значение темы на допустимый диапазон и отвергает логические типы
+fn theme_bounded_int(value: Option<&Value>, minimum: i64, maximum: i64) -> Result<i64, String> {
+    let invalid = "GitHub вернул некорректное числовое значение".to_owned();
+    if value.is_some_and(Value::is_boolean) {
+        return Err(invalid);
+    }
+    let number = value
+        .and_then(|value| json_int(Some(value)))
+        .ok_or_else(|| invalid)?;
+    if number < minimum || number > maximum {
+        return Err("GitHub вернул числовое значение вне допустимого диапазона".to_owned());
+    }
+    Ok(number)
+}
+
+/// проверяет имя владельца и репозитория GitHub
+fn theme_validate_repository_name(owner: &str, repo: &str) -> Result<(), String> {
+    if !owner_name_valid(owner) || !repo_name_valid(repo) || repo == "." || repo == ".." {
+        return Err("Некорректный адрес GitHub-репозитория".to_owned());
+    }
+    Ok(())
+}
+
+/// выбирает единственный ZIP-архив темы из релиза
+fn theme_select_asset(assets: Option<&Value>, repo: &str, tag: &str) -> Result<Value, String> {
+    let invalid = "GitHub Release не содержит ZIP темы".to_owned();
+    let assets = assets.and_then(Value::as_array).ok_or_else(|| invalid.clone())?;
+    let candidates: Vec<&Value> = assets
+        .iter()
+        .filter(|asset| {
+            asset.is_object()
+                && asset.get("name").and_then(Value::as_str).unwrap_or("").to_lowercase().ends_with(".zip")
+                && asset.get("state").and_then(Value::as_str) != Some("starter")
+        })
+        .collect();
+    let stripped = tag.trim_start_matches(['v', 'V']);
+    let expected = [
+        format!("{}-{}.zip", repo, tag).to_lowercase(),
+        format!("{}-v{}.zip", repo, stripped).to_lowercase(),
+    ];
+    let preferred: Vec<&Value> = candidates
+        .iter()
+        .copied()
+        .filter(|asset| {
+            expected.contains(
+                &asset.get("name").and_then(Value::as_str).unwrap_or("").to_lowercase(),
+            )
+        })
+        .collect();
+    let chosen = if !preferred.is_empty() { preferred } else { candidates };
+    if chosen.len() != 1 {
+        return Err("В GitHub Release должен быть один ZIP темы с однозначным именем".to_owned());
+    }
+    Ok(chosen[0].clone())
+}
+
+pub(crate) fn github_theme_search(request: &Value) -> Result<Value, String> {
+    let (_, http) = service_for(request)?;
+    let service = GitHubPluginService::new(&http);
+    let page = request.get("page").and_then(Value::as_i64).unwrap_or(1);
+    let query = request.get("query").and_then(Value::as_str).unwrap_or("");
+    let results = service.theme_search(query, page)?;
+    Ok(json!({ "results": results, "page": page }))
+}
+
+pub(crate) fn github_theme_install(request: &Value) -> Result<Value, String> {
+    let (_, http) = service_for(request)?;
+    let service = GitHubPluginService::new(&http);
+    let owner = request.get("owner").and_then(Value::as_str).unwrap_or_default();
+    let repo = request.get("repo").and_then(Value::as_str).unwrap_or_default();
+    let replace = request.get("replace").and_then(Value::as_bool).unwrap_or(false);
+    let (theme, metadata) = service.theme_install(owner, repo, replace)?;
+    super::events::emit_status_event(
+        "theme-imported",
+        &format!(
+            "Тема «{}» загружена из GitHub.",
+            theme.get("name").and_then(Value::as_str).unwrap_or_default()
+        ),
+    );
+    Ok(json!({ "theme": theme, "themes": super::themes::list()?, "metadata": metadata }))
 }
 
 pub(crate) fn github_plugin_details(request: &Value) -> Result<Value, String> {

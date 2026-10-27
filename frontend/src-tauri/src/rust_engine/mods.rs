@@ -1,5 +1,6 @@
-// каталог Modrinth: поиск, совместимые версии, установка ресурсов с деревом
+// каталог Modrinth и установка ресурсов с зависимостями
 use serde_json::{json, Map, Value};
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
@@ -69,6 +70,7 @@ pub(crate) struct ModrinthProvider {
     http: Arc<HttpClient>,
     base_url: String,
     catalog_id: String,
+    last_total: Cell<Option<i64>>,
 }
 
 impl ModrinthProvider {
@@ -81,7 +83,11 @@ impl ModrinthProvider {
         };
         let catalog_id: String = catalog_id.chars().take(80).collect::<String>().trim().to_owned();
         let catalog_id = if catalog_id.is_empty() { "modrinth".to_owned() } else { catalog_id };
-        Self { http, base_url, catalog_id }
+        Self { http, base_url, catalog_id, last_total: Cell::new(None) }
+    }
+
+    pub(crate) fn last_total(&self) -> Option<i64> {
+        self.last_total.get()
     }
 
     pub(crate) fn search(
@@ -92,6 +98,7 @@ impl ModrinthProvider {
         limit: i64,
         offset: i64,
         project_type: &str,
+        category: Option<&str>,
         sort_by: &str,
     ) -> Result<Vec<Value>, String> {
         validate_catalog_project_type(project_type)?;
@@ -102,16 +109,7 @@ impl ModrinthProvider {
         let limit = limit.clamp(1, 100);
         let offset = offset.max(0);
 
-        let mut facets: Vec<Vec<String>> = vec![vec![format!("project_type:{project_type}")]];
-        if let Some(game_version) = game_version.filter(|value| !value.is_empty()) {
-            facets.push(vec![format!("versions:{game_version}")]);
-        }
-        if let Some(loader) = loader.map(str::trim).filter(|value| !value.is_empty()) {
-            let lowered = loader.to_lowercase();
-            if lowered != "vanilla" && project_type == "mod" {
-                facets.push(vec![format!("categories:{lowered}")]);
-            }
-        }
+        let facets = search_facets(project_type, game_version, loader, category)?;
         let mut params: Vec<(&str, String)> = vec![
             ("limit", limit.to_string()),
             ("offset", offset.to_string()),
@@ -124,6 +122,8 @@ impl ModrinthProvider {
         }
         let url = format!("{}/search?{}", self.base_url, form_urlencode(&params));
         let value = self.http.get_json(&url, None)?;
+        self.last_total
+            .set(value.get("total_hits").and_then(Value::as_i64).filter(|total| *total >= 0));
         let hits = value.get("hits").and_then(Value::as_array).cloned().unwrap_or_default();
         Ok(hits
             .into_iter()
@@ -152,32 +152,6 @@ impl ModrinthProvider {
     ) -> Result<Vec<Value>, String> {
         self.project_details(project_id, project_type)?;
         self.compatible_versions_inner(project_id, game_version, loader, project_type)
-    }
-
-    pub(crate) fn select_compatible_version(
-        &self,
-        project_id: &str,
-        game_version: &str,
-        loader: Option<&str>,
-        project_type: &str,
-        version_id: Option<&str>,
-    ) -> Result<Value, String> {
-        let project_id = validated_project_id(project_id)?;
-        let versions = self.compatible_versions(&project_id, game_version, loader, project_type)?;
-        let pinned = version_id.filter(|value| !value.is_empty());
-        let mut selected = pinned
-            .and_then(|pinned| versions.iter().find(|item| version_id_of(item) == pinned).cloned());
-        if selected.is_none() && pinned.is_none() {
-            selected = versions.first().cloned();
-        }
-        match selected {
-            Some(selected) => Ok(selected),
-            None if pinned.is_some() => Err(format!(
-                "Версия {} проекта {project_id} несовместима с выбранной игрой или загрузчиком",
-                pinned.unwrap_or_default()
-            )),
-            None => Err(format!("Modrinth не нашёл совместимую версию для {project_id}")),
-        }
     }
 
     fn compatible_versions_inner(
@@ -413,9 +387,8 @@ impl ModrinthProvider {
         version_id: Option<&str>,
     ) -> Result<(Vec<ResolvedProject>, HashMap<String, Value>), String> {
         let mut selected: Vec<ResolvedProject> = Vec::new();
-        // by_id хранит выбранную версию проекта — она нужна при сборке
-        // итоговых зависимостей.
-        let mut by_id: HashMap<String, Value> = HashMap::new();
+        // сохраняем выбранную версию проекта для итоговых зависимостей
+                let mut by_id: HashMap<String, Value> = HashMap::new();
         self.visit_project(
             project_id,
             version_id.filter(|value| !value.trim().is_empty()),
@@ -486,7 +459,7 @@ impl ModrinthProvider {
                 .filter(|value| !value.is_empty())
                 .unwrap_or(&format!("{current_id}.jar")),
         )?;
-        let mut project = ResolvedProject {
+        let project = ResolvedProject {
             project_id: current_id.clone(),
             version,
             project_metadata,
@@ -596,9 +569,8 @@ impl ModrinthProvider {
     fn project_metadata_for_install(&self, project_id: &str, project_type: &str) -> Value {
         let encoded = percent_encode(project_id);
         let Ok(value) = self.http.get_json(&format!("{}/project/{encoded}", self.base_url), None) else {
-            // метаданные проекта не критичны для установки: каталог недоступен —
-            // ставим без названия и иконки.
-            return json!({});
+            // если каталог недоступен, устанавливаем без названия и иконки
+                        return json!({});
         };
         if !value.is_object() {
             return json!({});
@@ -632,15 +604,6 @@ impl ModrinthProvider {
             .to_owned();
         let catalog_url = metadata.get("catalog_url").and_then(Value::as_str).unwrap_or("").trim().to_owned();
         catalog == "modrinth" && catalog_id == self.catalog_id && (catalog_url.is_empty() || catalog_url == self.base_url)
-    }
-
-    fn resource_paths(
-        &self,
-        instance_dir: &Path,
-        project_type: &str,
-        target_dir: Option<&Path>,
-    ) -> Result<(PathBuf, PathBuf), String> {
-        resource_paths(instance_dir, project_type, target_dir)
     }
 
     fn prepare_targets(&self, projects: &mut [ResolvedProject], directory: &Path, project_type: &str) -> Result<(), String> {
@@ -1099,7 +1062,7 @@ fn target_for_sidecar(sidecar: &Path) -> Option<PathBuf> {
     Some(sidecar.with_file_name(file_name))
 }
 
-fn safe_file_name(value: &str) -> Result<String, String> {
+pub(crate) fn safe_file_name(value: &str) -> Result<String, String> {
     let normalized = value.replace('\\', "/");
     let name = Path::new(&normalized).file_name().map(|inner| inner.to_string_lossy().to_string());
     let valid = matches!(&name, Some(name) if !name.is_empty() && name != "." && name != "..")
@@ -1168,7 +1131,7 @@ fn primary_file(version: &Value, project_id: &str) -> Result<Value, String> {
     Ok(primary.unwrap().clone())
 }
 
-/// bool() из Python: пустая строка и ноль — ложь.
+/// null, false, ноль и пустая строка считаются ложью
 fn truthy(value: Option<&Value>) -> bool {
     match value {
         None | Some(Value::Null) => false,
@@ -1177,6 +1140,39 @@ fn truthy(value: Option<&Value>) -> bool {
         Some(Value::String(text)) => !text.is_empty(),
         Some(_) => true,
     }
+}
+
+fn search_facets(
+    project_type: &str,
+    game_version: Option<&str>,
+    loader: Option<&str>,
+    category: Option<&str>,
+) -> Result<Vec<Vec<String>>, String> {
+    let category = category.map(str::trim).filter(|value| !value.is_empty());
+    if category.is_some() && project_type != "mod" {
+        return Err("Категории доступны только для поиска модов".to_owned());
+    }
+    let category = category.map(|value| value.to_lowercase());
+    if category.as_ref().is_some_and(|value| {
+        value.len() > 80 || !value.chars().all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+    }) {
+        return Err("Некорректная категория Modrinth".to_owned());
+    }
+
+    let mut facets: Vec<Vec<String>> = vec![vec![format!("project_type:{project_type}")]];
+    if let Some(game_version) = game_version.filter(|value| !value.is_empty()) {
+        facets.push(vec![format!("versions:{game_version}")]);
+    }
+    if let Some(loader) = loader.map(str::trim).filter(|value| !value.is_empty()) {
+        let lowered = loader.to_lowercase();
+        if lowered != "vanilla" && project_type == "mod" {
+            facets.push(vec![format!("categories:{lowered}")]);
+        }
+    }
+    if let Some(category) = category {
+        facets.push(vec![format!("categories:{category}")]);
+    }
+    Ok(facets)
 }
 
 /// типы проектов, разрешённые при поиске/просмотре каталога: четыре
@@ -1256,8 +1252,8 @@ fn is_symlink(path: &Path) -> bool {
     fs::symlink_metadata(path).map(|meta| meta.is_symlink()).unwrap_or(false)
 }
 
-/// quote(safe='') из Python: небезопасные байты — %XX, пробел — %20.
-fn percent_encode(value: &str) -> String {
+/// кодирует байты, кроме букв, цифр и `.-_~`; пробел становится `%20`
+pub(crate) fn percent_encode(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for byte in value.bytes() {
         match byte {
@@ -1268,8 +1264,8 @@ fn percent_encode(value: &str) -> String {
     out
 }
 
-/// urlencode() из Python: как percent_encode, но пробел — «+».
-fn form_urlencode(params: &[(&str, String)]) -> String {
+/// кодирует параметры формы, заменяя пробел на `+`
+pub(crate) fn form_urlencode(params: &[(&str, String)]) -> String {
     let encode = |out: &mut String, value: &str| {
         for byte in value.bytes() {
             match byte {
@@ -1300,6 +1296,22 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).expect("создать временный каталог");
         dir
+    }
+
+    #[test]
+    fn search_facets_include_modrinth_category_without_losing_context() {
+        let facets = search_facets("mod", Some("1.20.1"), Some("fabric"), Some("Food")).unwrap();
+        assert_eq!(
+            facets,
+            vec![
+                vec!["project_type:mod".to_owned()],
+                vec!["versions:1.20.1".to_owned()],
+                vec!["categories:fabric".to_owned()],
+                vec!["categories:food".to_owned()],
+            ]
+        );
+        assert!(search_facets("resourcepack", None, None, Some("food")).is_err());
+        assert!(search_facets("mod", None, None, Some("food:OR project_type:mod")).is_err());
     }
 
     #[test]
@@ -1377,7 +1389,7 @@ mod tests {
         assert!(!version_is_compatible(&version, "1.20.4", "quilt", "mod"));
         assert!(version_is_compatible(&version, "1.20.4", "vanilla", "mod"));
         assert!(version_is_compatible(&json!({}), "1.20.4", "fabric", "mod"));
-        // resourcepack не проверяет loader — фильтр только для модов
+        // фильтр загрузчика применяется только к модам, не к resourcepack
         assert!(version_is_compatible(&version, "1.20.4", "forge", "resourcepack"));
     }
 

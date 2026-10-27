@@ -417,7 +417,7 @@ function isUiView(value: unknown): value is PluginUiView {
   return isUiNode(value.root, { nodes: 0, collectionItems: 0 })
 }
 
-// экспортировано для node-тестов контракта UI v2
+// экспортировано для тестов контракта интерфейса версии 2
 export function isUiViewForTests(value: unknown): boolean {
   return isUiView(value)
 }
@@ -779,7 +779,7 @@ export class PluginRuntimeService {
     try {
       record.options.onError(error)
     } catch {
-      // an application error callback must not destabilize other plugin runtimes.
+      // сбой обработчика приложения не должен останавливать другие плагины
     }
   }
 
@@ -810,7 +810,7 @@ export class PluginRuntimeService {
       try {
         pending.controller.abort()
       } catch {
-        // cancellation is best effort if a host abort listener throws.
+        // сбой обработчика отмены не должен прерывать очистку
       }
       pending.cancel(failure)
     }

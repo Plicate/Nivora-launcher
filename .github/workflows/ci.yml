@@ -9,17 +9,17 @@ permissions:
   contents: read
 
 jobs:
-  python:
+  rust:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
         with:
-          python-version: "3.11"
-      - name: Install project dependencies
-        run: python -m pip install .
-      - name: Run unit tests
-        run: python -m unittest discover -s tests -v
+          toolchain: "1.99.0"
+          build-warnings: allow
+      - name: Run Tauri Rust tests
+        working-directory: frontend/src-tauri
+        run: cargo test --locked
 
   frontend:
     runs-on: ubuntu-latest
@@ -48,9 +48,6 @@ jobs:
       attestations: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: "3.11"
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "20"
@@ -63,24 +60,19 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.23"
-      # nivora-turbo.exe собирается mingw-g++ (posix-потоки): берём UCRT64
-      # из MSYS2, но сам скрипт сборки продолжает работать в Git Bash.
+      # nivora-turbo.exe требует mingw-g++ с posix-потоками; используем UCRT64 из Git Bash
       - uses: msys2/setup-msys2@v2
         with:
           msystem: UCRT64
           update: false
           install: git
-      - name: Expose MSYS2 UCRT64 g++ and python3 shim to Git Bash
+      - name: Expose MSYS2 UCRT64 g++ to Git Bash
         shell: bash
-        run: |
-          echo "C:\msys64\ucrt64\bin" >> "$GITHUB_PATH"
-          # setup-python даёт python.exe, скрипты сборки зовут python3.
-          py_dir="$(dirname "$(command -v python)")"
-          cp "$py_dir/python.exe" "$py_dir/python3.exe"
+        run: echo "C:\msys64\ucrt64\bin" >> "$GITHUB_PATH"
       - name: Run Tauri Rust tests
         working-directory: frontend/src-tauri
         run: cargo test --locked
-      - name: Build backend, helpers and Windows installers
+      - name: Build helpers and Windows installers
         shell: bash
         run: bash scripts/build_windows_exe.sh
         timeout-minutes: 60
@@ -134,8 +126,7 @@ jobs:
           - arch: arm64
             runner: macos-latest
           - arch: x86_64
-            # Intel-раннеры GitHub уходят; если метка исчезнет — собирайте
-            # x86_64 на arm64 через MACOS_ARCH=x86_64 (нужен x86_64-Python).
+            # если Intel-раннер недоступен, собирайте x86_64 на arm64 через MACOS_ARCH=x86_64
             runner: macos-15-intel
     runs-on: ${{ matrix.runner }}
     permissions:
@@ -144,9 +135,6 @@ jobs:
       attestations: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: "3.11"
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "20"
@@ -198,9 +186,6 @@ jobs:
       attestations: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: "3.11"
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "20"
@@ -217,7 +202,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential curl file libayatana-appindicator3-dev libssl-dev libwebkit2gtk-4.1-dev librsvg2-dev libxdo-dev patchelf rpm xvfb
-      - name: Build deb and rpm (backend + helpers included)
+      - name: Build deb and rpm (helpers included)
         run: bash scripts/build_all.sh deb rpm
         timeout-minutes: 60
       - name: Install deb and smoke-test packaged app (xvfb, --smoke-test)

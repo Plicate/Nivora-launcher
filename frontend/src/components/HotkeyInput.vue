@@ -1,9 +1,8 @@
 <script setup lang="ts">
-// поле записи горячей клавиши: вместо свободного текста ловим живое
-// нажатие и собираем комбинацию сами — «ввести что угодно» больше нельзя.
+// записываем клавишу напрямую, не принимая произвольный текст
 import { nextTick, onBeforeUnmount, ref } from 'vue'
 import Icon from './Icon.vue'
-import { hotkeyFromEvent } from '../services/overlayHelpers'
+import { hotkeyFromEvent, hotkeyModifiersFromEvent } from '../services/overlayHelpers'
 
 const props = withDefaults(
   defineProps<{
@@ -16,17 +15,20 @@ const props = withDefaults(
 const emit = defineEmits<{ 'update:modelValue': [value: string] }>()
 
 const recording = ref(false)
+const recordingModifiers = ref<string[]>([])
 const button = ref<HTMLElement | null>(null)
 
 async function startRecording() {
   if (props.disabled || recording.value) return
   recording.value = true
+  recordingModifiers.value = []
   await nextTick()
   button.value?.focus()
 }
 
 function stopRecording() {
   recording.value = false
+  recordingModifiers.value = []
 }
 
 function onKeyDown(event: KeyboardEvent) {
@@ -34,19 +36,24 @@ function onKeyDown(event: KeyboardEvent) {
   event.preventDefault()
   event.stopPropagation()
   if (event.key === 'Escape') {
-    recording.value = false
+    stopRecording()
     return
   }
   if (event.key === 'Backspace') {
-    recording.value = false
+    stopRecording()
     emit('update:modelValue', '')
     return
   }
+  recordingModifiers.value = hotkeyModifiersFromEvent(event)
   const combination = hotkeyFromEvent(event)
   if (combination) {
-    recording.value = false
+    stopRecording()
     emit('update:modelValue', combination)
   }
+}
+
+function onKeyUp(event: KeyboardEvent) {
+  if (recording.value) recordingModifiers.value = hotkeyModifiersFromEvent(event)
 }
 
 onBeforeUnmount(stopRecording)
@@ -61,11 +68,13 @@ onBeforeUnmount(stopRecording)
     :disabled="disabled"
     :aria-label="recording ? 'Идёт запись комбинации, Esc — отмена' : 'Нажмите, чтобы записать комбинацию клавиш'"
     @keydown="onKeyDown"
+    @keyup="onKeyUp"
     @click="startRecording"
     @blur="stopRecording"
   >
     <template v-if="recording">
-      <span class="hotkey-input__recording"><Icon name="keyboard" :size="15" /> Нажмите комбинацию…</span>
+      <span class="hotkey-input__recording"><Icon name="keyboard" :size="15" /> Удерживайте Ctrl/Alt/Shift/⌘, затем нажмите клавишу</span>
+      <span v-if="recordingModifiers.length" class="hotkey-input__keys"><kbd v-for="modifier in recordingModifiers" :key="modifier">{{ modifier }}</kbd></span>
       <small class="hotkey-input__hint">Esc — отмена · Backspace — сброс</small>
     </template>
     <template v-else-if="modelValue">
@@ -112,7 +121,8 @@ onBeforeUnmount(stopRecording)
   display: inline-flex;
   align-items: center;
   gap: 7px;
-  font-size: 13px;
+  max-width: 100%;
+  font-size: 12px;
   color: var(--blue-bright);
   font-weight: 600;
 }
@@ -130,8 +140,7 @@ onBeforeUnmount(stopRecording)
   color: var(--text);
   white-space: nowrap;
 }
-/* Подсказка — отдельной строкой под клавишами: раньше стояла рядом в одной
-   строке без переноса и в узких колонках наезжала на сами клавиши. */
+/* подсказка остаётся ниже клавиш, чтобы не перекрывать их в узких колонках */
 .hotkey-input__hint {
   max-width: 100%;
   color: var(--muted);

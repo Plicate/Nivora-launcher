@@ -1,4 +1,4 @@
-// локальное хранилище тем оформления: каталог data_home/themes/<id> с
+// локальное хранилище тем оформления
 use base64::Engine;
 use regex::Regex;
 use serde_json::{json, Map, Value};
@@ -53,7 +53,6 @@ fn err(message: &str) -> String {
     message.to_owned()
 }
 
-/// текстовое поле темы: непустая строка не длиннее лимита.
 fn text_field(value: Option<&Value>, field: &str, limit: usize) -> Result<String, String> {
     let raw = match value {
         Some(Value::String(text)) => text.trim(),
@@ -287,12 +286,12 @@ fn metadata_yaml(theme: &Value) -> String {
     yaml
 }
 
-struct ArchiveTheme {
-    theme: Value,
-    metadata: Value,
+pub(crate) struct ArchiveTheme {
+    pub(crate) theme: Value,
+    pub(crate) metadata: Value,
 }
 
-fn read_archive(content: &[u8]) -> Result<ArchiveTheme, String> {
+pub(crate) fn read_archive(content: &[u8]) -> Result<ArchiveTheme, String> {
     if content.is_empty() || content.len() as u64 > MAX_ARCHIVE_BYTES {
         return Err(err("ZIP темы пустой или превышает 8 MiB"));
     }
@@ -307,7 +306,7 @@ fn read_archive(content: &[u8]) -> Result<ArchiveTheme, String> {
         if member.is_dir() {
             return Err(err("ZIP темы может содержать только файлы в корне архива"));
         }
-        let raw_name = member.name().replace('\\', "/");
+        let raw_name = member.name().map(|v| v.replace('\\', "/")).unwrap_or_default();
         let part = raw_name.split('/').next_back().unwrap_or("");
         if raw_name.contains('/') || part.is_empty() || part == "." || part == ".." {
             return Err(err("ZIP темы может содержать только файлы в корне архива"));
@@ -358,7 +357,7 @@ fn pretty_json(value: &Value) -> String {
     text
 }
 
-fn themes_root() -> Result<PathBuf, String> {
+pub(crate) fn themes_root() -> Result<PathBuf, String> {
     let root = launcher_roots().data_home.join("themes");
     let metadata = fs::symlink_metadata(&root);
     if let Ok(meta) = &metadata {
@@ -458,7 +457,7 @@ fn existing_directory(root: &Path, theme_id: &str) -> Result<PathBuf, String> {
     Ok(directory)
 }
 
-fn persist(root: &Path, theme: &Value, replace: bool) -> Result<Value, String> {
+pub(crate) fn persist(root: &Path, theme: &Value, replace: bool) -> Result<Value, String> {
     let theme_id = theme["id"].as_str().unwrap_or_default().to_owned();
     let target = root.join(&theme_id);
     let target_meta = fs::symlink_metadata(&target);
@@ -561,7 +560,6 @@ fn delete_at(root: &Path, theme_id: &str) -> Result<(), String> {
     fs::remove_dir_all(&target).map_err(|error| format!("Не удалось удалить тему: {error}"))
 }
 
-/// сборка экспортного ZIP по теме из указанного каталога хранилища.
 fn export_at(root: &Path, theme_id: &str) -> Result<(String, Vec<u8>), String> {
     let theme = read_theme(&existing_directory(root, theme_id)?)?;
     let mut buffer = std::io::Cursor::new(Vec::new());
@@ -640,11 +638,9 @@ mod tests {
         let mut bad_schema = sample_theme();
         bad_schema["schema_version"] = json!(2);
         assert!(normalize_theme(&bad_schema, &metadata, "local", "").is_err());
-        // java обязана называться java/javaw и лежать в каталоге bin.
         let mut bad_id = sample_theme();
         bad_id["id"] = json!("midnight_sky");
         assert!(normalize_theme(&bad_id, &metadata, "local", "").is_err());
-        // регистр id нормализуется: «Midnight» превращается в «midnight».
         let mut cased_id = sample_theme();
         cased_id["id"] = json!("Midnight-Sky");
         assert_eq!(normalize_theme(&cased_id, &metadata, "local", "").unwrap()["id"], json!("midnight-sky"));
@@ -712,7 +708,7 @@ mod tests {
         let root = temp_root("mismatch");
         let theme = normalize_theme(&sample_theme(), &sample_metadata(), "local", "").unwrap();
         persist(&root, &theme, false).expect("сохранить");
-        // каталог переименован вручную — id внутри больше не совпадает.
+        // имя каталога не должно расходиться с id темы
         fs::rename(root.join("midnight-sky"), root.join("other-id")).expect("переименовать");
         assert!(read_theme(&root.join("other-id")).is_err());
         assert!(read_theme(&root.join("midnight-sky")).is_err());

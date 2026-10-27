@@ -1,4 +1,4 @@
-//! Предохранитель от второй копии лаунчера.
+//! предохранитель от второй копии лаунчера
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
@@ -10,19 +10,16 @@ use tauri::{Emitter, Manager};
 
 const LOCK_FILE: &str = "nivora-instance.lock";
 const SHOW_FILE: &str = "nivora-show-request";
-/// запрос «запустить экземпляр» от второй копии (ярлык на рабочем столе):
-/// содержимое — имя экземпляра, свежесть — по mtime файла.
+/// запрос запуска от второй копии; содержит имя экземпляра и время изменения
 const LAUNCH_FILE: &str = "nivora-launch-request";
-/// период сердцебиения: заметно меньше STALE_AFTER, чтобы jitter файловой
-/// системы не заставил живой экземпляр выглядеть мёртвым.
+/// интервал heartbeat меньше STALE_AFTER, чтобы задержки файловой системы не снимали живую блокировку
 const HEARTBEAT: Duration = Duration::from_millis(400);
 const STALE_AFTER: u128 = 6;
-/// просроченный запрос показа окна (остался после сбоя) игнорируем.
+/// просроченный запрос показа окна (остался после сбоя) игнорируем
 const SHOW_REQUEST_TTL: u128 = 60_000_000;
 
 static WATCHER_STOP: AtomicBool = AtomicBool::new(false);
-/// пути лок-файлов владельца: release() выполняется в момент выхода, когда
-/// handle приложения уже недоступен — запоминаем при захвате.
+/// пути блокировок сохраняются при захвате, так как при выходе handle уже недоступен
 static LOCK_PATHS: OnceLock<(PathBuf, PathBuf, PathBuf)> = OnceLock::new();
 
 fn now_micros() -> u128 {
@@ -65,28 +62,25 @@ pub fn acquire(app: tauri::AppHandle, launch_request: Option<&str>) -> Result<()
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                 let heartbeat_age = now_micros().saturating_sub(read_heartbeat(&lock)) / 1_000_000;
                 if heartbeat_age < STALE_AFTER {
-                    // живой экземпляр: будим его окно и выходим. Если вторую
-                    // копию поднял ярлык экземпляра — передаём и целевой
-                    // экземпляр, чтобы живой лаунчер сам запустил игру.
+                    // ярлык второй копии передаёт имя экземпляра живому лаунчеру
                     if let Some(name) = launch_request {
                         let _ = fs::write(&launch, name);
                     }
                     let _ = fs::write(&show, now_micros().to_string());
                     return Err("already-running".to_owned());
                 }
-                // протухший лок (жёсткое завершение прошлой копии) — забираем.
+                // забираем устаревшую блокировку после аварийного завершения
                 let _ = fs::remove_file(&lock);
                 continue;
             }
             Err(error) => return Err(format!("Не удалось открыть {}: {error}", lock.display())),
         }
     }
-    // третья попытка не удалась — не мешаем запуску, просто живём без защиты.
+    // после трёх неудач не блокируем запуск, но продолжаем без защиты
     Ok(())
 }
 
-/// Показ/фокус окна — строго в главном потоке: прямые вызовы GUI из
-/// фоновых нитей на macOS не допускаются, а watcher живёт в своей.
+/// показывает окно в главном потоке; вызовы GUI из фоновых потоков на macOS недопустимы
 fn bring_to_front(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = app.run_on_main_thread(move || {
@@ -97,8 +91,7 @@ fn bring_to_front(app: &tauri::AppHandle) {
     }
 }
 
-/// фоновая нить владельца: сердцебиение + реакция на запрос показа окна
-/// и на запрос запуска экземпляра от второй копии.
+/// фоновая нить обновляет heartbeat и обрабатывает запросы второй копии
 fn spawn_watcher(app: tauri::AppHandle, lock: PathBuf, show: PathBuf, launch: PathBuf) {
     std::thread::spawn(move || loop {
         if WATCHER_STOP.load(Ordering::SeqCst) {
@@ -114,11 +107,11 @@ fn spawn_watcher(app: tauri::AppHandle, lock: PathBuf, show: PathBuf, launch: Pa
             let _ = fs::remove_file(&launch);
             return;
         }
-        // сердцебиение: перезапись содержимого обновляет «мгновение» жизни.
+        // сердцебиение: перезапись содержимого обновляет "мгновение" жизни
         if let Ok(mut file) = OpenOptions::new().write(true).truncate(true).open(&lock) {
             let _ = write!(file, "{}", now_micros());
         }
-        // запрос запуска экземпляра от второй копии (ярлык).
+        // запрос запуска экземпляра от второй копии (ярлык)
         if launch.exists() {
             let requested_at = fs::metadata(&launch)
                 .and_then(|meta| meta.modified())
@@ -129,15 +122,14 @@ fn spawn_watcher(app: tauri::AppHandle, lock: PathBuf, show: PathBuf, launch: Pa
             let name = fs::read_to_string(&launch).unwrap_or_default();
             let _ = fs::remove_file(&launch);
             let fresh = now_micros().saturating_sub(requested_at) <= SHOW_REQUEST_TTL;
-            // имя проверяется тем же валидатором, что и argv: чужой мусор в
-            // каталоге кеша не должен превращаться в запуск чего-либо.
+            // проверяем имя, чтобы содержимое каталога кеша не стало командой запуска
             if fresh && super::shortcuts::set_pending_launch(name.trim()) {
                 let pending = name.trim().to_owned();
                 bring_to_front(&app);
                 let _ = app.emit("nivora-launch-request", serde_json::json!({ "name": pending }));
             }
         }
-        // запрос показа окна от второй копии.
+        // запрос показа окна от второй копии
         if show.exists() {
             let requested_at = fs::read_to_string(&show)
                 .ok()

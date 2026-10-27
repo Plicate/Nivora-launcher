@@ -1,10 +1,4 @@
-//! Дымовой прогон упакованного приложения: `nivora-launcher --smoke-test`.
-//!
-//! Прогоняет операции через тот же мост `backend_call`, что использует UI:
-//! нативные, воркерные и транзитные маршруты, параллельные вызовы,
-//! операции из нового функционала. Отчёт — JSON в диагностический каталог
-//! (`smoke-test.json`), код выхода: 0 — успех, 3 — шаг провален,
-//! 4 — прогон не уложился в бюджет времени (watchdog).
+//! проверяет `backend_call` в упакованном приложении; отчёт записывается в `smoke-test.json`
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
@@ -17,7 +11,7 @@ const WATCHDOG_BUDGET: Duration = Duration::from_secs(240);
 const PARALLEL_CALLS: usize = 20;
 const SMOKE_INSTANCE: &str = "nivora-smoke-missing";
 
-/// Признак провала именно моста: эти строки ищет фронтенд и поддержка.
+/// признак провала именно моста: эти строки ищет фронтенд и поддержка
 fn bridge_failure(error: &str) -> bool {
     error.contains("Операция GUI не разрешена desktop bridge")
         || error.contains("GUI-запрос не содержит operation")
@@ -48,8 +42,7 @@ fn timed(app: &AppHandle, request: Value) -> Outcome {
     }
 }
 
-/// Шаг, где допустима (и обязательна) доменная ошибка — например, запрос
-/// несуществующего экземпляра. Провелом считается только ошибка моста.
+/// допускает ожидаемые доменные ошибки; ошибкой считается сбой моста
 fn timed_expect_domain_error(app: &AppHandle, request: Value) -> Outcome {
     let started = Instant::now();
     let result = backend_call_sync(app.clone(), request);
@@ -71,8 +64,7 @@ impl Outcome {
     }
 }
 
-/// N параллельных вызовов одного запроса: все должны завершиться (успехом
-/// или ожидаемой доменной ошибкой) без провалов моста и паник.
+/// повторяет запрос параллельно и проверяет отсутствие сбоев моста и паник
 fn parallel(app: &AppHandle, request: Value, expect_ok: bool) -> Outcome {
     let started = Instant::now();
     let results = std::thread::scope(|scope| {
@@ -111,8 +103,7 @@ pub fn requested() -> bool {
 pub fn run(app: AppHandle) {
     let started = Instant::now();
     startup_trace("smoke: начало");
-    // Страховка от зависшего шага (например, воркер не отвечает):
-    // без этого CI ждал бы таймаута задачи целиком.
+    // ограничиваем время шага, чтобы зависание не блокировало CI
     let watchdog = app.clone();
     std::thread::spawn(move || {
         std::thread::sleep(WATCHDOG_BUDGET);
@@ -122,13 +113,11 @@ pub fn run(app: AppHandle) {
 
     let mut steps: Vec<(&'static str, Outcome)> = Vec::new();
 
-    // Нативные операции.
     steps.push(("engine_info", timed(&app, json!({ "operation": "engine_info" }))));
     let bootstrap_started = Instant::now();
     let bootstrap_result = backend_call_sync(app.clone(), json!({ "operation": "bootstrap" }));
     let bootstrap_ms = bootstrap_started.elapsed().as_millis();
-    // Настройки из того же ответа: save_settings ниже пишет их обратно
-    // без изменений (roundtrip), пользовательские данные не затрагиваются.
+    // сохраняем те же настройки, не затрагивая пользовательские данные
     let bootstrap_settings = bootstrap_result
         .as_ref()
         .ok()
@@ -146,9 +135,7 @@ pub fn run(app: AppHandle) {
         parallel(&app, json!({ "operation": "bootstrap" }), true),
     ));
 
-    // Воркер: обычный маршрут (постоянный воркер) и транзитный (своя копия
-    // на вызов) на заведомо несуществующем экземпляре — предсказуемая
-    // доменная ошибка вместо провала моста.
+    // проверяем обычный и транзитный маршруты на несуществующем экземпляре
     steps.push((
         "worker_parallel_instance_log",
         parallel(&app, json!({ "operation": "instance_log", "name": SMOKE_INSTANCE }), false),
@@ -158,7 +145,6 @@ pub fn run(app: AppHandle) {
         timed_expect_domain_error(&app, json!({ "operation": "launch_instance", "name": SMOKE_INSTANCE })),
     ));
 
-    // Новый функционал: ярлыки и экспорт списка модов.
     steps.push((
         "shortcut_status_missing",
         timed_expect_domain_error(&app, json!({ "operation": "instance_shortcut_status", "name": SMOKE_INSTANCE })),

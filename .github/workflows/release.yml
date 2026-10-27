@@ -1,20 +1,13 @@
 name: Release
 
-# Релиз: пуш тега v* собирает пакеты через те же платформенные скрипты,
-# что и локальная сборка (scripts/build_*), публикует артефакты в GitHub
-# Release. latest.json для встроенного апдейтера собирает
-# scripts/build_windows_exe.sh — только при заданном ключе
-# TAURI_SIGNING_PRIVATE_KEY (иначе апдейтер релиз не увидит, см. заголовок
-# скрипта).
-#
-# ОБЯЗАТЕЛЬНЫЕ СЕКРЕТЫ РЕПОЗИТОРИЯ (Settings → Secrets → Actions):
-#   TAURI_SIGNING_PRIVATE_KEY          — приватный ключ minisign (апдейтер)
-#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD — пароль этого ключа
-# Опционально:
-#   WINDOWS_CERT_FILE / WINDOWS_CERT_PASSWORD — Authenticode (osslsigncode)
-#   APPLE_CERTIFICATE / APPLE_CERTIFICATE_PASSWORD / APPLE_SIGNING_IDENTITY —
-#     подпись Developer ID; без них macOS-сборка подписывается ad-hoc и НЕ
-#     нотаризуется (Gatekeeper: ПКМ → Открыть, см. docs/BUILDING.md).
+# тег v* собирает и публикует релиз. scripts/build_windows_exe.sh создаёт
+# latest.json только если задан TAURI_SIGNING_PRIVATE_KEY
+# настройте обязательные секреты в Settings → Secrets → Actions:
+# переменная TAURI_SIGNING_PRIVATE_KEY (minisign) и TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+# переменная WINDOWS_CERT_FILE и WINDOWS_CERT_PASSWORD включают подпись Authenticode
+# переменная APPLE_CERTIFICATE, APPLE_CERTIFICATE_PASSWORD и APPLE_SIGNING_IDENTITY включают
+# developer ID; без них сборка macOS будет ad-hoc и не нотариализуется
+# инструкции для Gatekeeper: ПКМ → Открыть, docs/BUILDING.md
 
 on:
   push:
@@ -29,9 +22,6 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: "3.11"
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "20"
@@ -49,13 +39,10 @@ jobs:
           msystem: UCRT64
           update: false
           install: git
-      - name: Expose MSYS2 UCRT64 g++ and python3 shim to Git Bash
+      - name: Expose MSYS2 UCRT64 g++ to Git Bash
         shell: bash
-        run: |
-          echo "C:\msys64\ucrt64\bin" >> "$GITHUB_PATH"
-          py_dir="$(dirname "$(command -v python)")"
-          cp "$py_dir/python.exe" "$py_dir/python3.exe"
-      - name: "Build signed Windows installers (script: backend+helpers+NSIS)"
+        run: echo "C:\msys64\ucrt64\bin" >> "$GITHUB_PATH"
+      - name: "Build signed Windows installers (script: helpers+NSIS)"
         shell: bash
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -92,9 +79,6 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: "3.11"
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "20"
@@ -133,9 +117,6 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: "3.11"
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "20"
@@ -152,7 +133,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential curl file libayatana-appindicator3-dev libssl-dev libwebkit2gtk-4.1-dev librsvg2-dev libxdo-dev patchelf rpm xvfb
-      - name: Build deb and rpm (backend + helpers included)
+      - name: Build deb and rpm (helpers included)
         run: bash scripts/build_all.sh deb rpm
         timeout-minutes: 60
       - name: Install deb and smoke-test packaged app (xvfb)

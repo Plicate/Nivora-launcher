@@ -1,9 +1,7 @@
 # Сборка Nivora Launcher
 
-Все платформы собираются платформенными скриптами из `scripts/`;
-`scripts/build_all.sh` прогоняет цели для текущей ОС и проверяет, что
-после каждой цели артефакт действительно появился («успех без артефакта»
-невозможен).
+Все платформы собираются скриптами из `scripts/`. `scripts/build_all.sh`
+запускает цели для текущей ОС и проверяет наличие ожидаемых артефактов.
 
 | Цель | Скрипт | Артефакты (`dist/`) |
 |---|---|---|
@@ -16,18 +14,14 @@
 ## Windows
 
 ```bash
-bash scripts/build_windows_exe.sh        # на Windows (Git Bash) или Linux (кросс через wine + cargo-xwin)
+bash scripts/build_windows_exe.sh        # на Windows (Git Bash) или Linux (нативная кросс-сборка через cargo-xwin)
 ```
 
-- Бэкенд собирается PyInstaller в режиме **onedir + noconsole** и
-  вкладывается в `nivora-launcher.exe` zip-архивом; при первом старте
-  распаковывается в `%LOCALAPPDATA%\nivora-launcher\backend`. NSIS-копия
-  кладёт бэкенд рядом с приложением — без распаковки.
 - Нативные хелперы (`nivora-turbo.exe`, `nivora-modcat.exe`,
   `ModScan.java`) собираются скриптом и вкладываются ДО упаковки: их
   получают и установщик, и портативный exe.
-- `scripts/check_pe_subsystem.py` проверяет подсистему PE: ни бэкенд, ни
-  лаунчер не должны открывать консоль.
+- Подсистема PE проверяется `objdump` (Windows GUI): лаунчер не должен
+  открывать консоль.
 - Подпись Authenticode — опционально (`WINDOWS_CERT_FILE`,
   `osslsigncode`). Без неё SmartScreen предупреждает при первом запуске —
   это нормально для неподписанных сборок.
@@ -37,21 +31,19 @@ bash scripts/build_windows_exe.sh        # на Windows (Git Bash) или Linux 
 ```bash
 bash scripts/build_macos_app.sh                  # архитектура хоста
 MACOS_ARCH=arm64  bash scripts/build_macos_app.sh
-MACOS_ARCH=x86_64 bash scripts/build_macos_app.sh   # на arm64 нужен x86_64-Python
+MACOS_ARCH=x86_64 bash scripts/build_macos_app.sh
 MACOS_ARCH=both   bash scripts/build_all.sh macos # обе архитектуры
 ```
 
-Скрипт проверяет зависимости, собирает бэкенд (PyInstaller onedir в
-`Resources/backend/app`), хелперы под целевую архитектуру, собирает
-`.app` + `.dmg` и валидирует: наличие артефактов, версию в Info.plist,
-архитектуру бинарников (`lipo`), ad-hoc подпись (`codesign --verify
---deep --strict`) и монтирование DMG. `universal2` не собирается: у
-`psutil` нет universal2-колёс.
+Скрипт проверяет зависимости, собирает хелперы под целевую архитектуру,
+собирает `.app` + `.dmg` и валидирует: наличие артефактов, версию в
+Info.plist, архитектуру бинарников (`lipo`), ad-hoc подпись (`codesign
+--verify --deep --strict`) и монтирование DMG. `universal2` не собирается:
+хелперы и движок компонуются отдельно под каждую архитектуру.
 
 ### Подпись и Gatekeeper
 
-Без Apple Developer ID приложение подписывается **ad-hoc** и **не
-нотаризуется** — это осознанное ограничение сборки, а не ошибка:
+Без Apple Developer ID приложение подписывается **ad-hoc** и не проходит notarization:
 
 - при первом запуске скачанной копии Gatekeeper спросит подтверждение:
   **правый клик по «Nivora Launcher.app» → «Открыть» → «Открыть»**, либо
@@ -86,10 +78,7 @@ nivora-launcher --smoke-test                                          # Linux (�
 
 ## CI
 
-`.github/workflows/ci.yml` собирает все три платформы этими же скриптами
-и запускает `--smoke-test` против упакованных приложений (Windows:
-портативный exe и тихо установленная NSIS-копия; macOS: `.app` из
-сборки; Linux: deb устанавливается в раннер, прогон под `xvfb-run`).
-Релизный воркфлоу (`release.yml`, тег `v*`) публикует артефакты в GitHub
-Release; `latest.json` для встроенного апдейтера собирает
-`build_windows_exe.sh` при заданном `TAURI_SIGNING_PRIVATE_KEY`.
+`.github/workflows/ci.yml` использует те же скрипты для сборки трёх
+платформ и запускает `--smoke-test` на упакованных приложениях.
+`release.yml` публикует артефакты для тегов `v*`; `build_windows_exe.sh`
+создаёт `latest.json`, если задан `TAURI_SIGNING_PRIVATE_KEY`.

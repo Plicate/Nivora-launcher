@@ -1,4 +1,4 @@
-/** Type-only contract for Nivora Launcher v3 plugins. It ships no runtime code. */
+/** type-only contract for Nivora Launcher v3 plugins; it ships no runtime code */
 
 import type {
 	PluginActionApi,
@@ -188,6 +188,7 @@ export interface PermissionsSummary {
 
 export interface PermissionsApi {
 	get(): Promise<PermissionsSummary>
+	/** can only revoke existing grants; new grants require a user action in Plugin Center */
 	set(permissions: string[]): Promise<PermissionsSummary>
 }
 

@@ -1,4 +1,3 @@
-// глобальный поиск по всем экземплярам: где установлен мод, в каком
 use serde_json::{json, Value};
 use std::fs;
 use std::io::Read;
@@ -24,14 +23,12 @@ pub(crate) struct JarManifest {
     pub(crate) path: PathBuf,
 }
 
-// тот же nivora-turbo, что и у Python-воркера: ищем по env, соседним
-// каталогам и системным путям
+// ищет nivora-turbo в переменной окружения, соседних каталогах и системных путях
 fn turbo_binary() -> Option<PathBuf> {
     super::turbo::turbo_binary()
 }
 
-// батч-скан манифестов: без бинарника или при сбое — пустой список,
-// поиск просто остаётся на именах файлов
+// при сбое сканирования поиск использует только имена файлов
 pub(crate) fn scan_jars(binary: &Path, jars: &[PathBuf]) -> Vec<JarManifest> {
     if jars.is_empty() {
         return Vec::new();
@@ -76,7 +73,6 @@ pub(crate) fn scan_jars(binary: &Path, jars: &[PathBuf]) -> Vec<JarManifest> {
             continue;
         }
         let path = PathBuf::from(fields[4]);
-        // строки с "-" в loader — jar без знакомого манифеста, не интересно
         if fields[0] == "-" {
             continue;
         }
@@ -153,9 +149,7 @@ fn empty_groups() -> Value {
     json!({ "mods": [], "worlds": [], "resourcepacks": [], "shaderpacks": [] })
 }
 
-// вторая линия поиска: имена модов ВНУТРИ jar-манифестов. Файл может
-// называться «some-weird-name-1.2.jar», а мод внутри — Sodium: без этого
-// прохода «где установлен мод» по внутреннему имени не находился
+// ищем моды по имени внутри JAR, а не только по имени файла
 fn collect_jar_manifests(info: &InstanceInfo, query: &str, instance: &Value, output: &mut Vec<Value>) {
     if output.len() >= MAX_RESULTS_PER_GROUP {
         return;
@@ -198,7 +192,6 @@ fn collect_jar_manifests(info: &InstanceInfo, query: &str, instance: &Value, out
             continue;
         }
         let path_text = manifest.path.to_string_lossy().to_string();
-        // файл уже найден по имени — не дублируем строку
         if output.iter().any(|item| item.get("path").and_then(Value::as_str) == Some(path_text.as_str())) {
             continue;
         }
@@ -305,7 +298,7 @@ fn collect_worlds(saves: &Path, query: &str, instance: &Value, output: &mut Vec<
     }
 }
 
-// мир сервера — один каталог world, проверяем совпадением имени каталога
+// для мира сервера учитываем только каталог с точным именем
 fn collect_world_like(world: &Path, query: &str, instance: &Value, output: &mut Vec<Value>) {
     if output.len() >= MAX_RESULTS_PER_GROUP || !world.is_dir() {
         return;

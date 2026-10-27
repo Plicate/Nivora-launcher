@@ -1,4 +1,4 @@
-// выбор Java для запуска: настроенный бинар, системная java или runtime
+// выбор Java для запуска игры
 use regex::Regex;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
@@ -25,7 +25,6 @@ impl JavaRuntimeManager {
     pub(crate) fn new(config: &ConfigStore, http: Option<Arc<HttpClient>>) -> Result<Self, String> {
         let http = match http {
             Some(http) => http,
-            // умолчания HttpClient из Python-воркера: 30 секунд, 3 попытки.
             None => Arc::new(HttpClient::new(30, 3, "", None)?),
         };
         Ok(Self {
@@ -156,8 +155,7 @@ impl JavaRuntimeManager {
         #[cfg(windows)]
         let mut pending_links: Vec<(PathBuf, PathBuf)> = Vec::new();
         for (relative, metadata) in files_map {
-            // слэши Windows в манифесте нормализуем, «.»-компоненты
-            // схлопываются — как в pathlib.PurePath.parts.
+            // нормализуем слэши и удаляем пустые компоненты пути
             let relative_text = relative.replace('\\', "/");
             let parts: Vec<String> = relative_text
                 .split('/')
@@ -189,7 +187,7 @@ impl JavaRuntimeManager {
                 continue;
             }
             if file_type == "link" {
-                // ссылки разрешаем только относительные и внутрь runtime.
+                // ссылки разрешены только внутрь каталога runtime
                 let link_text = metadata.get("target").and_then(Value::as_str).unwrap_or("").replace('\\', "/");
                 let link_target = Path::new(&link_text);
                 let Some(target_parent) = target.parent() else {
@@ -253,8 +251,7 @@ impl JavaRuntimeManager {
         }
         #[cfg(windows)]
         if !pending_links.is_empty() {
-            // на Windows ссылки заменяем копией после того, как файлы
-            // скачаны; цикл нужен для цепочек ссылок.
+            // на Windows ссылки копируются после загрузки целевых файлов
             use std::sync::atomic::{AtomicU64, Ordering};
             static LINK_COUNTER: AtomicU64 = AtomicU64::new(0);
             let mut remaining = pending_links;
@@ -448,7 +445,7 @@ fn safe_runtime_component(value: &str, label: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// путь и все его предки до root не должны быть ссылками.
+/// проверяет, что путь и его предки до корня не являются ссылками
 fn runtime_path_without_symlink(path: &Path, root: &Path) -> bool {
     let mut current = path.to_path_buf();
     loop {
@@ -511,8 +508,7 @@ fn expand_user(value: &str) -> PathBuf {
     PathBuf::from(value)
 }
 
-/// аналог shutil.which: обход PATH, на unix — ещё проверка бита x.
-fn which(name: &str) -> Option<PathBuf> {
+pub(crate) fn which(name: &str) -> Option<PathBuf> {
     let path_value = std::env::var("PATH").ok()?;
     for directory in std::env::split_paths(&path_value) {
         let candidate = directory.join(name);
@@ -603,7 +599,7 @@ fn validate_path_component(part: &str) -> Result<(), String> {
         return Err("Путь содержит недопустимый компонент".to_owned());
     }
     let device = part.split('.').next().unwrap_or("").to_uppercase();
-    // COM1..COM9/LPT1..LPT9 — ровно 4 символа с цифрой 1-9 в конце.
+    // зарезервированные имена COM/LPT оканчиваются цифрой от 1 до 9
     let bytes = device.as_bytes();
     let port_reserved = (device.starts_with("COM") || device.starts_with("LPT"))
         && bytes.len() == 4
@@ -614,9 +610,8 @@ fn validate_path_component(part: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// главная версия Java из вывода «<executable> -version».
+/// возвращает основную версию Java из вывода `java -version`
 pub(crate) fn java_version(java_path: &Path) -> Option<i64> {
-    // замена javaw нужна только на Windows; на unix переменная не меняется.
     #[cfg_attr(not(windows), allow(unused_mut))]
     let mut executable = java_path.to_path_buf();
     #[cfg(windows)]
@@ -642,7 +637,7 @@ pub(crate) fn java_version(java_path: &Path) -> Option<i64> {
     value.split('.').next()?.parse::<i64>().ok()
 }
 
-/// запуск с таймаутом 10 секунд, как subprocess.run(timeout=10).
+/// запускает `java -version` с таймаутом 10 секунд
 fn run_version_command(executable: &Path) -> Option<(String, String)> {
     let mut child = super::platform::command(executable)
         .arg("-version")
@@ -682,8 +677,7 @@ pub(crate) fn validate_java_path(value: &Path, allow_directory: bool) -> Result<
     if allow_directory && candidate.is_dir() {
         candidate = candidate.join("bin").join(java_binary_name());
     }
-    // без verbatim-префикса \\?\: JVM, запущенная по такому пути, получает
-    // java.home вида \\?\C:\… и ломает загрузку модулей у Forge/NeoForge.
+    // префикс `\\?\` в `java.home` мешает загрузке модулей Forge и NeoForge
     let resolved = canonical_path(&candidate)
         .map_err(|_| format!("Java executable не найден: {}", candidate.display()))?;
     let allowed: [&str; 2] = if cfg!(windows) { ["java.exe", "javaw.exe"] } else { ["java", "javaw"] };
@@ -729,7 +723,7 @@ pub(crate) fn validate_java_path(value: &Path, allow_directory: bool) -> Result<
 pub(crate) fn safe_process_environment(compatibility: bool) -> HashMap<String, String> {
     let raw: Vec<(String, String)> = std::env::vars().collect();
     if compatibility {
-        // режим совместимости: всё, кроме секретоподобных переменных.
+        // совместимый режим передаёт все переменные, кроме похожих на секреты
         return raw
             .into_iter()
             .filter(|(key, _)| {
@@ -758,8 +752,7 @@ pub(crate) fn safe_process_environment(compatibility: bool) -> HashMap<String, S
     ];
     let mut result = HashMap::new();
     for (key, value) in raw {
-        // на Windows сравнение регистронезависимое, на unix — точное
-        // плюс префикс LC_.
+        // в Windows имена сравниваются без учёта регистра; Unix также передаёт `LC_*`
         let keep = if cfg!(windows) {
             passthrough.contains(&key.to_uppercase().as_str())
         } else {
@@ -812,7 +805,6 @@ mod tests {
         let java = make_java(&root);
         let resolved = validate_java_path(&java, false).unwrap();
         assert_eq!(resolved, canonical_path(&java).unwrap());
-        // каталог JDK с allow_directory подставляет bin/java.
         assert_eq!(validate_java_path(&root.join("jdk"), true).unwrap(), resolved);
     }
 
@@ -831,7 +823,6 @@ mod tests {
         );
         let missing = validate_java_path(&root.join("nope").join("bin").join("java"), false).unwrap_err();
         assert!(missing.contains("Java executable не найден"));
-        // доступность записи для группы — отказ.
         let java = make_java(&root);
         fs::set_permissions(&java, fs::Permissions::from_mode(0o775)).unwrap();
         let error = validate_java_path(&java, false).unwrap_err();

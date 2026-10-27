@@ -1,4 +1,4 @@
-// анализ шейдерпаков. решение «работает или нет» строится на разборе
+// анализ шейдерпаков и совместимости с версиями игры
 use regex::Regex;
 use serde_json::{json, Value};
 use std::fs::{self, File};
@@ -76,7 +76,7 @@ pub fn shader_analyze(request: &Value) -> Result<Value, String> {
     let analysis = analyze_shaderpack(&shader_path, Some(&requested))?;
     let gpu = gpu_profile();
     let verdict = complexity_verdict(&analysis, &gpu);
-    // iris в модах? без него шейдеры в игре не включатся
+    // бенчмарк доступен только при установленном Iris
     let mods_dir = info.path.join("mods");
     let has_iris = fs::read_dir(&mods_dir)
         .map(|entries| {
@@ -94,7 +94,6 @@ pub fn shader_analyze(request: &Value) -> Result<Value, String> {
     }))
 }
 
-// сложность пака против уровня видеокарты — без запуска игры
 fn complexity_verdict(analysis: &Value, gpu: &Value) -> Value {
     let complexity = analysis.get("complexity").and_then(Value::as_i64).unwrap_or(0);
     let tier = gpu.get("tier").and_then(Value::as_str).unwrap_or("mid");
@@ -156,8 +155,7 @@ pub(crate) fn analyze_shaderpack(source: &Path, requested_version: Option<&str>)
         }
         let file = File::open(source).map_err(|error| format!("Шейдерпак не читается: {error}"))?;
         let mut archive = zip::ZipArchive::new(file).map_err(|_| "Это не архив шейдерпака".to_owned())?;
-        // один проход по архиву: имена для структуры + содержимое сканируемых
-        // файлов сразу, без повторных открытий
+        // читаем архив за один проход, не открывая записи повторно
         let mut entries: Vec<(String, u64)> = Vec::new();
         let mut contents: Vec<(String, Vec<u8>)> = Vec::new();
         let mut scanned_total = 0usize;
@@ -166,7 +164,7 @@ pub(crate) fn analyze_shaderpack(source: &Path, requested_version: Option<&str>)
             if item.is_dir() {
                 continue;
             }
-            let name = item.name().replace('\\', "/");
+            let name = item.name().map(|v| v.replace('\\', "/")).unwrap_or_default();
             let size = item.size();
             entries.push((name.clone(), size));
             if scannable(&name) && size <= MAX_SCANNED_FILE_BYTES as u64 && scanned_total < MAX_SCANNED_TOTAL_BYTES {
@@ -289,7 +287,7 @@ fn analyze_entries(name: String, entries: &[(String, u64)]) -> Result<Analysis, 
 }
 
 fn scan_content(analysis: &mut Analysis, contents: &[(String, Vec<u8>)]) {
-    let mut compiled: Vec<(&'static str, Regex)> = feature_patterns()
+    let compiled: Vec<(&'static str, Regex)> = feature_patterns()
         .iter()
         .filter_map(|(feature, pattern)| Regex::new(pattern).ok().map(|regex| (*feature, regex)))
         .collect();
@@ -316,7 +314,6 @@ fn scan_content(analysis: &mut Analysis, contents: &[(String, Vec<u8>)]) {
             }
             continue;
         }
-        // каждая стадия обязана начинаться с #version — берём реальный GLSL
         if let Some(captures) = version_directive.captures(&text) {
             if let Some(version) = captures.get(1).and_then(|m| m.as_str().parse::<u32>().ok()) {
                 analysis.facts.max_glsl = analysis.facts.max_glsl.max(version);
@@ -357,7 +354,7 @@ fn scan_content(analysis: &mut Analysis, contents: &[(String, Vec<u8>)]) {
     }
 }
 
-// supportedVersions=1.16.5-1.21.1 — Iris-синтаксис: диапазон или список
+// `supportedVersions` может быть списком версий или диапазоном
 fn parse_supported_versions(raw: &str, facts: &mut PackFacts) {
     let raw = raw.trim();
     if raw.is_empty() {

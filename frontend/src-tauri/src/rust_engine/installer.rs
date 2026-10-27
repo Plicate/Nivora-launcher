@@ -1,4 +1,3 @@
-// установка версии Minecraft в экземпляр: клиент, библиотеки с нативами,
 use serde_json::{json, Map, Value};
 use std::cell::RefCell;
 use std::fs::{self, File};
@@ -45,8 +44,7 @@ pub(crate) struct MinecraftInstaller {
 impl MinecraftInstaller {
     pub(crate) fn new(config: &ConfigStore, http: Arc<HttpClient>) -> Result<Self, String> {
         let instances_root = config.game_dir()?.join("instances");
-        // load_existing сравнивает канонизированные пути — корень тоже
-        // канонизируем, когда он уже существует.
+        // канонизируем корень, если он уже существует, как и пути в `load_existing`
         let instances_root = canonical_path(&instances_root).unwrap_or(instances_root);
         Ok(Self {
             repository: Mutex::new(VersionRepository::new(config, Some(http.clone()))?),
@@ -57,13 +55,6 @@ impl MinecraftInstaller {
             max_workers: config.int_setting("max_downloads").clamp(1, 32) as usize,
             http,
         })
-    }
-
-    fn check_cancelled(&self) -> Result<(), String> {
-        match &self.http.cancellation {
-            Some(token) => token.check(),
-            None => Ok(()),
-        }
     }
 
     fn repository(&self) -> std::sync::MutexGuard<'_, VersionRepository> {
@@ -110,6 +101,76 @@ impl MinecraftInstaller {
         }
     }
 
+    /// возвращает доступные версии загрузчика для Minecraft
+    pub(crate) fn loader_choices(&self, loader: &str, minecraft_version: &str) -> Result<Vec<Value>, String> {
+        self.loaders.choices(loader, minecraft_version)
+    }
+
+    /// переустанавливает версию игры и загрузчик, сохраняя mods и config
+    /// при ошибке восстанавливает прежний каталог версии из резервной копии
+    pub(crate) fn repair_version(
+        &mut self,
+        instance_dir: &Path,
+        minecraft_version: &str,
+        loader: &str,
+        loader_version: Option<&str>,
+        version_id: Option<&str>,
+    ) -> Result<InstallResult, String> {
+        let instance_dir = &instance_absolute(instance_dir);
+        if instance_dir.as_path() == self.instances_root.as_path()
+            || !within(instance_dir, &self.instances_root)
+            || !instance_dir.is_dir()
+        {
+            return Err(format!("Недопустимый путь экземпляра: {}", instance_dir.display()));
+        }
+        let name = instance_dir
+            .file_name()
+            .map(|value| value.to_string_lossy().to_string())
+            .unwrap_or_default();
+        if self.instance_dir(&name).as_path() != instance_dir.as_path() {
+            return Err(format!("Имя экземпляра не соответствует папке: {name}"));
+        }
+        let minecraft_version = minecraft_version.trim();
+        if minecraft_version.is_empty() {
+            return Err("Не указана версия Minecraft".to_owned());
+        }
+        let target_version = version_id
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(minecraft_version)
+            .to_owned();
+        safe_version_id(&target_version)?;
+        let versions_root = instance_dir.join("versions");
+        if is_symlink(&versions_root) {
+            return Err("Каталог версий является символьной ссылкой".to_owned());
+        }
+        std::fs::create_dir_all(&versions_root).map_err(|_| "Не удалось создать каталог версий".to_owned())?;
+        let version_dir = versions_root.join(&target_version);
+        let backup = versions_root.join(format!(".trial-repair-{}.part", random_hex(16)));
+        let mut moved = false;
+        if let Ok(meta) = fs::symlink_metadata(&version_dir) {
+            if meta.is_symlink() || !meta.is_dir() {
+                return Err(format!("Каталог версии не является папкой: {target_version}"));
+            }
+            if contains_symlink(&version_dir, instance_dir) {
+                return Err("Каталог версии содержит символьные ссылки".to_owned());
+            }
+            fs::rename(&version_dir, &backup)
+                .map_err(|_| format!("Не удалось защитить каталог версии {target_version}"))?;
+            moved = true;
+        }
+        let result = self.install(minecraft_version, loader, loader_version, Some(&name), false, false);
+        if result.is_err() && moved {
+            if fs::symlink_metadata(&version_dir).is_ok() {
+                let _ = remove_instance_path(&version_dir);
+            }
+            let _ = fs::rename(&backup, &version_dir);
+        } else if moved && backup.symlink_metadata().is_ok() {
+            let _ = remove_instance_path(&backup);
+        }
+        result
+    }
+
     pub(crate) fn load_existing(&mut self, instance_dir: &Path, version_id: Option<&str>) -> Result<InstallResult, String> {
         let instance_dir = &instance_absolute(instance_dir);
         if instance_dir.as_path() == self.instances_root.as_path() || !within(instance_dir, &self.instances_root) || !instance_dir.is_dir() {
@@ -139,7 +200,7 @@ impl MinecraftInstaller {
                                     let path = file.path();
                                     if path.extension().map(|extension| extension == "json").unwrap_or(false)
                                         && !is_symlink(&path)
-                                        && !contains_symlink(&path.parent().unwrap(), instance_dir)
+                                        && !contains_symlink(path.parent().unwrap(), instance_dir)
                                         && within(&path, instance_dir)
                                     {
                                         candidates.push(path);
@@ -178,7 +239,7 @@ impl MinecraftInstaller {
             let parent_id = version_json.get("inheritsFrom").and_then(Value::as_str).unwrap_or("").trim().to_owned();
             if !parent_id.is_empty() && parent_id != version_id {
                 // профили forge/neoforge наследуют ванильный JSON: без
-                // родителя нет mainClass и половины classpath.
+                // родителя нет mainClass и половины classpath
                 if let Ok(parent) = self.repository().resolve(&parent_id) {
                     version_json = merge_version_json(&parent, &version_json);
                 }
@@ -248,9 +309,7 @@ impl MinecraftInstaller {
         })
     }
 
-    // четыре независимые пачки файлов качаются одновременно: клиент, библиотеки,
-    // ассеты и лог-конфиг не зависят друг от друга, а последовательный прогон
-    // держал канал впустую — каждая стадия ждала окончания предыдущей.
+    // независимые файлы загружаются параллельно, чтобы не простаивало соединение
     fn run_parallel_downloads(
         &self,
         instance: &Path,
@@ -422,7 +481,7 @@ impl MinecraftInstaller {
         let state = journal.lock().unwrap_or_else(|poison| poison.into_inner()).snapshot(instance, &version_dir)?;
         let mut libraries: Vec<PathBuf> = Vec::new();
         let mut needs_native_extraction = !repair_only || !had_natives;
-        // серверным экземплярам natives не нужны вовсе.
+        // серверным экземплярам natives не нужны вовсе
         let bundle_natives = true;
         let empty_libraries = Vec::new();
         let entries = version_json.get("libraries").and_then(Value::as_array).unwrap_or(&empty_libraries);
@@ -589,8 +648,7 @@ impl MinecraftInstaller {
                 let coordinates: Vec<&str> = name.split(':').collect();
                 let native_only = coordinates.len() >= 4 && coordinates[3].starts_with("natives-");
                 let excluded = extract_excludes(library);
-                if native_only && artifact.is_some() {
-                    let artifact = artifact.unwrap();
+                if let Some(artifact) = artifact.filter(|_| native_only) {
                     let path = artifact.get("path").and_then(Value::as_str).filter(|value| !value.is_empty()).map(str::to_owned);
                     let path = match path {
                         Some(path) => path,
@@ -624,7 +682,7 @@ impl MinecraftInstaller {
         Ok(libraries)
     }
 
-    // файл библиотеки уже на месте и совпадает с метаданными — качать не надо
+    // если файл на месте и метаданные совпадают, повторная загрузка не нужна
     fn library_file_ready(&self, instance: &Path, destination: &Path, metadata: Option<&Value>, repair_only: bool, state: &Map<String, Value>) -> bool {
         if let Some(metadata) = metadata {
             if integrity_cache_matches(instance, destination, state, metadata) {
@@ -713,16 +771,15 @@ impl MinecraftInstaller {
         }
         if !jobs.is_empty() {
             super::events::emit_status(&format!("Загружаю ассеты: {} файлов…", jobs.len()));
-            // ассеты — тысячи мелких файлов, поэтому воркеров больше, чем
-            // заявлено в настройках: держим 2x с потолком 32
+            // для множества мелких ассетов используем до 32 потоков
             let workers = (self.max_workers * 2).clamp(8, 32);
             let total_jobs = jobs.len();
             let queue = Arc::new(std::sync::Mutex::new(jobs.into_iter()));
             // после первой ошибки остальные потоки не берут новые файлы:
-            // иначе установка «висела», докачивая тысячи assets впустую.
+            // иначе установка "висела", докачивая тысячи assets впустую
             let failed = Arc::new(std::sync::atomic::AtomicBool::new(false));
             // счётчик готовых файлов: раз в 250 файлов сообщаем прогресс,
-            // иначе журнал ACTIVITY съедают тысячи одинаковых строк.
+            // иначе журнал ACTIVITY съедают тысячи одинаковых строк
             let completed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
             std::thread::scope(|scope| {
                 let mut handles = Vec::new();
@@ -1170,8 +1227,7 @@ fn platform_key() -> &'static str {
     }
     #[cfg(not(windows))]
     {
-        // и в natives, и в правилах Mojang платформа называется «osx» —
-        // не darwin и не macos.
+        // mojang и список natives называют платформу macOS `osx`
         match std::env::consts::OS {
             "linux" => "linux",
             "macos" => "osx",
@@ -1180,7 +1236,7 @@ fn platform_key() -> &'static str {
     }
 }
 
-/// bool() из Python для полей запроса: пустая строка и ноль — ложь.
+/// пустые строки и ноль считаются ложью; остальные значения считаются истинными
 fn truthy(value: Option<&Value>) -> bool {
     match value {
         None | Some(Value::Null) => false,
@@ -1230,7 +1286,7 @@ fn ensure_safe_directory(path: &Path, root: &Path, label: &str) -> Result<(), St
     }
 }
 
-fn safe_version_id(value: &str) -> Result<(), String> {
+pub(crate) fn safe_version_id(value: &str) -> Result<(), String> {
     let valid = !value.is_empty()
         && value.chars().count() <= 200
         && value != "."
@@ -1256,8 +1312,7 @@ fn safe_relative_path(value: &str, label: &str) -> Result<PathBuf, String> {
     let normalized = value.replace('\\', "/");
     let relative = Path::new(&normalized);
     if relative.is_absolute() || normalized.is_empty() || normalized.split('/').any(|part| part.is_empty() || part == ".." || part == ".") {
-        // python пропускает только «..» и абсолютные; пустые части между
-        // слешами Path нормализует, мы отвергаем сразу — строже и предсказуемее.
+        // запрещаем абсолютные пути и переходы через ..; пустые части тоже отклоняем
         if relative.is_absolute() || normalized.split('/').any(|part| part == "..") {
             return Err(format!("Небезопасный путь {label}: {value}"));
         }
@@ -1289,9 +1344,7 @@ fn integrity_metadata(info: &Value) -> Result<Option<Value>, String> {
     Ok(if metadata.is_empty() { None } else { Some(Value::Object(metadata)) })
 }
 
-// стадии загрузки идут параллельно и делят общий .trial-integrity каталога
-// версии: журнал читает его один раз, копит записи в памяти и сбрасывает на
-// диск в конце прогона — иначе последняя запись затирала бы чужие.
+// общий журнал .trial-integrity записываем один раз после параллельных загрузок
 #[derive(Default)]
 struct IntegrityJournal {
     states: HashMap<PathBuf, Map<String, Value>>,
@@ -1484,7 +1537,6 @@ fn rule_matches(rule: &Value) -> bool {
         }
     }
     if let Some(features) = rule.get("features").and_then(Value::as_object) {
-        // лаунчер — обычный десктопный клиент, флаговые сборки не поддержаны.
         if features.values().any(|value| truthy(Some(value))) {
             return false;
         }
@@ -1535,7 +1587,7 @@ fn safe_extract(archive: &Path, destination: &Path, excluded: &[String]) -> Resu
     let mut total_size: u64 = 0;
     for index in 0..handle.len() {
         let mut item = handle.by_index(index).map_err(|_| format!("Native library не является ZIP/JAR: {}", archive.display()))?;
-        let name = item.name().replace('\\', "/");
+        let name = item.name().map(|v| v.replace('\\', "/")).unwrap_or_default();
         if name.ends_with('/') || name.starts_with("META-INF/") || excluded.iter().any(|value| name == *value || name.starts_with(&format!("{}/", value.trim_end_matches('/')))) {
             continue;
         }
@@ -1556,7 +1608,7 @@ fn safe_extract(archive: &Path, destination: &Path, excluded: &[String]) -> Resu
 }
 
 #[cfg(unix)]
-fn extract_member(item: &mut zip::read::ZipFile<'_>, destination: &Path, parts: &[&str], total_size: &u64) -> Result<u64, String> {
+fn extract_member<R: Read + ?Sized>(item: &mut zip::read::ZipFile<'_, R>, destination: &Path, parts: &[&str], total_size: &u64) -> Result<u64, String> {
     use std::os::fd::FromRawFd;
     fn to_cstring(value: &str) -> Result<std::ffi::CString, String> {
         std::ffi::CString::new(value).map_err(|_| "Небезопасный путь в native archive".to_owned())
@@ -1570,7 +1622,7 @@ fn extract_member(item: &mut zip::read::ZipFile<'_>, destination: &Path, parts: 
     if root < 0 {
         return Err(format!("Каталог native archive недоступен: {}", destination.display()));
     }
-    // спускаемся по цепочке каталогов, создавая недостающие (mkdirat).
+    // спускаемся по цепочке каталогов, создавая недостающие (mkdirat)
     let mut parent = root;
     let mut opened = vec![root];
     for part in &parts[..parts.len() - 1] {
@@ -1614,9 +1666,9 @@ fn extract_member(item: &mut zip::read::ZipFile<'_>, destination: &Path, parts: 
 }
 
 #[cfg(not(unix))]
-fn extract_member(item: &mut zip::read::ZipFile<'_>, destination: &Path, parts: &[&str], total_size: &u64) -> Result<u64, String> {
-    // Путь строится от каталога natives: раньше он собирался относительно
-    // текущего каталога процесса, и natives на Windows ложились «не туда».
+fn extract_member<R: Read + ?Sized>(item: &mut zip::read::ZipFile<'_, R>, destination: &Path, parts: &[&str], total_size: &u64) -> Result<u64, String> {
+    // путь строится от каталога natives: раньше он собирался относительно
+    // текущего каталога процесса, и natives на Windows ложились "не туда"
     let target = parts.iter().fold(destination.to_path_buf(), |path, part| path.join(part));
     let parent = target.parent().unwrap_or(destination);
     fs::create_dir_all(parent).map_err(|error| format!("Не удалось создать каталог: {error}"))?;
@@ -2021,6 +2073,73 @@ pub fn install(request: &Value) -> Result<Value, String> {
     }))
 }
 
+/// переустанавливает версию игры или загрузчик без потери mods и config
+pub fn instance_repair_version(request: &Value) -> Result<Value, String> {
+    let name = request.get("instance_name").and_then(Value::as_str).unwrap_or_default().trim().to_owned();
+    if name.is_empty() {
+        return Err("Сначала выберите экземпляр".to_owned());
+    }
+    let config = ConfigStore::load()?;
+    let store = InstanceStore::new(&config)?;
+    let info = store.get(&name)?;
+    if info.game_edition.trim().eq_ignore_ascii_case("bedrock") {
+        return Err("Восстановление версий доступно только для Java-экземпляров".to_owned());
+    }
+    if info.kind.trim().eq_ignore_ascii_case("server") {
+        return Err("Восстановление доступно только для клиентских экземпляров".to_owned());
+    }
+    if info.running {
+        return Err("Остановите экземпляр перед восстановлением".to_owned());
+    }
+    let loader = {
+        let requested = request.get("loader").and_then(Value::as_str).unwrap_or_default().trim().to_lowercase();
+        let fallback = info.loader.trim().to_lowercase();
+        let value = if requested.is_empty() { fallback } else { requested };
+        if value.is_empty() { "vanilla".to_owned() } else { value }
+    };
+    if !matches!(loader.as_str(), "vanilla" | "fabric" | "forge" | "neoforge" | "quilt") {
+        return Err(format!("Неизвестный loader: {loader}"));
+    }
+    let minecraft_version = {
+        let requested = request.get("version").and_then(Value::as_str).unwrap_or_default().trim().to_owned();
+        if requested.is_empty() { info.minecraft_version.trim().to_owned() } else { requested }
+    };
+    if minecraft_version.is_empty() {
+        return Err(format!("У экземпляра «{}» не определена версия Minecraft", info.name));
+    }
+    let loader_version = request
+        .get("loader_version")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .or_else(|| {
+            let resolved = super::instances::loader_version_of(&info.path, &info.version_id, &info.minecraft_version, &loader);
+            if resolved.is_empty() { None } else { Some(resolved) }
+        });
+    let version_id = {
+        let value = info.version_id.trim();
+        if value.is_empty() { None } else { Some(value.to_owned()) }
+    };
+    let _lock = super::server::InstanceLock::acquire(&config.paths.data_home, &info.name)?;
+    let http = super::net::client_from_settings(config.settings(), "")?;
+    let mut installer = MinecraftInstaller::new(&config, http)?;
+    let result = installer.repair_version(
+        &info.path,
+        &minecraft_version,
+        &loader,
+        loader_version.as_deref(),
+        version_id.as_deref(),
+    )?;
+    super::events::emit_status_event("workspace-changed", "Версия и модлоадер восстановлены.");
+    let list: Vec<Value> = store.list().iter().map(|info| info.public()).collect();
+    Ok(json!({
+        "version_id": result.version_id,
+        "instance_dir": result.instance_dir.to_string_lossy(),
+        "instances": list,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2118,14 +2237,14 @@ mod tests {
         let inner = root.join("instance");
         fs::create_dir_all(&inner).unwrap();
         assert!(!contains_symlink(&inner, &root));
-        // путь вне root останавливает подъём к корню.
+        // путь вне root останавливает подъём к корню
         assert!(contains_symlink(Path::new("/etc/passwd"), &root));
         #[cfg(unix)]
         {
             std::os::unix::fs::symlink(&inner, root.join("link")).unwrap();
             assert!(is_symlink(&root.join("link")));
         }
-        // «..»-суффикс лексически внутри root — как в Python, подъём по
+        // проверка отслеживает символьные ссылки, но не нормализует сегменты `..`
         assert!(!contains_symlink(&root.join(".."), &root));
         let _ = fs::remove_dir_all(&root);
     }

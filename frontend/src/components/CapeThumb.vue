@@ -1,6 +1,6 @@
 <script setup lang="ts">
 // лицевая сторона плаща, как в Prism Launcher: из развёртки 64×32 (или HD)
-// вырезается внешняя грань (1,1)–(11,17) и рисуется без сглаживания.
+// область плаща от (1,1) до (11,17) рисуется без сглаживания
 import { onMounted, ref, watch } from 'vue'
 import { capeTextureScale } from '../services/skinRenderer'
 
@@ -18,7 +18,7 @@ function draw() {
     const context = target.getContext('2d')
     if (!context) return
     const scale = capeTextureScale(image.naturalWidth, image.naturalHeight)
-    // холст в пикселях текстуры, растягивается CSS-ом (image-rendering: pixelated).
+    // холст в пикселях текстуры, растягивается CSS-ом (image-rendering: pixelated)
     target.width = Math.max(1, Math.round(10 * scale))
     target.height = Math.max(1, Math.round(16 * scale))
     context.imageSmoothingEnabled = false

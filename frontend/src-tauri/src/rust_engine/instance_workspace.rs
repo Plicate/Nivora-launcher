@@ -1,6 +1,3 @@
-// порт python-модуля instance_workspace.py: рабочее пространство Java-
-// экземпляра — настройки, ресурсы (моды/ресурспаки/шейдеры), миры (NBT) и
-// список серверов. Имена и сообщения — дословно как в воркере.
 use base64::Engine as _;
 use flate2::read::GzDecoder;
 use regex::Regex;
@@ -59,7 +56,7 @@ const INSTANCE_SECURITY_KEYS: [&str; 4] = [
     "security_permissions",
     "security_policy_version",
 ];
-/// обычные (незащищённые) ключи настроек — порядок как в DEFAULT_INSTANCE_SETTINGS.
+/// обычные ключи настроек в порядке `DEFAULT_INSTANCE_SETTINGS`
 const INSTANCE_REGULAR_KEYS: [&str; 12] = [
     "memory",
     "graphics_mode",
@@ -144,6 +141,19 @@ fn default_instance_settings_map() -> Map<String, Value> {
     );
     values.insert("library_overrides".into(), json!({}));
     values
+}
+
+fn acquire_stopped_instance_lock(
+    instance_name: &str,
+    running: bool,
+    data_home: &Path,
+) -> Result<super::process_guard::InstanceProcessLock, String> {
+    if running {
+        return Err("Остановите игру перед переключением модов".to_owned());
+    }
+    let mut lock = super::process_guard::InstanceProcessLock::new(data_home, instance_name);
+    lock.acquire()?;
+    Ok(lock)
 }
 
 pub(crate) struct InstanceWorkspace {
@@ -317,8 +327,6 @@ impl InstanceWorkspace {
         self.list_assets_from_directory(&directory, kind)
     }
 
-    /// станет горячим после порта modpacks.py (installed-проекты каталогов).
-    #[allow(dead_code)]
     pub(crate) fn installed_projects(
         &self,
         name: &str,
@@ -386,8 +394,6 @@ impl InstanceWorkspace {
         Ok(result)
     }
 
-    /// станет горячим после порта modpacks.py (installed-проекты каталогов).
-    #[allow(dead_code)]
     pub(crate) fn remove_installed_project(
         &self,
         name: &str,
@@ -411,7 +417,6 @@ impl InstanceWorkspace {
                 .file_name()
                 .map(|value| value.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            // имя метаданных — ".{имя ресурса}{suffix}"
             let target_name = file_name
                 .strip_prefix('.')
                 .unwrap_or(&file_name)
@@ -769,7 +774,7 @@ impl InstanceWorkspace {
         Ok(directory)
     }
 
-    fn world_directory(&self, name: &str, world_id: &str) -> Result<PathBuf, String> {
+    pub(crate) fn world_directory(&self, name: &str, world_id: &str) -> Result<PathBuf, String> {
         let saves = self.java_instance(name)?.path.join("saves");
         if is_symlink(&saves) {
             return Err("Каталог миров является символьной ссылкой".to_owned());
@@ -798,7 +803,6 @@ impl InstanceWorkspace {
     }
 }
 
-// ------------------------------------------------------------- операции ----
 
 pub(crate) fn instance_details(request: &Value) -> Result<Value, String> {
     let workspace = InstanceWorkspace::new()?;
@@ -830,12 +834,20 @@ pub(crate) fn remove_instance_asset(request: &Value) -> Result<Value, String> {
         .get("name")
         .and_then(Value::as_str)
         .unwrap_or_default();
+    let kind = request
+        .get("kind")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let _lock = if kind == "mods" {
+        let info = workspace.java_instance(name)?;
+        let config = ConfigStore::load()?;
+        Some(acquire_stopped_instance_lock(&info.name, info.running, &config.paths.data_home)?)
+    } else {
+        None
+    };
     workspace.remove_asset(
         name,
-        request
-            .get("kind")
-            .and_then(Value::as_str)
-            .unwrap_or_default(),
+        kind,
         request
             .get("path")
             .and_then(Value::as_str)
@@ -852,8 +864,11 @@ pub(crate) fn toggle_mod(request: &Value) -> Result<Value, String> {
         .get("name")
         .and_then(Value::as_str)
         .unwrap_or_default();
+    let info = workspace.java_instance(name)?;
+    let config = ConfigStore::load()?;
+    let _lock = acquire_stopped_instance_lock(&info.name, info.running, &config.paths.data_home)?;
     let result = workspace.toggle_mod(
-        name,
+        &info.name,
         request
             .get("path")
             .and_then(Value::as_str)
@@ -876,15 +891,24 @@ pub(crate) fn import_asset(request: &Value) -> Result<Value, String> {
         .decode(encoded)
         .map_err(|_| "Импортируемый файл повреждён".to_owned())?;
     let workspace = InstanceWorkspace::new()?;
+    let name = request
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let kind = request
+        .get("kind")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let _lock = if kind == "mods" {
+        let info = workspace.java_instance(name)?;
+        let config = ConfigStore::load()?;
+        Some(acquire_stopped_instance_lock(&info.name, info.running, &config.paths.data_home)?)
+    } else {
+        None
+    };
     let result = workspace.import_asset(
-        request
-            .get("name")
-            .and_then(Value::as_str)
-            .unwrap_or_default(),
-        request
-            .get("kind")
-            .and_then(Value::as_str)
-            .unwrap_or_default(),
+        name,
+        kind,
         request
             .get("file_name")
             .and_then(Value::as_str)
@@ -893,6 +917,42 @@ pub(crate) fn import_asset(request: &Value) -> Result<Value, String> {
     )?;
     emit_status_event("workspace-changed", "Ресурс импортирован.");
     Ok(result)
+}
+
+/// удаляет ресурс по project_id из каталога модов, плагинов, шейдеров или датапаков
+pub(crate) fn mods_remove(request: &Value) -> Result<Value, String> {
+    let workspace = InstanceWorkspace::new()?;
+    let name = request
+        .get("instance_name")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_owned();
+    let project_type = request
+        .get("project_type")
+        .and_then(Value::as_str)
+        .unwrap_or("mod")
+        .trim()
+        .to_lowercase();
+    if project_type == "modpack" {
+        return Err("Удаление целого модпака через каталог не поддерживается. Удалите или восстановите файлы экземпляра отдельно.".to_owned());
+    }
+    let info = workspace.java_instance(&name)?;
+    if info.running {
+        return Err("Остановите экземпляр перед удалением ресурса".to_owned());
+    }
+    // catalog_id фильтрует результаты, в том числе когда строка пуста
+    let catalog_id = request.get("catalog_id").and_then(Value::as_str).unwrap_or_default().to_owned();
+    let config = ConfigStore::load()?;
+    let _lock = acquire_stopped_instance_lock(&info.name, info.running, &config.paths.data_home)?;
+    let (details, removed) = workspace.remove_installed_project(
+        &name,
+        &project_type,
+        request.get("project_id").and_then(Value::as_str).unwrap_or_default(),
+        Some(catalog_id.as_str()),
+    )?;
+    super::events::emit_status_event("workspace-changed", "Ресурс удалён.");
+    Ok(json!({ "removed": removed, "instance_name": info.name, "details": details }))
 }
 
 pub(crate) fn mods_remove_files(request: &Value) -> Result<Value, String> {
@@ -904,9 +964,8 @@ pub(crate) fn mods_remove_files(request: &Value) -> Result<Value, String> {
         .trim()
         .to_owned();
     let info = workspace.java_instance(&name)?;
-    if info.running {
-        return Err("Остановите игру перед удалением модов".to_owned());
-    }
+    let config = ConfigStore::load()?;
+    let _lock = acquire_stopped_instance_lock(&info.name, info.running, &config.paths.data_home)?;
     let Some(paths) = request.get("paths").and_then(Value::as_array) else {
         return Err("Не выбрано ни одного мода".to_owned());
     };
@@ -933,7 +992,6 @@ pub(crate) fn mods_remove_files(request: &Value) -> Result<Value, String> {
     }))
 }
 
-// ------------------------------------------------------- нормализация ----
 
 fn normalize_instance_settings(values: &Map<String, Value>) -> Result<Value, String> {
     let mut result = default_instance_settings_map();
@@ -1028,8 +1086,7 @@ fn normalize_instance_settings(values: &Map<String, Value>) -> Result<Value, Str
     result.insert("console_colors".into(), Value::Object(console_colors));
     let profile = normalize_security_profile(result.get("security_profile"))?;
     result.insert("security_profile".into(), json!(profile));
-    // аргументы JVM задаются на экземпляр и перекрывают профиль запуска —
-    // нормализация та же, что у глобальных профилей.
+    // аргументы экземпляра перекрывают профиль запуска и нормализуются так же
     result.insert(
         "jvm_arguments".into(),
         config::profile_arguments(result.get("jvm_arguments")),
@@ -1053,8 +1110,7 @@ fn normalize_instance_settings(values: &Map<String, Value>) -> Result<Value, Str
         .and_then(coerce_int)
         .unwrap_or(0);
     if previous_policy_version < SECURITY_POLICY_VERSION {
-        // миграция v4: ≤3 молча выключали network:game, и Minecraft не видел
-        // серверов (ручной выбор пользователя после миграции не трогаем)
+        // миграция v4 восстанавливает network:game, если пользователь не менял выбор
         for permission in ["network:game", "desktop:display", "desktop:audio"] {
             if !permissions.contains(&permission.to_owned()) {
                 permissions.push(permission.to_owned());
@@ -1145,8 +1201,7 @@ fn pretty_asset_name(file_name: &str) -> String {
     }
     let version = asset_version_regex();
     let value = version.replace(&value, "").into_owned();
-    // re.sub(r"(?<!^)(?=[A-Z])", " ", …): пробел перед каждой заглавной
-    // кроме первой — regex-крейт без lookbehind, поэтому вручную.
+    // пробелы добавляются отдельно: регулярные выражения не поддерживают просмотр назад
     let mut spaced = String::with_capacity(value.len() * 2);
     for (index, symbol) in value.chars().enumerate() {
         if index > 0 && symbol.is_ascii_uppercase() {
@@ -1194,7 +1249,6 @@ fn asset_image_data_url(value: &[u8]) -> String {
     )
 }
 
-// --------------------------------------------------- метаданные ресурсов ----
 
 fn asset_metadata(path: &Path) -> BTreeMap<String, String> {
     let metadata = read_project_metadata(path);
@@ -1424,7 +1478,7 @@ fn read_zip_entry(archive: &mut zip::ZipArchive<std::fs::File>, name: &str, limi
 
 fn find_archive_icon(archive: &mut zip::ZipArchive<std::fs::File>) -> String {
     let preferred = ["icon.png", "logo.png", "pack.png"];
-    let names: Vec<String> = archive.file_names().map(|name| name.to_owned()).collect();
+    let names: Vec<String> = archive.file_names().filter_map(|name| name.ok()).map(|name| name.to_string()).collect();
     for name in preferred {
         if names.contains(&name.to_owned())
             && !read_zip_entry(archive, name, MAX_ASSET_ICON_BYTES).is_empty()
@@ -1539,7 +1593,7 @@ fn parse_archive_metadata(entry: &str, raw: &[u8]) -> Vec<(String, String)> {
     Vec::new()
 }
 
-/// Option<&Value> → Option<&Map>: ас-объект манифеста или ничего.
+/// возвращает объект JSON или `None`, если значение не объект
 fn object_of(value: Option<&Value>) -> Option<&Map<String, Value>> {
     value.and_then(Value::as_object)
 }
@@ -1566,7 +1620,7 @@ fn metadata_fields(
     fields
 }
 
-/// str(value или text/translate) — как _text_value в Python.
+/// извлекает текст из строк и полей `text` или `translate`
 fn text_value(value: &Value) -> String {
     match value {
         Value::String(text) => text.trim().to_owned(),
@@ -1623,7 +1677,6 @@ fn image_data_url(path: &Path) -> String {
     )
 }
 
-// ------------------------------------------------------------- файловое ----
 
 fn write_instance_settings(path: &Path, values: &Value) -> Result<(), String> {
     let mut payload = Map::new();
@@ -1662,7 +1715,7 @@ fn walk_paths(directory: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-fn directory_size(path: &Path) -> u64 {
+pub(crate) fn directory_size(path: &Path) -> u64 {
     let mut total = 0u64;
     let Ok(entries) = fs::read_dir(path) else {
         return 0;
@@ -1768,7 +1821,6 @@ fn write_private_file(path: &Path, content: &[u8]) -> Result<(), String> {
     }
 }
 
-// ------------------------------------------------------------------ NBT ----
 
 fn read_nbt(path: &Path) -> Result<Value, String> {
     let file_name = path
@@ -1815,8 +1867,7 @@ fn open_nbt_file(path: &Path) -> Result<std::fs::File, String> {
     std::fs::File::open(path).map_err(|_| format!("Не удалось прочитать NBT: {}", path.display()))
 }
 
-/// счётчик прочитанных байт — GzDecoder не отдаёт total_in, а Python-
-/// воркер отклоняет NBT с мусором после gzip-потока (unused_data).
+/// считает прочитанные байты, чтобы отклонить NBT с данными после конца gzip-потока
 struct CountingReader<'a> {
     data: &'a [u8],
     position: usize,
@@ -1976,7 +2027,6 @@ impl<'a> NbtReader<'a> {
     }
 }
 
-// --------------------------------------------------------------- утилиты ----
 
 fn is_symlink(path: &Path) -> bool {
     fs::symlink_metadata(path)
@@ -2018,7 +2068,7 @@ fn coerce_int(value: &Value) -> Option<i64> {
     }
 }
 
-/// str() из Python для значений JSON (None → "None" — как в воркере).
+/// преобразует JSON-значения в текст; null становится строкой `None`
 fn py_display(value: &Value) -> String {
     match value {
         Value::String(text) => text.clone(),
@@ -2036,7 +2086,7 @@ fn py_display_or(value: &Value, fallback: &str) -> String {
     }
 }
 
-/// truthiness значений JSON как в Python (None/False/0/""/пустое — ложь).
+/// считает ложными null, false, ноль, пустую строку и пустые коллекции
 fn py_truthy(value: &Value) -> bool {
     match value {
         Value::Null | Value::Bool(false) => false,
@@ -2067,7 +2117,6 @@ fn asset_version_regex() -> &'static Regex {
     })
 }
 
-// ------------------------------------------------------------ тесты ----
 
 #[cfg(test)]
 mod tests {
@@ -2097,8 +2146,15 @@ mod tests {
     fn normalize_formats_memory_and_checks_total() {
         let mut values = base_settings();
         values["memory"] = json!("2 GiB");
-        let normalized = normalize(values).expect("память разобрана");
-        assert_eq!(normalized["memory"], json!("2GiB"));
+        let normalized = normalize(values);
+        if super::super::config::system_memory_kib() > 3 * 1024 * 1024 {
+            let normalized = normalized.expect("память разобрана");
+            assert_eq!(normalized["memory"], json!("2GiB"));
+        } else {
+            // В системе меньше 2 ГиБ памяти запрос обязан быть отклонён с понятной ошибкой
+            let error = normalized.expect_err("больше системы");
+            assert!(error.contains("не может превышать доступные"), "неожиданная ошибка: {error}");
+        }
 
         let mut values = base_settings();
         values["memory"] = json!("9999999 GiB");
@@ -2179,7 +2235,6 @@ mod tests {
             ])
         );
 
-        // ручной выбор после v4 не перекрашивается
         let mut values = base_settings();
         values["security_policy_version"] = json!(4);
         values["security_permissions"] = json!(["files:instance"]);
@@ -2197,20 +2252,17 @@ mod tests {
         values["jvm_arguments"] = json!(["-Xmx1g", "", 42]);
         let normalized = normalize(values).expect("аргументы");
         assert_eq!(normalized["jvm_preset"], json!("fps"));
-        // profile_arguments фильтрует не-строки — как _profile_arguments
         assert_eq!(normalized["jvm_arguments"], json!(["-Xmx1g"]));
     }
 
     #[test]
     fn pretty_names_drop_versions_and_separators() {
         assert_eq!(pretty_asset_name("My-Cool-Mod_1.2.4.jar"), "My Cool Mod");
-        // версия-суффикс срезается, префикс с +mc… остаётся — как в Python
         assert_eq!(
             pretty_asset_name("sodium-fabric+mc1.21.4-0.6.13.jar"),
             "sodium fabric+mc1.21.4"
         );
         assert_eq!(pretty_asset_name("x.jar.disabled"), "x");
-        // имя из одних разделителей — пустое → «Неизвестный ресурс»
         assert_eq!(pretty_asset_name("-.jar"), "Неизвестный ресурс");
     }
 
@@ -2244,11 +2296,10 @@ mod tests {
     fn servers_nbt() -> Vec<u8> {
         let mut out = vec![10u8];
         out.extend(nbt_string("")); // имя корня
-        out.push(9); // TAG_List "servers"
+        out.push(9); // тип TAG_List "servers"
         out.extend(nbt_string("servers"));
-        out.push(10); // элемент — compound
+        out.push(10); // элемент compound
         out.extend((1i32).to_be_bytes());
-        // первый (и единственный) сервер
         out.push(8);
         out.extend(nbt_string("ip"));
         out.extend(nbt_string("mc.example.com"));
@@ -2309,7 +2360,7 @@ mod tests {
         {
             let file = fs::File::create(&jar).unwrap();
             let mut zip = zip::ZipWriter::new(file);
-            let options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default()
+            let options: zip::write::SimpleFileOptions = zip::write::SimpleFileOptions::default()
                 .compression_method(zip::CompressionMethod::Deflated);
             zip.start_file("fabric.mod.json", options).unwrap();
             zip.write_all(
@@ -2369,8 +2420,6 @@ mod tests {
         let game = data_home.join("game");
         let instance = game.join("instances").join("demo");
         fs::create_dir_all(&instance).unwrap();
-        // легаси-файл с защитными ключами внутри — их выносят в защищённое
-        // хранилище и перезаписывают файл без них.
         fs::write(
             instance.join(INSTANCE_SETTINGS_FILE),
             serde_json::to_string(&json!({
@@ -2385,8 +2434,6 @@ mod tests {
         let workspace = workspace_at_roots(config_home.clone(), data_home, cache_home);
         let settings = workspace.settings("demo").expect("настройки прочитаны");
         assert_eq!(settings["memory"], json!("1GiB"));
-        // легаси-защищённые ключи из файла не переносятся, а сбрасываются
-        // на дефолты защищённого хранилища — и файл переписывается без них
         assert_eq!(settings["java_path"], json!(""));
         assert_eq!(settings["security_profile"], json!("strict"));
 
@@ -2426,7 +2473,7 @@ mod tests {
         let snapshot = workspace.snapshot("demo").expect("снимок");
         assert_eq!(snapshot["instance"]["name"], json!("demo"));
         let assets = snapshot["assets"]["mods"].as_array().expect("моды");
-        assert_eq!(assets.len(), 2); // сайдкар-метаданные не считаются ресурсом
+        assert_eq!(assets.len(), 2); // сопутствующие метаданные не входят в список ресурсов
         let first = &assets[0];
         assert_eq!(first["name"], json!("alpha.jar"));
         assert_eq!(first["enabled"], json!(true));
@@ -2434,13 +2481,26 @@ mod tests {
         let worlds = snapshot["worlds"].as_array().expect("миры");
         assert_eq!(worlds.len(), 1);
         assert_eq!(worlds[0]["id"], json!("World"));
-        // LevelName в NBT нет — имя падает на имя каталога
         assert_eq!(worlds[0]["name"], json!("World"));
         let server_list = snapshot["servers"].as_array().expect("серверы");
         assert_eq!(server_list.len(), 1);
         assert_eq!(server_list[0]["address"], json!("mc.example.com"));
         assert_eq!(server_list[0]["id"], json!("server-0"));
         let _ = fs::remove_dir_all(config_home.parent().unwrap());
+    }
+
+    #[test]
+    fn stopped_instance_guard_rejects_running_state_and_active_process_lock() {
+        let data_home = std::env::temp_dir().join(format!("nivora-mod-toggle-lock-{}", std::process::id()));
+        fs::create_dir_all(&data_home).unwrap();
+        assert!(acquire_stopped_instance_lock("demo", true, &data_home).is_err());
+
+        let mut active = super::super::process_guard::InstanceProcessLock::new(&data_home, "demo");
+        active.acquire().unwrap();
+        let error = acquire_stopped_instance_lock("demo", false, &data_home).err().unwrap();
+        assert!(error.contains("уже запущен"));
+        drop(active);
+        fs::remove_dir_all(&data_home).unwrap();
     }
 
     #[test]
@@ -2465,7 +2525,6 @@ mod tests {
         assert!(mods.join(".mod.jar.disabled.trial-project.json").is_file());
         assert!(snapshot["settings"]["memory"].is_string());
 
-        // повторное выключение — no-op снимок
         workspace
             .toggle_mod("demo", "mod.jar.disabled", false)
             .expect("no-op");
@@ -2496,7 +2555,6 @@ mod tests {
             .import_asset("demo", "mods", "new.jar", b"content")
             .expect("импорт");
         assert!(instance.join("mods").join("new.jar").is_file());
-        // второй файл с тем же именем получает суффикс-2
         workspace
             .import_asset("demo", "mods", "new.jar", b"content-2")
             .expect("повтор");

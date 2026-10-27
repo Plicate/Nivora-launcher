@@ -2,7 +2,6 @@
   "$schema": "https://schema.tauri.app/config/2",
   "bundle": {
     "resources": {
-      "resources/backend/nivora-launcher-backend": "backend/nivora-launcher-backend",
       "resources/backend/nivora-turbo": "backend/nivora-turbo",
       "resources/backend/nivora-modcat": "backend/nivora-modcat",
       "resources/backend/ModScan.java": "backend/ModScan.java",
@@ -14,16 +13,14 @@
         "depends": [
           "bubblewrap",
           "libsecret-tools",
-          "gnome-keyring",
-          "python3"
+          "gnome-keyring"
         ]
       },
       "rpm": {
         "depends": [
           "bubblewrap",
           "libsecret",
-          "gnome-keyring",
-          "python3"
+          "gnome-keyring"
         ]
       }
     }

@@ -1,22 +1,6 @@
 #!/usr/bin/env bash
-# Универсальный сборщик Nivora Launcher: прогоняет платформенные скрипты по
-# списку целей. Совместим с /bin/bash 3.2 (macOS): без ассоциативных массивов.
-#
-#   scripts/build_all.sh                 # цели по умолчанию для этой ОС
-#   scripts/build_all.sh deb rpm         # только перечисленные
-#   MACOS_ARCH=both scripts/build_all.sh macos   # arm64 и x86_64
-#
-# Цели и артефакты (dist/):
-#   windows — build_windows_exe.sh → dist/windows/*-setup.exe, nivora-launcher.exe
-#   arch    — build_arch_package.sh → dist/arch/*.pkg.tar.zst
-#   deb     — build_deb.sh          → dist/deb/*.deb
-#   rpm     — build_rpm.sh          → dist/rpm/*.rpm
-#   macos   — build_macos_app.sh    → dist/macos/Nivora-Launcher_<ver>_<arch>.dmg
-#
-# Каждая цель сама собирает свои нативные хелперы (nivora-turbo, nivora-modcat)
-# под свою платформу и падает, если хелпер не собрался. После цели проверяется,
-# что артефакт действительно появился: «успех» без артефакта невозможен.
-# Падение одной цели не останавливает остальные; итоговый код — ненулевой.
+# запускает платформенные цели; совместим с Bash 3.2 на macOS
+# ошибка одной цели не мешает остальным, но отражается в итоговом коде
 set -euo pipefail
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"

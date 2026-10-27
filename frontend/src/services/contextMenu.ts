@@ -1,4 +1,3 @@
-// контекстное меню лаунчера — своё, вместо системного WebView-меню
 import { reactive } from 'vue'
 
 export interface ContextMenuItem {
@@ -36,8 +35,7 @@ function scheduleCloseOnOutside() {
     if (target?.closest('.context-menu')) return
     closeContextMenu()
   }
-  // mousedown, а не click: меню должно закрываться и от клика по кнопке,
-  // которая его открыла (иначе toggle выглядит залипанием).
+  // в capture phase закрытие сработает на клике, который открыл меню
   window.addEventListener('mousedown', closeOnOutside, { capture: true })
 }
 
@@ -51,23 +49,24 @@ export function closeContextMenu() {
   }
 }
 
-/**
- * Открыть меню у курсора. Координаты — от события contextmenu; к краю окна
- * меню прижимается уже в компоненте, чтобы не вылезти за пределы.
- */
+/** открывает меню у курсора; компонент ограничивает его окном */
 export function openContextMenu(event: MouseEvent, items: ContextMenuItem[], title = '') {
-  if (!items.length) return
+  openContextMenuAt(event.clientX, event.clientY, items, title)
   event.preventDefault()
   event.stopPropagation()
-  contextMenu.x = event.clientX
-  contextMenu.y = event.clientY
+}
+
+/** открывает меню в заданной точке, например при выборе клавишей Enter */
+export function openContextMenuAt(x: number, y: number, items: ContextMenuItem[], title = '') {
+  if (!items.length) return
+  contextMenu.x = x
+  contextMenu.y = y
   contextMenu.title = title
   contextMenu.items = items
   contextMenu.open = true
   scheduleCloseOnOutside()
 }
 
-/** Пункты «редактирования текста» для полей ввода — вместо системного меню. */
 export function textEditMenu(target: HTMLElement): ContextMenuItem[] {
   const field = target.closest('input, textarea') as HTMLInputElement | HTMLTextAreaElement | null
   if (!field) return []
@@ -82,7 +81,7 @@ export function textEditMenu(target: HTMLElement): ContextMenuItem[] {
     { id: 'select', label: 'Выделить всё', icon: 'check', action: () => field.select(), separatorAfter: true },
   ]
   if (field.type === 'password') {
-    // в паролях вырезать/копировать не имеют смысла.
+    // не показываем операции чтения и изменения для пароля
     return [items[3]]
   }
   return items

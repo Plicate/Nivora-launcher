@@ -254,7 +254,7 @@ onMounted(async () => {
     const result = await bridge.cloudStatus()
     applyStatus(result.status)
   } catch {
-    // the settings form remains usable when the desktop bridge is unavailable.
+    // форма остаётся доступна, даже если мост приложения недоступен
   }
 })
 </script>
@@ -263,7 +263,7 @@ onMounted(async () => {
   <section class="panel settings-card settings-card--wide cloud-card">
     <div class="panel-heading">
       <div>
-        <span class="eyebrow">Синхронизация</span>
+        
         <h2><Icon name="cloud" :size="20" /> Файлы в облаке</h2>
           <p>WebDAV сохраняет разрешённые файлы лаунчера, экземпляров, скинов и настроек. Плагины и служебные данные исключены. Пароль и ключ проверки манифеста остаются на этом устройстве: восстановить такую копию на другом устройстве сейчас нельзя.</p>
       </div>

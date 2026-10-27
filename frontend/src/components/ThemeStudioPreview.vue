@@ -2,6 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import Icon from './Icon.vue'
 import type { AppearanceSettings } from '../types'
+import { LAUNCHER_VERSION_LABEL } from '../version'
 
 const props = withDefaults(defineProps<{
   appearance: AppearanceSettings
@@ -158,7 +159,7 @@ const radius = computed(() => ({
 
 const borderColor = (strength = 24) => `color-mix(in srgb, ${token('border')} ${strength}%, transparent)`
 
-// glass-тема: панели полупрозрачны, обои под ними видно насквозь.
+// glass-тема: панели полупрозрачны, обои под ними видно насквозь
 const panelColor = (key: 'panel' | 'panel_raised' | 'panel_soft', alpha: number) => pageTheme.value === 'glass' && props.wallpaperUrl
   ? `color-mix(in srgb, ${token(key)} ${alpha}%, transparent)`
   : token(key)
@@ -208,7 +209,7 @@ const wallpaperStyle = computed(() => ({
 }))
 
 const bannerStyle = computed(() => ({
-  background: `linear-gradient(135deg, ${token('accent')}, color-mix(in srgb, ${token('accent_strong')} 70%, ${token('banner_shade')}))`,
+  background: token('accent'),
 }))
 
 function targetClass(id: string) {
@@ -249,9 +250,6 @@ function replay() {
 
 <template>
   <div class="studio-preview" :style="rootStyle">
-    <!-- Подпись сверху: без неё миниатюра лаунчера выглядит как
-         «непонятно откуда взявшееся уменьшенное окно», а не предпросмотр
-         оформления, который можно кликать. -->
     <div class="studio-preview-caption">
       <Icon name="eye" :size="13" :stroke-width="1.8" />
       <strong>Предпросмотр оформления</strong>
@@ -514,7 +512,7 @@ function replay() {
               @pointerleave="hover(null)"
             >
               <span class="studio-preview-dot" :style="{ background: token('success') }" />
-              <small>Синхронизировано · Nivora 1.1</small>
+              <small>Синхронизировано · Nivora {{ LAUNCHER_VERSION_LABEL }}</small>
             </footer>
           </div>
         </div>
@@ -557,7 +555,7 @@ function replay() {
 .studio-preview-brand-copy small { font-size: 9px; color: var(--preview-muted); }
 .studio-preview-nav { display: flex; align-items: center; gap: 8px; width: 100%; padding: 6px 8px; border: 0; color: var(--preview-quiet); background: transparent; font: inherit; font-size: 10.5px; text-align: left; cursor: pointer; }
 .studio-preview-nav:hover { color: var(--preview-text); background: color-mix(in srgb, var(--preview-text) 7%, transparent); }
-.studio-preview-nav--active { color: var(--preview-text); background: color-mix(in srgb, var(--preview-accent) 20%, transparent); box-shadow: inset 2px 0 0 var(--preview-accent); }
+.studio-preview-nav--active { color: var(--preview-text); background: color-mix(in srgb, var(--preview-text) 9%, transparent); }
 .studio-preview-sidebar--compact .studio-preview-nav { justify-content: center; padding: 7px 0; }
 .studio-preview-sidebar--bar .studio-preview-brand { padding: 0 10px 0 4px; }
 .studio-preview-sidebar--bar .studio-preview-nav { width: auto; padding: 6px 9px; }
@@ -578,7 +576,7 @@ function replay() {
 .studio-preview-tabs { display: flex; gap: 5px; }
 .studio-preview-tab { padding: 4px 11px; border: 1px solid var(--preview-border); color: var(--preview-muted); background: transparent; font: inherit; font-size: 9.5px; font-weight: 600; cursor: pointer; }
 .studio-preview-tab:hover { color: var(--preview-text); background: color-mix(in srgb, var(--preview-text) 6%, transparent); }
-.studio-preview-tab--active { color: var(--preview-accent-foreground, #fff); border-color: color-mix(in srgb, var(--preview-accent) 55%, transparent); background: var(--preview-accent); }
+.studio-preview-tab--active { color: var(--preview-text); border-color: transparent; background: color-mix(in srgb, var(--preview-text) 10%, transparent); }
 .studio-preview-rows { display: grid; min-height: 0; flex: 1; align-content: start; gap: calc(var(--preview-gap, 8px) * .8); overflow: hidden; }
 .studio-preview-row { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .studio-preview-mark { display: grid; width: 30px; height: 30px; flex: 0 0 30px; place-items: center; color: #fff; }
@@ -615,7 +613,6 @@ function replay() {
 @keyframes preview-slide { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
 @keyframes preview-scale { from { opacity: 0; transform: scale(.97); } to { opacity: 1; transform: none; } }
 
-/* Интерактивный выбор: аутлайн повторяет контур элемента, как в Blender. */
 .preview-target { cursor: pointer; }
 .preview-target--hovered { outline: 1.5px dashed color-mix(in srgb, var(--accent, var(--blue)) 72%, transparent); outline-offset: 2px; }
 .preview-target--selected { outline: 2px solid var(--accent, var(--blue)); outline-offset: 2px; }

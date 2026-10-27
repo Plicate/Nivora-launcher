@@ -1,12 +1,11 @@
-// конвейер отрисовки обоев: исходная картинка → canvas-размытие → blob-URL.
-export interface WallpaperRenderer {
-  /** null — запрос устарел, значение не трогаем; '' — обоев нет. */
+interface WallpaperRenderer {
+  /** null означает устаревший запрос, пустая строка означает отсутствие обоев */
   render(source: string, blur: number): Promise<string | null>
   release(): void
 }
 
-/** Результат подготовки к сохранению: готовые байты WebP в base64. */
-export interface PreparedWallpaper {
+/** результат подготовки к сохранению: готовые байты WebP в base64 */
+interface PreparedWallpaper {
   fileName: string
   data: string
   previewUrl: string
@@ -67,8 +66,7 @@ export function createWallpaperRenderer(): WallpaperRenderer {
       const drawHeight = image.naturalHeight * cover
       renderContext.filter = `blur(${scaledRadius}px)`
       renderContext.drawImage(image, (renderCanvas.width - drawWidth) / 2, (renderCanvas.height - drawHeight) / 2, drawWidth, drawHeight)
-      // кадр без полей: blur по краям холста затемняет картинку, поэтому
-      // берём центральную часть с запасом на радиус.
+      // запас по краям не даёт blur затемнить границы кадра
       outputContext.drawImage(renderCanvas, padding, padding, width, height, 0, 0, width, height)
 
       const blob = await new Promise<Blob | null>((resolve) => outputCanvas.toBlob(resolve, 'image/webp', 0.86))
@@ -80,7 +78,7 @@ export function createWallpaperRenderer(): WallpaperRenderer {
       if (previousUrl) URL.revokeObjectURL(previousUrl)
       return objectUrl
     } catch {
-      // повреждённый файл, недоступный asset — показываем как есть
+      // если изображение недоступно, показываем исходник без размытия
       if (current === request) return source
       return null
     }
@@ -89,15 +87,7 @@ export function createWallpaperRenderer(): WallpaperRenderer {
   return { render, release }
 }
 
-/**
- * Готовит выбранное изображение к жизни в качестве обоев: уменьшает
- * до STORED_MAX_SIDE и перекодирует в WebP. Сохраняется уже результат —
- * тяжёлый исходник на диске не оседает, и каждый запуск декодирует
- * маленький файл, а не 4K-оригинал.
- *
- * null — подготовка не удалась (нет canvas, битая картинка);
- * вызывающий код в этом случае сохраняет файл как есть.
- */
+/** уменьшает изображение и сохраняет его в WebP; null означает ошибку подготовки */
 export async function prepareWallpaperForStorage(source: string): Promise<PreparedWallpaper | null> {
   const image = new Image()
   image.decoding = 'async'

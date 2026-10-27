@@ -1,5 +1,4 @@
-// порт python-модуля skins.py: библиотека PNG-скинов и управление
-// скинами/плащами профиля Minecraft (Microsoft-аккаунты).
+// локальные PNG-скины и скины/плащи профиля Microsoft
 use base64::Engine;
 use serde_json::{json, Value};
 use std::fs::{self, OpenOptions};
@@ -54,7 +53,6 @@ fn field_bool(record: &Value, key: &str) -> bool {
     record.get(key).and_then(Value::as_bool).unwrap_or(false)
 }
 
-/// uuid4().hex[:N]: случайные hex-символы (splitmix64 без внешних крейтов).
 fn random_hex(chars: usize) -> String {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let mut state = SystemTime::now()
@@ -79,13 +77,12 @@ fn random_hex(chars: usize) -> String {
 }
 
 impl SkinStore {
-    /// SkinStore(config) в Python: корень — data_home/skins.
     pub(crate) fn open() -> Result<Self, String> {
         let roots = super::state::launcher_roots();
         Self::at_root(&roots.data_home.join("skins"))
     }
 
-    /// внедряемый корень — для тестов без env-песочницы.
+    /// открывает хранилище в заданном каталоге
     fn at_root(root: &Path) -> Result<Self, String> {
         if fs::symlink_metadata(root)
             .map(|meta| meta.is_symlink())
@@ -237,7 +234,7 @@ impl SkinStore {
     }
 }
 
-/// os.open(..., O_EXCL | O_NOFOLLOW, 0o600) из Python.
+/// создаёт файл, не перезаписывая существующий
 fn write_exclusive_private(path: &Path, content: &[u8]) -> Result<(), String> {
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
@@ -245,7 +242,7 @@ fn write_exclusive_private(path: &Path, content: &[u8]) -> Result<(), String> {
     {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
-        // O_NOFOLLOW: симлинк вместо файла — ошибка, а не перезапись цели.
+        // отклоняем ссылку вместо файла, не затрагивая её цель
         options.custom_flags(libc::O_NOFOLLOW);
     }
     let mut handle = options
@@ -273,7 +270,7 @@ fn write_truncate_private(path: &Path, content: &str) -> Result<(), String> {
         .map_err(|error| format!("Не удалось записать библиотеку скинов: {error}"))
 }
 
-/// Проверить, что содержимое — корректный PNG-скин поддерживаемого размера.
+/// проверяет формат и размер PNG-скина
 pub(crate) fn validate_png_skin_bytes(content: &[u8]) -> Result<(), String> {
     let header = content;
     if header.len() < 24 || &header[..8] != PNG_SIGNATURE || &header[12..16] != b"IHDR" {
@@ -300,7 +297,7 @@ fn image_data_url(path: &Path) -> String {
     }
 }
 
-/// путь внутри корня скинов без каталогов, симлинков и лишних суффиксов.
+/// проверяет имя файла скина и его расположение внутри каталога
 fn safe_skin_path(root: &Path, filename: &str) -> Option<PathBuf> {
     let candidate = Path::new(filename);
     let name = candidate.file_name()?;
@@ -314,7 +311,7 @@ fn safe_skin_path(root: &Path, filename: &str) -> Option<PathBuf> {
         return None;
     }
     let path = root.join(name);
-    // символьная ссылка или «выход» из корня — отказ (resolve-проверка).
+    // отклоняем ссылки и пути за пределами каталога
     if fs::symlink_metadata(&path)
         .map(|meta| meta.is_symlink())
         .unwrap_or(true)
@@ -337,7 +334,7 @@ fn bearer_headers(account: &MicrosoftAccount) -> Vec<(String, String)> {
 }
 
 fn require_microsoft(account: &MicrosoftAccount, message: &str) -> Result<(), String> {
-    // MicrosoftAccount по построению Microsoft-аккаунт: проверяем токен.
+    // тип аккаунта уже проверен при загрузке; здесь достаточно проверить токен
     if account.access_token.is_empty() {
         return Err(message.to_owned());
     }
@@ -395,7 +392,6 @@ pub(crate) fn apply_skin(
     Ok(())
 }
 
-/// профиль скинов: нормализация записей + data-URL для превью (CSP-friendly).
 pub(crate) fn profile(
     http: &HttpClient,
     account: &MicrosoftAccount,
@@ -405,8 +401,7 @@ pub(crate) fn profile(
     let value = match profile_data(http, account) {
         Ok(value) => value,
         Err(error) => {
-            // A Minecraft token can be revoked before its local expiry timestamp.
-            // retry once with a freshly exchanged token instead of an empty profile.
+            // сервер может отозвать токен раньше локального срока: обновляем и повторяем запрос
             let Some(refresh) = refresh else {
                 return Err(error);
             };
@@ -464,8 +459,7 @@ fn normalize_profile_entries(profile: &mut Value) {
             }
             normalized.push(entry);
         }
-        // плащ может быть не надет вовсе (все INACTIVE) — тогда ничего не
-        // «надеваем» за пользователя; угадываем только если API не прислал state.
+        // не выбираем плащ за пользователя, если API прислал только состояния INACTIVE
         let states_reported = normalized
             .iter()
             .any(|item| !field_str(item, "state").trim().is_empty());
@@ -479,7 +473,7 @@ fn normalize_profile_entries(profile: &mut Value) {
     }
 }
 
-/// same-origin data-URL, чтобы WebGL-превью не блокировал CORS.
+// заменяем текстуры на data-URL, чтобы WebGL-превью не блокировал CORS
 fn hydrate_profile_images(http: &HttpClient, profile: &mut Value) {
     for key in ["skins", "capes"] {
         let Some(Value::Array(entries)) = profile.get_mut(key) else {
@@ -491,8 +485,7 @@ fn hydrate_profile_images(http: &HttpClient, profile: &mut Value) {
             if secure.is_empty() {
                 continue;
             }
-            // даже если загрузка не удастся, интерфейс получит https-адрес:
-            // http:// блокируется CSP, и превью оставалось без текстуры.
+            // оставляем https-адрес для CSP, если загрузить текстуру не удалось
             if let Some(object) = entry.as_object_mut() {
                 object.insert("url".into(), json!(secure));
             }
@@ -520,8 +513,7 @@ fn hydrate_profile_images(http: &HttpClient, profile: &mut Value) {
     }
 }
 
-/// minecraft Services отдаёт текстуры как http://textures.minecraft.net/…;
-/// CSP требует https.
+/// политика CSP разрешает текстуры только по HTTPS
 fn secure_texture_url(url: &str) -> String {
     let lowered = url.to_lowercase();
     if lowered.starts_with("http://textures.minecraft.net/")
@@ -624,8 +616,6 @@ fn http_client(store: &super::config::ConfigStore, request: &Value) -> Result<Ht
     )
 }
 
-/// _microsoft_account из gui_service: строгий Microsoft-аккаунт по id
-/// (или дефолт) с автообновлением токена.
 fn microsoft_account(
     store: &super::config::ConfigStore,
     http: &HttpClient,
@@ -690,7 +680,6 @@ pub(crate) fn skins_import(request: &Value) -> Result<Value, String> {
 }
 
 pub(crate) fn skins_export(request: &Value) -> Result<Value, String> {
-    // редактор скинов: сохранить результат как PNG-файл.
     let encoded = request.get("data").and_then(Value::as_str).unwrap_or("");
     let content = decode_skin_payload(encoded)?;
     if content.len() as u64 > MAX_SKIN_BYTES {
@@ -768,7 +757,6 @@ pub(crate) fn skin_profile(request: &Value) -> Result<Value, String> {
         .and_then(Value::as_str)
         .unwrap_or("");
     let account = microsoft_account(&store, &http, account_id)?;
-    // при 401 токен обновляется принудительно и профиль читается повторно.
     let refresh_account_id = account.account_id.clone();
     let refresh = || -> Result<MicrosoftAccount, String> {
         accounts::get_valid_account(
@@ -862,7 +850,7 @@ pub(crate) fn open_skins_folder(_request: &Value) -> Result<Value, String> {
 }
 
 pub(crate) fn skins_folder(_request: &Value) -> Result<Value, String> {
-    // путь нужен встроенному проводнику лаунчера, а не окну ОС.
+    // путь открывает встроенный проводник, а не окно системы
     let root = SkinStore::open()?;
     Ok(json!({ "path": root.root().to_string_lossy() }))
 }
@@ -885,14 +873,13 @@ mod tests {
         dir
     }
 
-    /// минимальный валидный заголовок PNG-скина с указанными размерами.
     fn png_header(width: u32, height: u32) -> Vec<u8> {
         let mut bytes = PNG_SIGNATURE.to_vec();
-        bytes.extend_from_slice(&[0, 0, 0, 13]); // длина чанка
+        bytes.extend_from_slice(&[0, 0, 0, 13]);
         bytes.extend_from_slice(b"IHDR");
         bytes.extend_from_slice(&width.to_be_bytes());
         bytes.extend_from_slice(&height.to_be_bytes());
-        bytes.extend_from_slice(&[8, 6, 0, 0, 0]); // битность/цвет/...
+        bytes.extend_from_slice(&[8, 6, 0, 0, 0]);
         bytes
     }
 
@@ -907,7 +894,7 @@ mod tests {
         assert!(validate_png_skin_bytes(&png_header(256, 256)).is_err());
         assert!(validate_png_skin_bytes(&png_header(64, 33)).is_err());
         let mut broken = png_header(64, 64);
-        broken[14] = b'X'; // не IHDR
+        broken[14] = b'X';
         assert!(validate_png_skin_bytes(&broken).is_err());
         assert!(validate_png_skin_bytes(b"not a png at all, really").is_err());
         assert!(validate_png_skin_bytes(&png_header(64, 64)[..20]).is_err());
@@ -955,13 +942,11 @@ mod tests {
         let listed = store.list().expect("список");
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].skin_id, imported.skin_id);
-        // модель по умолчанию и неизвестная модель
         let classic = store
             .import_bytes(&png, "plain.png", None, "classic")
             .unwrap();
         assert_eq!(classic.model, "classic");
         assert!(store.import_bytes(&png, "x.png", None, "hd").is_err());
-        // индекс на диске — список объектов с filename
         let raw = fs::read_to_string(root.join("skins.json")).unwrap();
         assert!(raw.contains("\"filename\""));
     }
@@ -1002,18 +987,14 @@ mod tests {
         assert_eq!(skins[0]["state"], "ACTIVE");
         let capes = value["capes"].as_array().unwrap();
         assert_eq!(capes[0]["name"], "Migrator");
-        // один из плащей прислал state — угадывание не срабатывает
         assert_eq!(capes[1]["state"], json!(""));
-        // ни один плащ не прислал state — угадываем первый
         let mut value = json!({ "capes": [{ "id": "x" }, { "id": "y", "state": "" }] });
         normalize_profile_entries(&mut value);
         assert_eq!(value["capes"][0]["state"], "ACTIVE");
         assert_eq!(value["capes"][1]["state"], json!(""));
-        // все INACTIVE у плащей — ничего не «надеваем»
         let mut value = json!({ "capes": [{ "id": "c", "state": "INACTIVE" }] });
         normalize_profile_entries(&mut value);
         assert_eq!(value["capes"][0]["state"], "INACTIVE");
-        // не-список превращается в пустой список
         let mut value = json!({ "skins": 42 });
         normalize_profile_entries(&mut value);
         assert_eq!(value["skins"], json!([]));

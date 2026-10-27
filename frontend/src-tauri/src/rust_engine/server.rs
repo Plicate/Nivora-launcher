@@ -1,4 +1,3 @@
-// серверные процессы лаунчера: запуск server.jar, консоль (кольцевой буфер
 use regex::Regex;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
@@ -17,6 +16,7 @@ use super::instances::{InstanceInfo, InstanceStore};
 use super::net::atomic_json_write;
 use super::operations::CancellationToken;
 use super::runtime::{self, JavaRuntimeManager};
+use super::process_guard::InstanceProcessLock;
 use super::state::{read_bounded_json, safe_instance_name};
 
 pub(crate) const SERVER_JAR: &str = "server.jar";
@@ -29,7 +29,6 @@ const METRICS_FILE: &str = ".nivora-launcher-metrics.json";
 const MAX_CONSOLE_JSON_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_METRICS_JSON_BYTES: u64 = 512 * 1024;
 const MAX_LIVE_STATE_JSON_BYTES: u64 = 64 * 1024;
-// буфер меньше питонского (1000): 500 строк хватает консоли GUI, память дороже
 const MAX_LOG_LINES: usize = 500;
 const MAX_LOG_LINE_CHARS: usize = 2048;
 const UNKNOWN_RAM_SERVER_LIMIT_KIB: i64 = 2 * 1024 * 1024;
@@ -57,7 +56,6 @@ struct MetricsCache {
 
 struct ServerProcess {
     launch_id: String,
-    name: String,
     root: PathBuf,
     pid: u32,
     child: Option<Child>,
@@ -74,7 +72,6 @@ struct ServerProcess {
     process_lock: Option<InstanceLock>,
     scheduled_restart_date: String,
     metrics: MetricsCache,
-    // наблюдаемые TCP-счётчики полезной нагрузки (rx/tx) этого запуска.
     traffic: Option<super::server_traffic::TrafficHandle>,
 }
 
@@ -113,13 +110,13 @@ impl FinishFlag {
     }
 }
 
-struct InstanceLock {
+pub(crate) struct InstanceLock {
     #[allow(dead_code)]
     handle: File,
 }
 
 impl InstanceLock {
-    fn acquire(data_home: &Path, instance_name: &str) -> Result<Option<Self>, String> {
+    pub(crate) fn acquire(data_home: &Path, instance_name: &str) -> Result<Option<Self>, String> {
         #[cfg(not(unix))]
         {
             let _ = (data_home, instance_name);
@@ -187,20 +184,27 @@ pub fn server_restart(request: &Value) -> Result<Value, String> {
     restart_server(&py_str(request.get("name"), ""))
 }
 
-pub fn server_command(request: &Value) -> Result<Value, String> {
-    let name = py_str(request.get("name"), "");
-    let value = py_str(request.get("command"), "").trim().to_owned();
-    if value.is_empty() || value.chars().count() > 2000 {
+fn validate_server_command(command: &str) -> Result<String, String> {
+    let command = command.trim();
+    if command.is_empty() || command.chars().count() > 2000 {
         return Err("Команда сервера пуста или слишком длинная".to_owned());
     }
+    if command.chars().any(char::is_control) {
+        return Err("Команда сервера не должна содержать управляющие символы".to_owned());
+    }
+    Ok(command.to_owned())
+}
+
+pub fn server_command(request: &Value) -> Result<Value, String> {
+    let name = py_str(request.get("name"), "");
+    let value = validate_server_command(&py_str(request.get("command"), ""))?;
     let (config, instances) = stores()?;
     let info = server_instance(&instances, &name)?;
     {
         let mut map = lock_map(&PROCESSES);
         match map.get_mut(&info.name) {
             Some(entry) => {
-                // try_wait требует &mut, поэтому проверка живости здесь,
-                // а не в охранных условиях веток.
+                // `try_wait` требует `&mut`, поэтому проверяем здесь
                 if !entry.is_running() {
                     return Err("Сервер не запущен".to_owned());
                 }
@@ -230,6 +234,11 @@ pub fn server_log(request: &Value) -> Result<Value, String> {
     };
     let (_, instances) = stores()?;
     let info = server_instance(&instances, &name)?;
+    server_log_for(&instances, &info, since)
+}
+
+/// возвращает лог сервера с указанного курсора
+pub(crate) fn server_log_for(_instances: &InstanceStore, info: &InstanceInfo, since: i64) -> Result<Value, String> {
     let live = {
         let mut map = lock_map(&PROCESSES);
         match map.get_mut(&info.name) {
@@ -240,8 +249,7 @@ pub fn server_log(request: &Value) -> Result<Value, String> {
     match live {
         Some((sequence, running, entries)) => Ok(log_response(&entries, since, sequence as i64, running)),
         None => {
-            // консоль прошлого запуска; курсор — отрицательное mtime, чтобы
-            // первый опрос клиента увидел «сброс» и перечитал всё
+            // отрицательный курсор заставляет клиента перечитать лог после запуска
             let saved = saved_console(&info.path);
             let cursor = saved.get("cursor").and_then(Value::as_i64).unwrap_or(-1);
             let lines = if since == cursor { json!([]) } else { saved.get("lines").cloned().unwrap_or(json!([])) };
@@ -345,7 +353,7 @@ fn start_server_inner(config: &ConfigStore, instances: &InstanceStore, name: &st
     let version = setting_str(&settings, "version");
     let (required, component) = server_java_requirement(&version);
     let java = if configured_java == "java" {
-        // системная Java годится, только если проходит требование версии
+        // используем системную Java только подходящей версии
         let mut ready: Option<PathBuf> = None;
         if let Some(found) = which_java() {
             let candidate = runtime::validate_java_path(&found, false)?;
@@ -358,8 +366,6 @@ fn start_server_inner(config: &ConfigStore, instances: &InstanceStore, name: &st
             Some(path) => path,
             None => {
                 let major = if required > 0 { json!(required) } else { Value::Null };
-                // клиент с наблюдателями: докачка Java-рантайма (~180 МиБ)
-                // видна в панели ACTIVITY, а не проходит молча.
                 let http = super::net::progress_client_from_settings(config.settings(), "")?;
                 JavaRuntimeManager::new(config, Some(http))?
                     .java_for(&json!({ "javaVersion": { "majorVersion": major, "component": component } }), None)?
@@ -391,9 +397,7 @@ fn start_server_inner(config: &ConfigStore, instances: &InstanceStore, name: &st
         arguments.push("--nogui".to_owned());
     }
 
-    let mut stdout_stream: Option<ChildStdout> = None;
-    let mut stderr_stream: Option<ChildStderr> = None;
-    let (launch_id, started_at, pid) = {
+    let (launch_id, started_at, pid, stdout_stream, stderr_stream) = {
         let mut map = lock_map(&PROCESSES);
         if server_is_running(&info.path) {
             return Err("Сервер уже запущен другим процессом".to_owned());
@@ -411,7 +415,7 @@ fn start_server_inner(config: &ConfigStore, instances: &InstanceStore, name: &st
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        // своя группа процессов — чтобы остановка снимала и потомков сервера
+        // группа процессов позволяет остановить и потомков сервера
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
@@ -422,19 +426,17 @@ fn start_server_inner(config: &ConfigStore, instances: &InstanceStore, name: &st
             Err(error) => return Err(format!("Не удалось запустить сервер: {error}")),
         };
         let stdin = child.stdin.take();
-        stdout_stream = child.stdout.take();
-        stderr_stream = child.stderr.take();
+        let stdout_stream = child.stdout.take();
+        let stderr_stream = child.stderr.take();
         let launch_id = unique_id();
         let started_at = epoch_seconds();
         let pid = child.id();
-        // нумерация логов продолжается с прошлого запуска: клиент по курсору
-        // понимает, что это продолжение, а не потеря строк
+        // курсор логов продолжается между запусками
         let previous_sequence = map.get(&info.name).map(|entry| entry.log_sequence).unwrap_or(0);
         map.insert(
             info.name.clone(),
             ServerProcess {
                 launch_id: launch_id.clone(),
-                name: info.name.clone(),
                 root: info.path.clone(),
                 pid,
                 child: Some(child),
@@ -456,20 +458,26 @@ fn start_server_inner(config: &ConfigStore, instances: &InstanceStore, name: &st
                 ))),
             },
         );
-        (launch_id, started_at, pid)
+        (launch_id, started_at, pid, stdout_stream, stderr_stream)
     };
-    // сбой записи live-файла не должен осиротить уже запущенный процесс
+    // ошибка записи статуса не должна осиротить запущенный процесс
     let _ = write_live(&info.path, true, pid as i64, started_at);
 
-    let key = info.name.clone();
-    if let Some(stream) = stdout_stream {
-        let key = key.clone();
+    let stdout_reader = stdout_stream.map(|stream| {
+        let key = info.name.clone();
         let launch_id = launch_id.clone();
-        thread::spawn(move || read_output_stream(key, launch_id, stream));
-    }
-    if let Some(stream) = stderr_stream {
-        thread::spawn(move || drain_output_stream(key, launch_id, stream));
-    }
+        thread::spawn(move || read_output_stream(key, launch_id, stream))
+    });
+    let stderr_reader = stderr_stream.map(|stream| {
+        let key = info.name.clone();
+        let launch_id = launch_id.clone();
+        thread::spawn(move || drain_output_stream(key, launch_id, stream))
+    });
+    let readers: Vec<_> = [stdout_reader, stderr_reader].into_iter().flatten().collect();
+    let finish_key = info.name.clone();
+    thread::spawn(move || {
+        after_output_readers_finish(readers, || finish_process(finish_key, launch_id));
+    });
     status_server_with(config, instances, name)
 }
 
@@ -498,7 +506,6 @@ fn stop_server_with(config: &ConfigStore, instances: &InstanceStore, name: &str)
         return status_server_with(config, instances, name);
     };
 
-    // мягко: команда «stop» в консоль сервера
     let graceful = {
         let mut map = lock_map(&PROCESSES);
         match map.get_mut(&key) {
@@ -619,7 +626,6 @@ fn read_output_stream(key: String, launch_id: String, stream: ChildStdout) {
             Err(_) => break,
         }
     }
-    finish_process(key, launch_id);
 }
 
 fn drain_output_stream(key: String, launch_id: String, stream: ChildStderr) {
@@ -629,6 +635,16 @@ fn drain_output_stream(key: String, launch_id: String, stream: ChildStderr) {
             Err(_) => break,
         }
     }
+}
+
+fn after_output_readers_finish(
+    readers: Vec<thread::JoinHandle<()>>,
+    after: impl FnOnce(),
+) {
+    for reader in readers {
+        let _ = reader.join();
+    }
+    after();
 }
 
 fn append_log(key: &str, launch_id: &str, raw: &str) {
@@ -641,7 +657,6 @@ fn append_log(key: &str, launch_id: &str, raw: &str) {
 }
 
 fn push_log(entry: &mut ServerProcess, raw: &str) {
-    // как в Python: хвост последних 2048 символов уже очищенной строки
     let line = tail_chars(raw.trim_end_matches(['\r', '\n']), MAX_LOG_LINE_CHARS);
     entry.log_sequence += 1;
     entry.logs.push_back((entry.log_sequence, line.clone()));
@@ -674,7 +689,6 @@ fn parse_server_line(entry: &mut ServerProcess, line: &str) {
 }
 
 fn finish_process(key: String, launch_id: String) {
-    // дождаться фактического завершения и забрать код выхода
     loop {
         {
             let mut map = lock_map(&PROCESSES);
@@ -704,7 +718,7 @@ fn finish_process(key: String, launch_id: String) {
             .unwrap_or(false)
     };
     if needs_check {
-        // конфиг читается вне реестра: это файловый IO
+        // читаем настройки вне блокировки процессов: это файловый ввод-вывод
         if let Ok((config, instances)) = stores() {
             if let Ok(settings) = server_config(&config, &instances, &key) {
                 should_restart = setting_bool(&settings, "auto_restart");
@@ -744,8 +758,7 @@ fn finish_process(key: String, launch_id: String) {
                 console_lines = entry.logs.iter().map(|(_, line)| line.clone()).collect();
             }
         }
-        // храним не больше 31 остановленного запуска (текущий не считаем),
-        // порядок — по времени старта
+        // ограничиваем число сохранённых завершённых запусков
         let mut stopped: Vec<(String, f64)> = map
             .iter()
             .filter(|(_, entry)| entry.exit_code.is_some() && entry.launch_id != launch_id)
@@ -856,8 +869,7 @@ pub(crate) fn status_server_with(config: &ConfigStore, instances: &InstanceStore
             pid = item.pid as i64;
             started_at = item.started_at;
             launch_id = item.launch_id.clone();
-            // тяжёлые замеры (обход каталога, /proc) — вне реестра, чтобы не
-            // мешать потоку логов
+            // дорогие замеры выполняются вне блокировки, чтобы не задерживать логи
             let storage = directory_size(&info.path);
             let sample = process_tree_sample(item.pid as i32);
             let mut cache = item.metrics;
@@ -881,13 +893,11 @@ pub(crate) fn status_server_with(config: &ConfigStore, instances: &InstanceStore
                     }
                 }
             }
-            // счётчики TCP полезной нагрузки сессии: rx/tx байты и скорость.
             let mut value = value;
             merge_traffic(&mut value, item.traffic.as_ref(), true);
             value
         }
         _ => {
-            // остановленный, но ещё известный запуск: последние итоги трафика.
             let mut metrics =
                 stopped_metrics(&info.path, setting_i64(&settings, "max_players", 20), &previous, now);
             if let Some(item) = snapshot.as_ref() {
@@ -1010,7 +1020,6 @@ fn maybe_scheduled_restart(key: &str, launch_id: &str, schedule: Value) {
             _ => return,
         }
     }
-    // мягкий парс, как в Python: «99:99» тоже число, сравнение всё равно отбросит
     let Some((hour, minute)) = parse_schedule_time(schedule.get("time").and_then(Value::as_str).unwrap_or("04:00")) else {
         return;
     };
@@ -1030,7 +1039,7 @@ fn maybe_scheduled_restart(key: &str, launch_id: &str, schedule: Value) {
             .map(|entry| entry.started_at)
             .unwrap_or(0.0)
     };
-    // старт после расчётного времени — это уже перезапуск, повторно не трогаем
+    // запуск после времени расписания не перезапускаем повторно
     if started_at <= 0.0 || started_at >= scheduled_epoch {
         return;
     }
@@ -1054,7 +1063,7 @@ fn maybe_scheduled_restart(key: &str, launch_id: &str, schedule: Value) {
 }
 
 fn scheduled_restart_worker(key: String, launch_id: String, warn_minutes: i64) {
-    // сообщение в чат — только ASCII: кодировка консоли Windows не гарантирована
+    // используем ASCII: кодировка консоли Windows не гарантирована
     let _ = server_command(&json!({
         "name": key,
         "command": format!("say Scheduled restart in {} min", warn_minutes.max(1)),
@@ -1177,7 +1186,7 @@ pub(crate) fn server_config(config: &ConfigStore, instances: &InstanceStore, nam
     values.insert("snapshot_retention_hours".into(), json!(5));
     values.insert("snapshot_max_count".into(), json!(1));
 
-    // защищённые ключи подтягиваются из хранилища вне каталога экземпляра
+    // защищённые настройки хранятся вне каталога экземпляра
     for (key, value) in load_protected_settings(config, &info.name)?.as_object().cloned().unwrap_or_default() {
         if let Some(slot) = values.get_mut(&key) {
             *slot = value;
@@ -1202,7 +1211,7 @@ pub(crate) fn server_config(config: &ConfigStore, instances: &InstanceStore, nam
                     values.insert(key, stored.clone());
                 }
             }
-            // секреты в каталоге экземпляра — переносим в защищённое хранилище
+            // переносим секреты из каталога экземпляра в защищённое хранилище
             rewrite = rewrite || SERVER_SECURITY_KEYS.iter().any(|key| fields.contains_key(*key));
         }
     }
@@ -1324,7 +1333,7 @@ pub(crate) fn normalize_server_config_with_limit(value: &Value, clamp_memory: bo
         if raw.is_empty() { "4GiB".to_owned() } else { raw }
     };
     let memory_kib = parse_memory_kib(&memory_text)?;
-    // дефолтные 4 GiB не должны валить конфиг на машине с ≤5,3 ГБ ОЗУ:
+    // значение 4 GiB по умолчанию ужимается до лимита памяти
     let default_memory = memory_kib == 4 * 1024 * 1024;
     let memory = if memory_kib > memory_limit_kib {
         if !clamp_memory && !default_memory {
@@ -1586,7 +1595,7 @@ pub(crate) fn server_properties_with_port(content: &str, port: i64, public_bind:
     }
     let mut result = updated.concat();
     if public_bind {
-        // публичный бинд: server-ip очищаем, остальные свойства не трогаем
+        // для публичного подключения очищаем только `server-ip`
         static IP_LINE: OnceLock<Regex> = OnceLock::new();
         let ip_line = IP_LINE.get_or_init(|| Regex::new(r"(?m)^[ \t]*server-ip[ \t]*(?:=|:|[ \t]+)[^\r\n]*").unwrap());
         let matched = ip_line.find_iter(&result).count();
@@ -1658,7 +1667,7 @@ fn save_console(root: &Path, lines: &[String], error: &str) -> Result<(), String
 }
 
 fn select_console_lines(lines: &[String]) -> Vec<String> {
-    // берём последние 800 строк, новее — старее, пока влезает в 256 КиБ
+    // ограничиваем сохранённую консоль 800 строками и 256 КиБ
     let mut selected: Vec<String> = Vec::new();
     let mut remaining: i64 = 256 * 1024;
     let skip = lines.len().saturating_sub(800);
@@ -1790,7 +1799,7 @@ fn single_process_sample(proc: &Path, ticks: f64) -> Option<(f64, u64)> {
     let stat = fs::read_to_string(proc.join("stat")).ok()?;
     let after_parenthesis = stat.rsplit(')').next()?;
     let fields: Vec<&str> = after_parenthesis.split_whitespace().collect();
-    // после «)» идут поля с 3-го (state): utime — 14-е, stime — 15-е
+    // после имени процесса utime и stime находятся в полях 14 и 15
     let utime: f64 = fields.get(11)?.parse().ok()?;
     let stime: f64 = fields.get(12)?.parse().ok()?;
     let statm = fs::read_to_string(proc.join("statm")).ok()?;
@@ -1925,7 +1934,6 @@ fn log_response(entries: &[(u64, String)], since: i64, cursor: i64, running: boo
 
 const MAX_CORE_VERSIONS: usize = 200;
 
-/// числовой ключ версии Minecraft («1.20.4» -> [1, 20, 4]).
 fn minecraft_version_key(version: &str) -> Option<Vec<u32>> {
     let mut parts = Vec::new();
     for part in version.split('.') {
@@ -1938,7 +1946,6 @@ fn minecraft_version_key(version: &str) -> Option<Vec<u32>> {
     Some(parts)
 }
 
-/// уникальные «чистые» релизы, отсортированные от новых к старым.
 fn unique_core_versions(values: &[String]) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
     let mut result: Vec<String> = Vec::new();
@@ -1947,8 +1954,6 @@ fn unique_core_versions(values: &[String]) -> Vec<String> {
         if version.is_empty() || !seen.insert(version.to_owned()) {
             continue;
         }
-        // вместе с релизами попадаются rc/pre-сборки — ключа не имеют, из
-        // выбора убираем, как и в Python-реализации.
         if minecraft_version_key(version).is_some() {
             result.push(version.to_owned());
         }
@@ -2096,7 +2101,7 @@ fn core_versions(http: &std::sync::Arc<super::net::HttpClient>, core: &str) -> R
     }
 }
 
-/// операция «server_core_versions»: список доступных версий выбранного ядра.
+/// возвращает доступные версии выбранного ядра
 pub fn server_core_versions(request: &Value) -> Result<Value, String> {
     let core = request
         .get("core")
@@ -2110,6 +2115,616 @@ pub fn server_core_versions(request: &Value) -> Result<Value, String> {
     Ok(json!({ "core": core, "versions": core_versions(&http, &core)? }))
 }
 
+fn safe_server_name(value: &str) -> Result<String, String> {
+    let mut cleaned = String::with_capacity(value.len());
+    let mut previous_invalid = false;
+    for character in value.trim().chars() {
+        if character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-') {
+            cleaned.push(character);
+            previous_invalid = false;
+        } else if !previous_invalid {
+            cleaned.push('-');
+            previous_invalid = true;
+        }
+    }
+    let cleaned = cleaned.trim_matches(|c| c == '.' || c == '-');
+    if cleaned.is_empty() {
+        return Err("Имя сервера не может быть пустым".to_owned());
+    }
+    Ok(cleaned.chars().take(64).collect())
+}
+
+fn create_server_instance(
+    config: &ConfigStore,
+    instances: &InstanceStore,
+    name: &str,
+    display_name: &str,
+    core: &str,
+    version: &str,
+    port: i64,
+    memory: &str,
+    eula_accepted: bool,
+    custom_jar_name: &str,
+    custom_jar_data: Option<&[u8]>,
+    replace_existing: bool,
+) -> Result<InstanceInfo, String> {
+    let safe_name = safe_server_name(name)?;
+    let target = instances.root().join(&safe_name);
+    if std::fs::symlink_metadata(&target).is_ok() {
+        if target.symlink_metadata().map(|meta| meta.file_type().is_symlink()).unwrap_or(false) {
+            return Err("Каталог сервера является символьной ссылкой".to_owned());
+        }
+        if replace_existing {
+            return Err(
+                "Нельзя безопасно заменить сервер во время создания: загрузка ядра выполняется отдельно. Выберите другое имя или удалите сервер отдельно после резервного копирования его мира."
+                    .to_owned(),
+            );
+        }
+        return Err(format!("Экземпляр уже существует: {safe_name}"));
+    }
+    std::fs::create_dir_all(&target).map_err(|error| format!("Не удалось создать каталог сервера: {error}"))?;
+    for directory in ["plugins", "mods", "config", "world", "logs"] {
+        std::fs::create_dir_all(target.join(directory))
+            .map_err(|error| format!("Не удалось создать каталог сервера: {error}"))?;
+    }
+    let trimmed_display = display_name.trim().chars().take(80).collect::<String>();
+    let mut profile = Map::new();
+    profile.insert("display_name".to_owned(), json!(if trimmed_display.is_empty() { safe_name.clone() } else { trimmed_display }));
+    profile.insert("description".to_owned(), json!("Серверный экземпляр"));
+    profile.insert("group".to_owned(), json!(""));
+    profile.insert("kind".to_owned(), json!("server"));
+    profile.insert("played_seconds".to_owned(), json!(0));
+    profile.insert("server_core".to_owned(), json!(core));
+    profile.insert("server_core_version".to_owned(), json!(version));
+    profile.insert("server_port".to_owned(), json!(port));
+    profile.insert("server_eula".to_owned(), json!(eula_accepted));
+    atomic_json_write(&target.join(super::instances::INSTANCE_METADATA_FILE), &Value::Object(profile), true)?;
+    let memory_limit = server_memory_limit_kib(None);
+    let server_config = normalize_server_config_with_limit(
+        &json!({
+            "core": core,
+            "version": version,
+            "port": port,
+            "memory": memory,
+            "motd": if display_name.trim().is_empty() { safe_name.clone() } else { display_name.trim().to_owned() },
+            "eula_accepted": eula_accepted,
+            "security_profile": "strict",
+            "security_permissions": ["network:game", "files:instance"],
+        }),
+        true,
+        memory_limit,
+    )?;
+    super::server_files::write_eula_file(&target, eula_accepted)?;
+    write_server_config(&target.join(SERVER_CONFIG_FILE), &server_config)?;
+    let mut protected = Map::new();
+    for key in SERVER_SECURITY_KEYS {
+        if let Some(value) = server_config.get(key) {
+            protected.insert((*key).to_owned(), value.clone());
+        }
+    }
+    save_protected_settings(config, &safe_name, &Value::Object(protected))?;
+    if let Some(content) = custom_jar_data {
+        write_server_core(config, &target, if custom_jar_name.trim().is_empty() { SERVER_JAR } else { custom_jar_name }, content)?;
+    }
+    instances.get(&safe_name)
+}
+
+fn write_server_core(config: &ConfigStore, root: &Path, file_name: &str, content: &[u8]) -> Result<PathBuf, String> {
+    let instance_name = root.file_name().unwrap_or_default().to_string_lossy().to_string();
+    let mut lock = InstanceProcessLock::new(&config.paths.data_home, &instance_name);
+    lock.acquire()?;
+    let result = (|| -> Result<PathBuf, String> {
+        if server_is_running(root) {
+            return Err("Остановите сервер перед заменой ядра".to_owned());
+        }
+        if content.len() > 512 * 1024 * 1024 {
+            return Err("Файл ядра слишком большой (максимум 512 MiB)".to_owned());
+        }
+        let normalized = file_name.replace('\\', "/");
+        let safe = normalized.rsplit('/').next().unwrap_or_default();
+        if safe != normalized || !safe.to_lowercase().ends_with(".jar") {
+            return Err("Ядро должно быть JAR-файлом без пути".to_owned());
+        }
+        if root.symlink_metadata().map(|meta| meta.is_symlink()).unwrap_or(false) {
+            return Err("Каталог ядра находится вне экземпляров".to_owned());
+        }
+        let destination = root.join(SERVER_JAR);
+        if destination.symlink_metadata().map(|meta| meta.is_symlink()).unwrap_or(false) {
+            return Err("Файл ядра является символьной ссылкой".to_owned());
+        }
+        let temporary = root.join(format!(".{SERVER_JAR}.{}.part", super::mods::random_hex(16)));
+        std::fs::write(&temporary, content).map_err(|error| format!("Не удалось записать ядро сервера: {error}"))?;
+        std::fs::rename(&temporary, &destination).map_err(|error| format!("Не удалось записать ядро сервера: {error}"))?;
+        Ok(destination)
+    })();
+    lock.release();
+    result
+}
+
+const SERVER_SOURCE_HOSTS: &[&str] = &[
+    "api.github.com",
+    "api.leafmc.one",
+    "api.papermc.io",
+    "api.purpurmc.org",
+    "ci.pufferfish.host",
+    "fill-data.papermc.io",
+    "fill.papermc.io",
+    "github.com",
+    "hub.spigotmc.org",
+    "objects.githubusercontent.com",
+    "piston-meta.mojang.com",
+    "raw.githubusercontent.com",
+];
+
+fn validate_server_source_url(url: &str) -> Result<(), String> {
+    let parsed = url::Url::parse(url).map_err(|_| "Некорректный адрес источника ядра".to_owned())?;
+    let host = parsed.host_str().unwrap_or_default().to_lowercase().trim_end_matches('.').to_owned();
+    if !SERVER_SOURCE_HOSTS.contains(&host.as_str()) {
+        return Err(format!("Источник ядра не входит в официальный allowlist: {}", if host.is_empty() { "неизвестный хост".to_owned() } else { host.clone() }));
+    }
+    Ok(())
+}
+
+fn optional_i64_field(value: &Value, key: &str) -> Option<i64> {
+    value.get(key).and_then(|item| item.as_i64().or_else(|| item.as_str().and_then(|text| text.parse().ok())))
+}
+
+fn patina_download(http: &std::sync::Arc<super::net::HttpClient>, version: &str, build: &str) -> Result<(String, String), String> {
+    let repository = http.get_json("https://api.github.com/repos/PatinaMC/Patina", None)?;
+    let mut branch = repository
+        .get("default_branch")
+        .and_then(Value::as_str)
+        .unwrap_or("ver/1.21.1")
+        .to_owned();
+    if branch.is_empty() || branch.len() > 80 || !branch.chars().all(|char| char.is_ascii_alphanumeric() || matches!(char, '.' | '_' | '/' | '-')) {
+        branch = "ver/1.21.1".to_owned();
+    }
+    let readme_url = format!("https://raw.githubusercontent.com/PatinaMC/Patina/{branch}/README.md");
+    let validator = |target: &str| validate_server_source_url(target);
+    let raw_bytes = http.request(&readme_url, "GET", None, None, None, Some(&validator))?;
+    let raw = String::from_utf8_lossy(&raw_bytes).to_string();
+    let mut links: Vec<String> = Vec::new();
+    let mut rest = raw.as_str();
+    while let Some(start) = rest.find("](https://github.com/PatinaMC/Patina/raw/") {
+        let tail = &rest[start + 2..];
+        let Some(end) = tail.find(')') else { break };
+        links.push(tail[..end].to_owned());
+        rest = &tail[end..];
+    }
+    let major = version.split('.').take(2).collect::<Vec<_>>().join(".");
+    let mut selected = links.iter().find(|link| link.contains(&format!("/{version}/"))).cloned().unwrap_or_default();
+    if selected.is_empty() {
+        selected = links.iter().find(|link| link.contains(&format!("/{major}/"))).cloned().unwrap_or_default();
+    }
+    if selected.is_empty() {
+        return Err(format!("Patina не опубликовала официальный JAR для {version}"));
+    }
+    Ok((selected, if build.is_empty() { version.to_owned() } else { build.to_owned() }))
+}
+
+fn build_spigot_with_buildtools(
+    http: &std::sync::Arc<super::net::HttpClient>,
+    root: &Path,
+    version: &str,
+    confirm_unverified: bool,
+) -> Result<Value, String> {
+    if !confirm_unverified {
+        return Err("[unverified-download] Spigot собирается официальным BuildTools без доступного SHA-256. Подтвердите скачивание явно.".to_owned());
+    }
+    let java = which_java().ok_or_else(|| "Для сборки Spigot нужен Java executable".to_owned())?;
+    let buildtools_url = "https://hub.spigotmc.org/jenkins/job/BuildTools/lastSuccessfulBuild/artifact/target/BuildTools.jar";
+    validate_server_source_url(buildtools_url)?;
+    let directory = root.join(format!(".nivora-spigot-build-{}", super::mods::random_hex(8)));
+    std::fs::create_dir_all(&directory).map_err(|error| format!("Не удалось запустить официальный Spigot BuildTools: {error}"))?;
+    let result = (|| -> Result<Value, String> {
+        let buildtools = directory.join("BuildTools.jar");
+        let validator = |target: &str| validate_server_source_url(target);
+        http.download(buildtools_url, &buildtools, None, None, None, None, None, None, Some(&validator))
+            .map_err(|_| "Не удалось запустить официальный Spigot BuildTools".to_owned())?;
+        let mut command = super::platform::command(&java);
+        command
+            .args(["-jar", "BuildTools.jar", "--rev", version])
+            .current_dir(&directory)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        for (name, value) in super::runtime::safe_process_environment(false) {
+            command.env(name, value);
+        }
+        let mut child = command.spawn().map_err(|_| "Не удалось запустить официальный Spigot BuildTools".to_owned())?;
+        // ограничиваем сборку 30 минутами
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1800);
+        let status = loop {
+            match child.try_wait().map_err(|_| "Не удалось запустить официальный Spigot BuildTools".to_owned())? {
+                Some(status) => break status,
+                None if std::time::Instant::now() >= deadline => {
+                    let _ = child.kill();
+                    return Err("Не удалось запустить официальный Spigot BuildTools".to_owned());
+                }
+                None => std::thread::sleep(std::time::Duration::from_millis(500)),
+            }
+        };
+        if !status.success() {
+            return Err("BuildTools не собрал Spigot".to_owned());
+        }
+        let source = directory.join(format!("spigot-{version}.jar"));
+        if !source.is_file() || source.symlink_metadata().map(|meta| meta.is_symlink()).unwrap_or(false) {
+            return Err("BuildTools завершился без spigot JAR".to_owned());
+        }
+        let content = std::fs::read(&source).map_err(|_| "BuildTools не собрал Spigot".to_owned())?;
+        let destination = root.join(SERVER_JAR);
+        if destination.symlink_metadata().map(|meta| meta.is_symlink()).unwrap_or(false) {
+            return Err("Файл server.jar является символьной ссылкой".to_owned());
+        }
+        let temporary = root.join(format!(".{SERVER_JAR}.{}.part", super::mods::random_hex(16)));
+        std::fs::write(&temporary, &content).map_err(|_| "BuildTools не собрал Spigot".to_owned())?;
+        std::fs::rename(&temporary, &destination).map_err(|_| "BuildTools не собрал Spigot".to_owned())?;
+        Ok(json!({
+            "core": "spigot",
+            "version": version,
+            "build": "buildtools",
+            "path": root.join(SERVER_JAR).to_string_lossy(),
+            "url": buildtools_url,
+            "sha256": super::net::file_hash(&root.join(SERVER_JAR), "sha256").unwrap_or_default(),
+            "verified_by": "spigot-buildtools",
+            "trusted_hash": false,
+        }))
+    })();
+    let _ = std::fs::remove_dir_all(&directory);
+    result
+}
+
+fn download_server_core(
+    http: &std::sync::Arc<super::net::HttpClient>,
+    root: &Path,
+    core: &str,
+    version: &str,
+    build: &str,
+    confirm_unverified: bool,
+) -> Result<Value, String> {
+    if server_is_running(root) {
+        return Err("Остановите сервер перед заменой ядра".to_owned());
+    }
+    let core_id = core.trim().to_lowercase();
+    let minecraft_version = version.trim();
+    if minecraft_version.is_empty()
+        || minecraft_version.len() > 32
+        || !minecraft_version.chars().all(|char| char.is_ascii_alphanumeric() || matches!(char, '.' | '_' | '-'))
+    {
+        return Err("Укажите корректную версию Minecraft для ядра".to_owned());
+    }
+    let mut expected_sha256: Option<String> = None;
+    let mut expected_size: Option<u64> = None;
+    let mut verified_by = String::new();
+    let url: String;
+    let resolved_build: String;
+    match core_id.as_str() {
+        "purpur" => {
+            url = format!("https://api.purpurmc.org/v2/purpur/{minecraft_version}/latest/download");
+            resolved_build = "latest".to_owned();
+        }
+        "paper" | "folia" | "velocity" | "waterfall" => {
+            let project = core_id.as_str();
+            let builds_value = http.get_json(
+                &format!("https://fill.papermc.io/v3/projects/{project}/versions/{minecraft_version}/builds"),
+                None,
+            )?;
+            let (builds, v3) = if let Some(rows) = builds_value.as_array() {
+                (rows.clone(), true)
+            } else if let Some(rows) = builds_value.get("builds").and_then(Value::as_array) {
+                (rows.clone(), false)
+            } else {
+                (Vec::new(), false)
+            };
+            if builds.is_empty() {
+                return Err(format!("PaperMC не нашёл сборки {project} для {minecraft_version}"));
+            }
+            let build_of = |item: &Value| -> String {
+                item.get("id")
+                    .or_else(|| item.get("build"))
+                    .map(|value| value.as_str().map(str::to_owned).unwrap_or_else(|| value.to_string()))
+                    .unwrap_or_default()
+            };
+            let mut selected = if build.is_empty() {
+                None
+            } else {
+                builds.iter().find(|item| build_of(item) == build).cloned()
+            };
+            if selected.is_none() {
+                selected = builds
+                    .iter()
+                    .max_by_key(|item| item.get("id").or_else(|| item.get("build")).and_then(Value::as_i64).unwrap_or(0))
+                    .cloned();
+            }
+            let selected = selected.unwrap_or_default();
+            resolved_build = build_of(&selected);
+            if resolved_build.is_empty() || !resolved_build.chars().all(|char| char.is_ascii_digit()) {
+                return Err("PaperMC вернул некорректный номер сборки".to_owned());
+            }
+            if v3 {
+                let download = selected
+                    .pointer("/downloads/server:default")
+                    .cloned()
+                    .unwrap_or_else(|| json!({}));
+                url = download.get("url").and_then(Value::as_str).unwrap_or_default().to_owned();
+                expected_sha256 = download
+                    .pointer("/checksums/sha256")
+                    .and_then(Value::as_str)
+                    .map(|value| value.to_lowercase())
+                    .filter(|value| !value.is_empty());
+            } else {
+                let file_name = format!("{project}-{minecraft_version}-{resolved_build}.jar");
+                url = format!("https://api.papermc.io/v2/projects/{project}/versions/{minecraft_version}/builds/{resolved_build}/downloads/{file_name}");
+                expected_sha256 = selected
+                    .pointer("/downloads/application/sha256")
+                    .and_then(Value::as_str)
+                    .map(|value| value.to_lowercase())
+                    .filter(|value| !value.is_empty());
+            }
+            if let Some(size) = optional_i64_field(&selected, "size").or_else(|| selected.pointer("/downloads/server:default").and_then(|value| optional_i64_field(value, "size"))) {
+                if size > 0 {
+                    expected_size = Some(size as u64);
+                }
+            }
+            if !expected_sha256.is_none() {
+                verified_by = "papermc-api".to_owned();
+            }
+            if url.is_empty() {
+                return Err(format!("PaperMC не вернул ссылку на сборку {project}"));
+            }
+        }
+        "leaf" => {
+            let builds_value = http.get_json(
+                &format!("https://api.leafmc.one/v2/projects/leaf/versions/{minecraft_version}/builds"),
+                None,
+            )?;
+            let builds = builds_value
+                .get("builds")
+                .and_then(Value::as_array)
+                .cloned()
+                .or_else(|| builds_value.as_array().cloned())
+                .unwrap_or_default();
+            if builds.is_empty() {
+                return Err(format!("Leaf не нашёл сборки для {minecraft_version}"));
+            }
+            let build_of = |item: &Value| -> String {
+                item.get("build").map(|value| value.as_str().map(str::to_owned).unwrap_or_else(|| value.to_string())).unwrap_or_default()
+            };
+            let mut selected = if build.is_empty() {
+                None
+            } else {
+                builds.iter().find(|item| build_of(item) == build).cloned()
+            };
+            if selected.is_none() {
+                selected = builds
+                    .iter()
+                    .max_by_key(|item| item.get("build").and_then(Value::as_i64).unwrap_or(0))
+                    .cloned();
+            }
+            let selected = selected.unwrap_or_default();
+            resolved_build = build_of(&selected);
+            if resolved_build.is_empty() || !resolved_build.chars().all(|char| char.is_ascii_digit()) {
+                return Err("Leaf вернул некорректный номер сборки".to_owned());
+            }
+            let file_name = format!("leaf-{minecraft_version}-{resolved_build}.jar");
+            url = format!("https://api.leafmc.one/v2/projects/leaf/versions/{minecraft_version}/builds/{resolved_build}/downloads/{file_name}");
+            let download = selected.pointer("/downloads/application").cloned().unwrap_or_else(|| json!({}));
+            expected_sha256 = download
+                .get("sha256")
+                .and_then(Value::as_str)
+                .map(|value| value.to_lowercase())
+                .filter(|value| !value.is_empty());
+            if let Some(size) = optional_i64_field(&download, "size") {
+                expected_size = Some(size as u64);
+            }
+            if !expected_sha256.is_none() {
+                verified_by = "leaf-api".to_owned();
+            }
+        }
+        "pufferfish" => {
+            let branch = minecraft_version.split('.').take(2).collect::<Vec<_>>().join(".");
+            let build_info = http.get_json(
+                &format!("https://ci.pufferfish.host/job/Pufferfish-{branch}/lastSuccessfulBuild/api/json"),
+                None,
+            )?;
+            let artifacts = build_info.get("artifacts").and_then(Value::as_array).cloned().unwrap_or_default();
+            let jars: Vec<&Value> = artifacts
+                .iter()
+                .filter(|item| {
+                    item.get("fileName")
+                        .and_then(Value::as_str)
+                        .map(|name| name.to_lowercase().ends_with(".jar"))
+                        .unwrap_or(false)
+                })
+                .collect();
+            let artifact = jars
+                .iter()
+                .find(|item| {
+                    let name = item.get("fileName").and_then(Value::as_str).unwrap_or_default().to_lowercase();
+                    (name.contains("paperclip") || name.contains("pufferfish") || name.contains("server"))
+                        && !(name.contains("api") || name.contains("sources") || name.contains("javadoc"))
+                })
+                .copied()
+                .or_else(|| jars.first().copied());
+            let build_url = build_info
+                .get("url")
+                .and_then(Value::as_str)
+                .map(|value| value.trim_end_matches('/').to_owned())
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| format!("https://ci.pufferfish.host/job/Pufferfish-{branch}/lastSuccessfulBuild"));
+            let relative_path = artifact
+                .and_then(|item| item.get("relativePath"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .unwrap_or_default()
+                .to_owned();
+            if relative_path.is_empty() {
+                return Err(format!("Pufferfish не нашёл JAR для {minecraft_version}"));
+            }
+            url = format!("{build_url}/artifact/{}", relative_path.trim_start_matches('/'));
+            resolved_build = build_info
+                .get("number")
+                .map(|value| value.as_str().map(str::to_owned).unwrap_or_else(|| value.to_string()))
+                .unwrap_or_else(|| "latest".to_owned());
+        }
+        "patina" => {
+            let (selected, resolved) = patina_download(http, minecraft_version, build)?;
+            url = selected;
+            resolved_build = resolved;
+        }
+        "spigot" => {
+            return build_spigot_with_buildtools(http, root, minecraft_version, confirm_unverified);
+        }
+        _ => return Err("Для этого ядра загрузка не автоматизирована. Загрузите совместимый server.jar вручную.".to_owned()),
+    }
+    validate_server_source_url(&url)?;
+    if expected_sha256.is_none() && !confirm_unverified {
+        return Err("[unverified-download] Серверный источник не предоставил доверенный хеш. Подтвердите скачивание явно.".to_owned());
+    }
+    let destination = root.join(SERVER_JAR);
+    let validator = |target: &str| validate_server_source_url(target);
+    http.download(
+        &url,
+        &destination,
+        None,
+        expected_sha256.as_deref(),
+        None,
+        expected_size,
+        None,
+        None,
+        Some(&validator),
+    )?;
+    let actual_sha256 = super::net::file_hash(&destination, "sha256").unwrap_or_default();
+    Ok(json!({
+        "core": core_id,
+        "version": minecraft_version,
+        "build": resolved_build,
+        "path": destination.to_string_lossy(),
+        "url": url,
+        "sha256": actual_sha256,
+        "verified_by": verified_by,
+        "trusted_hash": expected_sha256.is_some(),
+    }))
+}
+
+pub fn server_create(request: &Value) -> Result<Value, String> {
+    use base64::Engine;
+    let (config, instances) = stores()?;
+    let custom_jar_name = request.get("custom_jar_name").and_then(Value::as_str).unwrap_or_default().trim().to_owned();
+    let custom_jar_data = match request.get("custom_jar_data") {
+        Some(Value::String(encoded)) if !encoded.is_empty() => {
+            if encoded.len() > 4 * ((512 * 1024 * 1024 + 2) / 3) {
+                return Err("Файл ядра слишком большой".to_owned());
+            }
+            Some(
+                base64::engine::general_purpose::STANDARD
+                    .decode(encoded)
+                    .map_err(|_| "Файл ядра повреждён".to_owned())?,
+            )
+        }
+        _ => None,
+    };
+    let info = create_server_instance(
+        &config,
+        &instances,
+        request.get("name").and_then(Value::as_str).unwrap_or_default(),
+        request.get("display_name").and_then(Value::as_str).unwrap_or_default(),
+        request.get("core").and_then(Value::as_str).unwrap_or("custom"),
+        request.get("version").and_then(Value::as_str).unwrap_or_default(),
+        request.get("port").and_then(Value::as_i64).unwrap_or(25565),
+        request.get("memory").and_then(Value::as_str).unwrap_or("4GiB"),
+        request.get("eula_accepted").and_then(Value::as_bool).unwrap_or(false),
+        &custom_jar_name,
+        custom_jar_data.as_deref(),
+        request.get("replace_existing").and_then(Value::as_bool).unwrap_or(false),
+    )?;
+    let display = if info.display_name.is_empty() { info.name.clone() } else { info.display_name.clone() };
+    super::events::emit_status_event("server-created", &format!("Сервер «{display}» создан."));
+    let config_value = server_config(&config, &instances, &info.name)?;
+    Ok(json!({
+        "server": super::server_files::server_public(&info, &config_value),
+        "instances": instances.list().iter().map(|item| item.public()).collect::<Vec<Value>>(),
+    }))
+}
+
+pub fn server_upload_core(request: &Value) -> Result<Value, String> {
+    use base64::Engine;
+    let (config, instances) = stores()?;
+    let name = request.get("name").and_then(Value::as_str).unwrap_or_default();
+    let info = server_instance(&instances, name)?;
+    let encoded = request.get("data").and_then(Value::as_str).unwrap_or_default();
+    if encoded.len() > 4 * ((512 * 1024 * 1024 + 2) / 3) {
+        return Err("Файл ядра слишком большой".to_owned());
+    }
+    let content = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|_| "Файл ядра повреждён".to_owned())?;
+    let file_name = request.get("file_name").and_then(Value::as_str).unwrap_or(SERVER_JAR).trim().to_owned();
+    let path = write_server_core(&config, &info.path, &file_name, &content)?;
+    super::events::emit_status_event("server-core-uploaded", "Ядро сервера загружено.");
+    let config_value = server_config(&config, &instances, name)?;
+    Ok(json!({
+        "path": path.to_string_lossy(),
+        "server": super::server_files::server_public(&info, &config_value),
+    }))
+}
+
+pub fn server_core_download(request: &Value) -> Result<Value, String> {
+    let (config, instances) = stores()?;
+    let name = request.get("name").and_then(Value::as_str).unwrap_or_default();
+    let info = server_instance(&instances, name)?;
+    let settings = server_config(&config, &instances, name)?;
+    let core = request
+        .get("core")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .unwrap_or_else(|| settings.get("core").and_then(Value::as_str).unwrap_or_default().to_owned())
+        .trim()
+        .to_lowercase();
+    let version = request
+        .get("version")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .unwrap_or_else(|| settings.get("version").and_then(Value::as_str).unwrap_or_default().to_owned())
+        .trim()
+        .to_owned();
+    let build = request
+        .get("build")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .unwrap_or_else(|| settings.get("build").and_then(Value::as_str).unwrap_or_default().to_owned())
+        .trim()
+        .to_owned();
+    let operation_id = request.get("operation_id").and_then(Value::as_str).unwrap_or("");
+    let http = super::net::client_from_settings(config.settings(), operation_id)?;
+    let mut lock = InstanceProcessLock::new(&config.paths.data_home, &info.name);
+    lock.acquire()?;
+    let result = download_server_core(
+        &http,
+        &info.path,
+        &core,
+        &version,
+        &build,
+        request.get("confirm_unverified").and_then(Value::as_bool).unwrap_or(false),
+    );
+    lock.release();
+    let download = result?;
+    let save_request = json!({
+        "name": name,
+        "values": {
+            "core": core,
+            "version": version,
+            "build": download.get("build").cloned().unwrap_or(Value::Null),
+        }
+    });
+    let _ = super::server_files::server_save_config(&save_request)?;
+    super::events::emit_status_event("server-core-downloaded", "Рекомендованное ядро загружено.");
+    let config_value = server_config(&config, &instances, name)?;
+    Ok(json!({
+        "download": download,
+        "server": super::server_files::server_public(&info, &config_value),
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2117,7 +2732,6 @@ mod tests {
     fn test_entry() -> ServerProcess {
         ServerProcess {
             launch_id: "test".to_owned(),
-            name: "test".to_owned(),
             root: PathBuf::from("/tmp"),
             pid: 0,
             child: None,
@@ -2139,9 +2753,34 @@ mod tests {
     }
 
     #[test]
+    fn server_commands_reject_multiline_input() {
+        assert_eq!(validate_server_command("/say hello").unwrap(), "/say hello");
+        assert!(validate_server_command("/say hello\n/stop").is_err());
+        assert!(validate_server_command("/say hello\r\n/stop").is_err());
+    }
+
+    #[test]
+    fn finalization_waits_for_every_output_stream_to_drain() {
+        use std::sync::mpsc;
+
+        let (release_tx, release_rx) = mpsc::channel();
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let stdout = thread::spawn(|| {});
+        let stderr = thread::spawn(move || {
+            release_rx.recv().unwrap();
+        });
+        let coordinator = thread::spawn(move || {
+            after_output_readers_finish(vec![stdout, stderr], || finished_tx.send(()).unwrap());
+        });
+
+        assert!(finished_rx.try_recv().is_err());
+        release_tx.send(()).unwrap();
+        finished_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        coordinator.join().unwrap();
+    }
+
+    #[test]
     fn core_versions_sort_and_filter_like_python() {
-        // rc/pre-сборки без числового ключа из выбора убираются, дубликаты
-        // схлопываются, порядок — от новых к старым.
         let versions = unique_core_versions(&[
             "1.20.4".to_owned(),
             "1.21".to_owned(),
@@ -2180,7 +2819,6 @@ mod tests {
         let value = normalize_server_config(&json!({}), true).unwrap();
         assert_eq!(value["core"], "custom");
         assert_eq!(value["port"], 25565);
-        // на машинах с малой памятью дефолт клампится к 75% RAM — как в Python
         let expected_memory = format_memory_kib(parse_memory_kib("4GiB").unwrap().min(server_memory_limit_kib(None)));
         assert_eq!(value["memory"], expected_memory);
     }
@@ -2212,7 +2850,6 @@ mod tests {
 
     #[test]
     fn default_memory_survives_low_ram_even_without_clamp() {
-        // машина на 4 ГБ: потолок 3 ГБ. Дефолт мастера обязан ужиматься
         let limit = server_memory_limit_kib(Some(4 * 1024 * 1024));
         for memory in ["", "4GiB", "4G", "4096MiB", "4.0GiB"] {
             let value = normalize_server_config_with_limit(&json!({ "memory": memory }), false, limit).unwrap();
@@ -2220,7 +2857,6 @@ mod tests {
         }
         let error = normalize_server_config_with_limit(&json!({ "memory": "6GiB" }), false, limit).unwrap_err();
         assert!(error.contains("75% физической памяти"));
-        // осознанное значение ниже потолка сохраняется как есть
         let value = normalize_server_config_with_limit(&json!({ "memory": "2GiB" }), false, limit).unwrap();
         assert_eq!(value["memory"], "2GiB");
     }
@@ -2266,7 +2902,6 @@ mod tests {
 
     #[test]
     fn lax_schedule_time_matches_python() {
-        // python разбирает (\d{1,2}):(\d{2}) без проверки диапазона
         assert_eq!(parse_schedule_time("25:99"), Some((25, 99)));
         assert_eq!(parse_schedule_time("4:00"), Some((4, 0)));
         assert_eq!(parse_schedule_time("04:00"), Some((4, 0)));
@@ -2298,7 +2933,6 @@ mod tests {
         assert_eq!(initial_server_heap("511M"), "511M");
         assert_eq!(initial_server_heap("256M"), "256M");
         assert_eq!(initial_server_heap("1024K"), "1024K");
-        // суффиксы вроде GiB регуляркой Python не матчатся — значение как есть
         assert_eq!(initial_server_heap("4GiB"), "4GiB");
         assert_eq!(initial_server_heap("auto"), "auto");
     }
@@ -2317,7 +2951,6 @@ mod tests {
             server_properties_with_port("server-port 25565\r\nx\r\n", 25599, false),
             "server-port 25599\r\nx\r\n"
         );
-        // другие свойства с «port» в имени не трогаем
         assert_eq!(
             server_properties_with_port("query-port=25565\nserver-port=1\n", 25599, false),
             "query-port=25565\nserver-port=25599\n"
@@ -2386,7 +3019,6 @@ mod tests {
         let value = log_response(&entries, 99, 4, false);
         assert_eq!(value["lines"], json!(["l1", "l2", "l3", "l4"]));
         assert_eq!(value["reset"], true);
-        // курсор в середине истории — инкрементально продолжаем
         let value = log_response(&entries, 2, 4, true);
         assert_eq!(value["lines"], json!(["l3", "l4"]));
         assert_eq!(value["reset"], false);
@@ -2399,7 +3031,6 @@ mod tests {
         assert_eq!(selected.len(), 800);
         assert_eq!(selected.first().unwrap(), "line-100");
         assert_eq!(selected.last().unwrap(), "line-899");
-        // бюджет 256 КиБ: длинные строки обрезаются и не влезают целиком
         let fat: Vec<String> = (0..200).map(|_| "a".repeat(3000)).collect();
         let selected = select_console_lines(&fat);
         assert!(selected.len() > 100 && selected.len() < 200);

@@ -1,18 +1,10 @@
-// nivora ModScan — глубокий разбор модов: манифесты всех форматов плюс
-// требуемая версия Java по class-файлам. Запускается лаунчером как
-//   java ModScan.java <jar> [jar...]
-// и печатает по JSON-строке на jar:
-//   {"path":..,"loader":..,"mod_id":..,"name":..,"version":..,
-//    "class_major":N,"java_major":N,"dependencies":[..],"breaks":[..]}
-//
-// почему Java: моды — это jar, а разбор class-файлов и манифестов через
-// java.util.zip — родная среда. Хелпер необязателен: без него лаунчер
-// просто не показывает требуемую Java.
+// сканирует метаданные модов и версии Java по JAR-файлам
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -25,7 +17,24 @@ public class ModScan {
     private static final int MAX_MANIFEST_BYTES = 256 * 1024;
     private static final int MAX_CLASS_ENTRIES = 4096;
 
-    record Manifest(String loader, String kind) {}
+    // Java 8: record недоступен, поэтому обычный неизменяемый класс
+    static final class Manifest {
+        private final String loader;
+        private final String kind;
+
+        Manifest(String loader, String kind) {
+            this.loader = loader;
+            this.kind = kind;
+        }
+
+        String loader() {
+            return loader;
+        }
+
+        String kind() {
+            return kind;
+        }
+    }
 
     static final Manifest[] MANIFESTS = {
         new Manifest("fabric.mod.json", "fabric"),
@@ -59,7 +68,7 @@ public class ModScan {
         result.put("java_major", 0);
         result.put("dependencies", new ArrayList<>());
         result.put("breaks", new ArrayList<>());
-        Path file = Path.of(path);
+        Path file = Paths.get(path);
         if (!Files.isRegularFile(file)) {
             return Json.write(result);
         }
@@ -84,14 +93,31 @@ public class ModScan {
                 applyManifest(result, found.kind(), doc);
             }
         } catch (IOException | RuntimeException malformed) {
-            // битый jar — базовые поля и нули, вызывающая сторона решает сама
+            // повреждённый JAR возвращается с начальными значениями
         }
         return Json.write(result);
     }
 
+    // аналог InputStream.readNBytes для Java 8 (полное чтение до limit байт)
+    static byte[] readBounded(InputStream stream, int limit) throws IOException {
+        java.io.ByteArrayOutputStream buffer = new java.io.ByteArrayOutputStream(Math.min(limit, 8192));
+        byte[] chunk = new byte[4096];
+        int total = 0;
+        while (total < limit) {
+            int want = Math.min(chunk.length, limit - total);
+            int read = stream.read(chunk, 0, want);
+            if (read < 0) {
+                break;
+            }
+            buffer.write(chunk, 0, read);
+            total += read;
+        }
+        return buffer.toByteArray();
+    }
+
     static String readEntry(ZipFile zip, ZipEntry entry) throws IOException {
         try (InputStream stream = zip.getInputStream(entry)) {
-            byte[] raw = stream.readNBytes(MAX_MANIFEST_BYTES + 1);
+            byte[] raw = readBounded(stream, MAX_MANIFEST_BYTES + 1);
             if (raw.length > MAX_MANIFEST_BYTES) {
                 return null;
             }
@@ -99,11 +125,11 @@ public class ModScan {
         }
     }
 
-    // максимум major по class-файлам — именно это определяет минимальную Java
+    // минимальную Java определяет максимальная версия class-файла
     static int scanClassMajors(ZipFile zip) {
         int maxMajor = 0;
         int seen = 0;
-        var entries = zip.entries();
+        java.util.Enumeration<? extends ZipEntry> entries = zip.entries();
         while (entries.hasMoreElements() && seen < MAX_CLASS_ENTRIES) {
             ZipEntry entry = entries.nextElement();
             String name = entry.getName();
@@ -112,7 +138,7 @@ public class ModScan {
             }
             seen++;
             try (InputStream stream = zip.getInputStream(entry)) {
-                byte[] header = stream.readNBytes(8);
+                byte[] header = readBounded(stream, 8);
                 if (header.length == 8
                         && (header[0] & 0xff) == 0xca && (header[1] & 0xff) == 0xfe
                         && (header[2] & 0xff) == 0xba && (header[3] & 0xff) == 0xbe) {
@@ -122,7 +148,7 @@ public class ModScan {
                     }
                 }
             } catch (IOException ignored) {
-                // один битый class не ломает общий вывод
+                // пропускаем повреждённый class, не прерывая общий вывод
             }
         }
         return maxMajor;
@@ -137,12 +163,23 @@ public class ModScan {
 
     static void applyManifest(Map<String, Object> result, String kind, String doc) {
         switch (kind) {
-            case "fabric" -> applyFabric(result, doc, false);
-            case "quilt" -> applyFabric(result, doc, true);
-            case "forge" -> applyToml(result, doc);
-            case "mcmod" -> applyMcmod(result, doc);
-            case "lite" -> applyLite(result, doc);
-            default -> { }
+            case "fabric":
+                applyFabric(result, doc, false);
+                break;
+            case "quilt":
+                applyFabric(result, doc, true);
+                break;
+            case "forge":
+                applyToml(result, doc);
+                break;
+            case "mcmod":
+                applyMcmod(result, doc);
+                break;
+            case "lite":
+                applyLite(result, doc);
+                break;
+            default:
+                break;
         }
     }
 
@@ -160,7 +197,17 @@ public class ModScan {
         result.put("loader", quilt ? "quilt" : "fabric");
         result.put("mod_id", text(loader.get("id")));
         result.put("version", text(loader.get("version")));
-        Object nameValue = quilt ? root.get("name") : loader.get("name");
+        // quilt хранит имя в quilt_loader.metadata.name, fabric — в корне "name"
+        Object nameValue;
+        if (quilt) {
+            Map<String, Object> metadata = asMap(loader.get("metadata"));
+            nameValue = metadata == null ? null : metadata.get("name");
+            if (nameValue == null) {
+                nameValue = root.get("name");
+            }
+        } else {
+            nameValue = loader.get("name");
+        }
         result.put("name", text(nameValue));
         List<Object> dependencies = (List<Object>) result.get("dependencies");
         collectDependencies(dependencies, asMap(loader.get("depends")), false);
@@ -221,7 +268,7 @@ public class ModScan {
     }
 
     static String orEmpty(String value, String fallback) {
-        return value == null || value.isBlank() ? fallback : value;
+        return value == null || value.trim().isEmpty() ? fallback : value;
     }
 
     static String text(Object value) {
@@ -230,7 +277,8 @@ public class ModScan {
 
     @SuppressWarnings("unchecked")
     static Map<String, Object> asMap(Object value) {
-        if (value instanceof Map<?, ?> map) {
+        if (value instanceof Map<?, ?>) {
+            Map<?, ?> map = (Map<?, ?>) value;
             return (Map<String, Object>) map;
         }
         return null;
@@ -273,11 +321,15 @@ public class ModScan {
             if (doc.charAt(cursor) == '\\' && cursor + 1 < doc.length()) {
                 cursor++;
                 char next = doc.charAt(cursor++);
-                value.append(switch (next) {
-                    case 'n' -> '\n';
-                    case 't' -> '\t';
-                    default -> next;
-                });
+                if (next == 'n') {
+                    value.append('\n');
+                } else if (next == 't') {
+                    value.append('\t');
+                } else if (next == 'r') {
+                    value.append('\r');
+                } else {
+                    value.append(next);
+                }
             } else {
                 value.append(doc.charAt(cursor++));
             }
@@ -285,9 +337,7 @@ public class ModScan {
         return value.toString();
     }
 
-    // ----------------------------------------------------------- мини-JSON ----
-
-    /** разбор без зависимостей: Map/List/String/Double/Boolean/null. */
+    /** разбор без зависимостей: Map/List/String/Double/Boolean/null */
     static final class Json {
         private final String text;
         private int index;
@@ -297,7 +347,7 @@ public class ModScan {
         }
 
         static Object parse(String source) {
-            if (source == null || source.isBlank()) {
+            if (source == null || source.trim().isEmpty()) {
                 return null;
             }
             try {
@@ -318,13 +368,14 @@ public class ModScan {
         private static void writeValue(StringBuilder out, Object value) {
             if (value == null) {
                 out.append("null");
-            } else if (value instanceof String string) {
-                writeString(out, string);
+            } else if (value instanceof String) {
+                writeString(out, (String) value);
             } else if (value instanceof Double || value instanceof Integer || value instanceof Long) {
                 out.append(value);
-            } else if (value instanceof Boolean flag) {
-                out.append(flag);
-            } else if (value instanceof List<?> list) {
+            } else if (value instanceof Boolean) {
+                out.append(value);
+            } else if (value instanceof List<?>) {
+                List<?> list = (List<?>) value;
                 out.append('[');
                 for (int i = 0; i < list.size(); i++) {
                     if (i > 0) {
@@ -333,7 +384,8 @@ public class ModScan {
                     writeValue(out, list.get(i));
                 }
                 out.append(']');
-            } else if (value instanceof Map<?, ?> map) {
+            } else if (value instanceof Map<?, ?>) {
+                Map<?, ?> map = (Map<?, ?>) value;
                 out.append('{');
                 boolean first = true;
                 for (Map.Entry<?, ?> entry : map.entrySet()) {
@@ -356,12 +408,22 @@ public class ModScan {
             for (int i = 0; i < value.length(); i++) {
                 char c = value.charAt(i);
                 switch (c) {
-                    case '"' -> out.append("\\\"");
-                    case '\\' -> out.append("\\\\");
-                    case '\n' -> out.append("\\n");
-                    case '\t' -> out.append("\\t");
-                    case '\r' -> out.append("\\r");
-                    default -> {
+                    case '"':
+                        out.append("\\\"");
+                        break;
+                    case '\\':
+                        out.append("\\\\");
+                        break;
+                    case '\n':
+                        out.append("\\n");
+                        break;
+                    case '\t':
+                        out.append("\\t");
+                        break;
+                    case '\r':
+                        out.append("\\r");
+                        break;
+                    default: {
                         if (c < 0x20) {
                             out.append(String.format("\\u%04x", (int) c));
                         } else {
@@ -375,15 +437,22 @@ public class ModScan {
 
         private Object value() {
             char c = text.charAt(index);
-            return switch (c) {
-                case '{' -> object();
-                case '[' -> array();
-                case '"' -> readString();
-                case 't' -> literal("true", Boolean.TRUE);
-                case 'f' -> literal("false", Boolean.FALSE);
-                case 'n' -> literal("null", null);
-                default -> number();
-            };
+            switch (c) {
+                case '{':
+                    return object();
+                case '[':
+                    return array();
+                case '"':
+                    return readString();
+                case 't':
+                    return literal("true", Boolean.TRUE);
+                case 'f':
+                    return literal("false", Boolean.FALSE);
+                case 'n':
+                    return literal("null", null);
+                default:
+                    return number();
+            }
         }
 
         private Object literal(String word, Object value) {
@@ -397,7 +466,7 @@ public class ModScan {
 
         private Map<String, Object> object() {
             Map<String, Object> out = new LinkedHashMap<>();
-            index++; // '{'
+            index++;
             skip();
             if (index < text.length() && text.charAt(index) == '}') {
                 index++;
@@ -432,7 +501,7 @@ public class ModScan {
 
         private List<Object> array() {
             List<Object> out = new ArrayList<>();
-            index++; // '['
+            index++;
             skip();
             if (index < text.length() && text.charAt(index) == ']') {
                 index++;
@@ -468,27 +537,32 @@ public class ModScan {
                 char c = text.charAt(index++);
                 if (c == '\\' && index < text.length()) {
                     char next = text.charAt(index++);
-                    out.append(switch (next) {
-                        case 'n' -> '\n';
-                        case 't' -> '\t';
-                        case 'r' -> '\r';
-                        case 'b' -> '\b';
-                        case 'f' -> '\f';
-                        case 'u' -> {
-                            if (index + 4 > text.length()) {
-                                throw new IllegalArgumentException("bad \\u");
-                            }
-                            int code = Integer.parseInt(text.substring(index, index + 4), 16);
-                            index += 4;
-                            yield (char) code;
+                    char decoded;
+                    if (next == 'n') {
+                        decoded = '\n';
+                    } else if (next == 't') {
+                        decoded = '\t';
+                    } else if (next == 'r') {
+                        decoded = '\r';
+                    } else if (next == 'b') {
+                        decoded = '\b';
+                    } else if (next == 'f') {
+                        decoded = '\f';
+                    } else if (next == 'u') {
+                        if (index + 4 > text.length()) {
+                            throw new IllegalArgumentException("bad \\u");
                         }
-                        default -> next;
-                    });
+                        decoded = (char) Integer.parseInt(text.substring(index, index + 4), 16);
+                        index += 4;
+                    } else {
+                        decoded = next;
+                    }
+                    out.append(decoded);
                 } else {
                     out.append(c);
                 }
             }
-            index++; // закрывающая кавычка
+            index++;
             skip();
             return out.toString();
         }
@@ -507,7 +581,7 @@ public class ModScan {
             while (index < text.length() && Character.isWhitespace(text.charAt(index))) {
                 index++;
             }
-            // однострочные комментарии в mcmod.info встречаются
+            // mcmod.info может содержать однострочные комментарии
             if (index + 1 < text.length() && text.charAt(index) == '/' && text.charAt(index + 1) == '/') {
                 while (index < text.length() && text.charAt(index) != '\n') {
                     index++;

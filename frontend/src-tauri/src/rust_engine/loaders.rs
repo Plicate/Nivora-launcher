@@ -1,5 +1,4 @@
-// профили мод-лоадеров: Fabric/Quilt через их meta-API, Forge/NeoForge —
-// через maven-metadata; список версий лоадера и URL инсталляторов.
+// версии и установщики модлоадеров
 use regex::Regex;
 use serde_json::{json, Value};
 use std::sync::{Arc, OnceLock};
@@ -88,7 +87,7 @@ impl LoaderRepository {
         self.validate_profile(self.http.get_json(&url, None)?, "quilt")
     }
 
-    /// явная версия лоадера, иначе самая свежая из choices.
+    /// явная версия лоадера, иначе самая свежая из choices
     fn latest_loader_version(
         &self,
         loader: &str,
@@ -167,8 +166,7 @@ fn neoforge_choices_from(raw: &str, minecraft_version: &str) -> Result<Vec<Value
     if upper.contains("<!DOCTYPE") || upper.contains("<!ENTITY") {
         return Err("NeoForge metadata содержит запрещённые XML-декларации".to_owned());
     }
-    // файл — плоский список <version>; текст между тегами берём как есть
-    // (аналог node.text в ElementTree).
+    // файл содержит плоский список `<version>`; текст узла не очищаем
     static VERSION_TAGS: OnceLock<Regex> = OnceLock::new();
     let regex = VERSION_TAGS.get_or_init(|| Regex::new(r"(?s)<version(?:\s[^>]*)?>(.*?)</version>").unwrap());
     let values: Vec<String> = regex
@@ -181,7 +179,7 @@ fn neoforge_choices_from(raw: &str, minecraft_version: &str) -> Result<Vec<Value
         return Ok(Vec::new());
     }
     // схема NeoForge кодирует всю минорную линию MC: 1.20.1 → 20.1.x,
-    // 1.21 → 21.0.x.
+    // 1.21 → 21.0.x
     let minor_line = if parts.len() > 2 { parts[2] } else { "0" };
     let prefix = format!("{}.{}.", parts[1], minor_line);
     Ok(values
@@ -257,7 +255,7 @@ mod tests {
         assert_eq!(for_1211[0]["version"], json!("21.1.77"));
         assert_eq!(neoforge_choices_from(xml, "1.21").unwrap()[0]["version"], json!("21.0.143"));
         assert!(neoforge_choices_from(xml, "1.19").unwrap().is_empty());
-        // меньше двух компонент версии — пустой ответ, как в Python.
+        // версия менее чем с двумя компонентами не даёт результатов
         assert!(neoforge_choices_from(xml, "custom").unwrap().is_empty());
         assert!(neoforge_choices_from("<!DOCTYPE metadata><metadata/>", "1.21.1").is_err());
     }
@@ -269,7 +267,7 @@ mod tests {
             repository.installer_url("forge", "1.20.4", "49.0.30").unwrap(),
             "https://maven.minecraftforge.net/net/minecraftforge/forge/1.20.4-49.0.30/forge-1.20.4-49.0.30-installer.jar"
         );
-        // координата уже с версией MC не дублирует её.
+        // координата уже с версией MC не дублирует её
         assert_eq!(
             repository.installer_url("forge", "1.20.4", "1.20.4-49.0.30").unwrap(),
             "https://maven.minecraftforge.net/net/minecraftforge/forge/1.20.4-49.0.30/forge-1.20.4-49.0.30-installer.jar"

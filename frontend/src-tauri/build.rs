@@ -1,8 +1,8 @@
 fn main() {
-    // Встроенный zip бэкенда (portable nivora-launcher.exe) подключается,
-    // только если build_windows_exe.sh / CI его подготовили. Без архива
+    // встроенный zip бэкенда (portable nivora-launcher.exe) подключается,
+    // только если build_windows_exe.sh / CI его подготовили; без архива
     // сборка не падает на include_bytes!, а приложение ищет бэкенд рядом с
-    // собой (установщик) и честно сообщает, если его нет.
+    // собой (установщик) и честно сообщает, если его нет
     println!("cargo::rustc-check-cfg=cfg(embedded_backend)");
     let archive = std::path::Path::new("resources/backend/nivora-launcher-backend.zip");
     println!("cargo:rerun-if-changed=resources/backend/nivora-launcher-backend.zip");

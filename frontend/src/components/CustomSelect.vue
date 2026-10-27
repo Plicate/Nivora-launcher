@@ -39,9 +39,12 @@ function closeOnOutside(event: MouseEvent) {
   open.value = false
 }
 
-function uiScaleGuess(): number {
-  const value = Number.parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--ui-scale'))
-  return Number.isFinite(value) && value > 0 ? value : 1
+/** вычисляет масштаб по геометрии, не учитывая transform меню */
+function bodyZoom(): number {
+  const visual = document.body.getBoundingClientRect().width
+  const css = document.documentElement.clientWidth
+  const zoom = visual > 0 && css > 0 ? visual / css : 1
+  return Number.isFinite(zoom) && zoom > 0.2 && zoom < 5 ? zoom : 1
 }
 
 function visualBox(guess: number) {
@@ -88,17 +91,10 @@ function applyBox(box: NonNullable<ReturnType<typeof visualBox>>, zoom: number) 
 async function updatePosition() {
   if (!open.value || !root.value) return
   await nextTick()
-  const guess = uiScaleGuess()
-  const box = visualBox(guess)
+  const zoom = bodyZoom()
+  const box = visualBox(zoom)
   if (!box) return
-  applyBox(box, guess)
-  await nextTick()
-  const element = menu.value
-  if (!element || box.width <= 0) return
-  // фактический коэффициент: видимая ширина меню делить на заданную в CSS ширину
-  const visibleWidth = element.getBoundingClientRect().width
-  const actual = guess * visibleWidth / box.width
-  if (Number.isFinite(actual) && actual > 0.2 && actual < 5 && Math.abs(actual - guess) > 0.005) applyBox(box, actual)
+  applyBox(box, zoom)
 }
 
 function reposition() {

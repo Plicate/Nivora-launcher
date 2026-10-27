@@ -8,7 +8,7 @@ const props = withDefaults(
     model?: 'classic' | 'slim'
     cape?: boolean
     capeImage?: string
-    /** Показать текстуру плаща как элитры (как в Prism Launcher). */
+    /** показать текстуру плаща как элитры (как в Prism Launcher) */
     elytra?: boolean
   }>(),
   { image: '', model: 'classic', cape: false, capeImage: '', elytra: false },
@@ -48,8 +48,7 @@ function render(now = performance.now()) {
 }
 
 function tick(now: number) {
-  // без взаимодействия ~30 кадров/с и ничего во скрытой вкладке; при
-  // перетаскивании — полная частота для плавного вращения.
+  // в покое ограничиваем частоту до 30 кадров/с и не рисуем в скрытой вкладке
   if (dragging || !document.hidden) {
     if (now - lastFrame >= (dragging ? 0 : 33)) render(now)
   }
@@ -111,7 +110,7 @@ onMounted(() => {
 watch([() => props.image, () => props.model], () => render())
 watch([() => props.capeImage, () => props.cape, () => props.elytra], () => {
   if (back()) {
-    // плащ и элитры видно сзади — разворачиваем модель спиной к зрителю.
+    // плащ и элитры видны сзади, поэтому разворачиваем модель спиной
     yaw = Math.PI - 0.5
     lastInteraction = performance.now()
   }

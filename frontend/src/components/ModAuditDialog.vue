@@ -102,7 +102,7 @@ async function cancelAudit(): Promise<void> {
       await bridge.modAuditCancel(sessionId)
       emit('toast', 'Проверка отклонена: декомпилированные исходники уничтожены без анализа')
     } catch {
-      // сессия могла уже истечь — исходники в любом случае удаляются по таймауту.
+      // истёкшие исходники удаляются по таймауту
     }
   }
 }
@@ -195,7 +195,7 @@ defineExpose({ start })
           <div class="dialog-copy mod-audit-copy">
             <div class="dialog-heading">
               <div>
-                <span class="eyebrow">Безопасность</span>
+                
                 <h2>Проверка «{{ fileName }}»</h2>
               </div>
               <button class="icon-button" type="button" aria-label="Закрыть" :disabled="phase === 'preparing' || phase === 'scanning'" @click="closeDialog"><Icon name="close" :size="16" /></button>

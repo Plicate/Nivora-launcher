@@ -31,6 +31,7 @@ const emit = defineEmits<{
   stop: [instance: InstanceInfo]
   settings: [instance: InstanceInfo]
   duplicate: [instance: InstanceInfo]
+  compare: [instance: InstanceInfo]
   'delete-instance': [instance: InstanceInfo]
 }>()
 
@@ -45,18 +46,36 @@ const groupNames = computed(() => Array.from(new Set([
   ...props.instances.map((instance) => instance.group).filter((group) => Boolean(group?.trim())),
 ])))
 const pinnedGroupNames = computed(() => props.pinnedGroups.filter((group) => groupNames.value.includes(group)).slice(0, 3))
+const javaClientCount = computed(() => props.instances.filter((instance) => instance.game_edition !== 'bedrock' && instance.kind !== 'server').length)
 const orderedGroupNames = computed(() => [
   ...pinnedGroupNames.value,
   ...groupNames.value.filter((group) => !pinnedGroupNames.value.includes(group)),
 ])
 const isPinned = (group: string) => pinnedGroupNames.value.includes(group)
+
+// "брызги краски" на звезде закрепа: класс живёт только на время анимации
+const splashGroups = ref(new Set<string>())
+
+function toggleGroupPin(group: string) {
+  if (!isPinned(group)) {
+    const next = new Set(splashGroups.value)
+    next.add(group)
+    splashGroups.value = next
+    window.setTimeout(() => {
+      const rest = new Set(splashGroups.value)
+      rest.delete(group)
+      splashGroups.value = rest
+    }, 650)
+  }
+  emit('toggle-pin', group)
+}
 const groupOptions = computed<SelectOption[]>(() => [
-  { value: '', label: 'Без группы', meta: 'Не входит в подборку' },
+  { value: '', label: 'Без подборки', meta: 'Экземпляр без подборки' },
   ...groupNames.value.map((group) => ({ value: group, label: group })),
 ])
 const filterOptions = computed<SelectOption[]>(() => [
   { value: 'all', label: 'Все экземпляры', meta: `${props.instances.length}` },
-  { value: 'ungrouped', label: 'Без группы', meta: `${props.instances.filter((instance) => !instance.group?.trim()).length}` },
+  { value: 'ungrouped', label: 'Без подборки', meta: `${props.instances.filter((instance) => !instance.group?.trim()).length}` },
   ...orderedGroupNames.value.map((group) => ({
     value: `group:${group}`,
     label: group,
@@ -85,7 +104,7 @@ const filteredInstances = computed(() => {
 const visibleSections = computed(() => {
   const sectionFor = (group: string) => ({
     key: group ? `group:${group}` : 'ungrouped',
-    name: group || 'Без группы',
+    name: group || 'Без подборки',
     group,
     instances: filteredInstances.value.filter((instance) => (instance.group || '') === group),
     totalCount: props.instances.filter((instance) => (instance.group || '') === group).length,
@@ -116,7 +135,7 @@ function changeGroup(instance: InstanceInfo, group: string) {
 }
 
 const compact = computed(() => props.layout === 'compact')
-// плитка компактного режима, у которой раскрыта панель «Дополнительно».
+// плитка компактного режима, у которой раскрыта панель "Дополнительно"
 const expandedInstance = ref('')
 
 function toggleMore(instance: InstanceInfo) {
@@ -132,7 +151,6 @@ function instanceMeta(instance: InstanceInfo): string {
   return version ? `${core} · ${version}` : core
 }
 
-/** Собственное меню правого клика по экземпляру — как у десктопных приложений. */
 function instanceMenu(event: MouseEvent, instance: InstanceInfo) {
   const title = instance.display_name || instance.name
   const items: ContextMenuItem[] = [
@@ -152,6 +170,11 @@ function instanceMenu(event: MouseEvent, instance: InstanceInfo) {
   if (instance.game_edition !== 'bedrock') {
     items.push({ id: 'duplicate', label: 'Дублировать', icon: 'copy', action: () => emit('duplicate', instance) })
   }
+  if (instance.game_edition !== 'bedrock' && instance.kind !== 'server') {
+    if (javaClientCount.value > 1) {
+      items.push({ id: 'compare', label: 'Сравнить с другой сборкой…', icon: 'eye', action: () => emit('compare', instance) })
+    }
+  }
   items.push({ id: 'delete', label: 'Удалить', icon: 'trash', danger: true, action: () => emit('delete-instance', instance) })
   openContextMenu(event, items, title)
 }
@@ -163,7 +186,7 @@ function toggleInstance(instance: InstanceInfo) {
 
 function emptyMessage(group: string): string {
   if (group) return 'Назначьте подборку в строке нужного экземпляра.'
-  if (props.activeFilter !== 'all') return 'Выберите «Без группы» у нужного экземпляра.'
+  if (props.activeFilter !== 'all') return 'Выберите «Без подборки» у нужного экземпляра.'
   return 'Здесь будут профили, которым не назначена подборка.'
 }
 
@@ -251,14 +274,14 @@ function formatPlayedTime(value: number): string {
             </button>
             <button
               v-if="section.group"
-              class="icon-button instance-group-pin"
-              :class="{ 'instance-group-pin--active': isPinned(section.group) }"
+              class="icon-button instance-group-pin pin-star"
+              :class="{ 'pin-star--active instance-group-pin--active': isPinned(section.group), 'pin-star--splash': splashGroups.has(section.group) }"
               type="button"
               :disabled="groupBusy || (!isPinned(section.group) && pinnedGroupNames.length >= 3)"
               :aria-label="isPinned(section.group) ? `Открепить группу «${section.group}»` : `Закрепить группу «${section.group}»`"
               :aria-pressed="isPinned(section.group)"
               v-tooltip="isPinned(section.group) ? 'Открепить группу' : pinnedGroupNames.length >= 3 ? 'Можно закрепить не более трёх групп' : 'Закрепить группу сверху'"
-              @click="emit('toggle-pin', section.group)"
+              @click="toggleGroupPin(section.group)"
             >
               <Icon name="star" :size="15" />
             </button>
@@ -276,7 +299,8 @@ function formatPlayedTime(value: number): string {
           </div>
         </header>
 
-        <div v-if="section.instances.length && compact" class="instance-tiles">
+        <Transition name="layout-swap" mode="out-in">
+        <div v-if="section.instances.length && compact" key="tiles" class="instance-tiles">
           <article
             v-for="instance in section.instances"
             :key="instance.name"
@@ -317,7 +341,6 @@ function formatPlayedTime(value: number): string {
             </button>
             <div v-if="expandedInstance === instance.name" class="instance-tile-more">
               <div class="instance-tile-more-row">
-                <span>Подборка</span>
                 <CustomSelect
                   :model-value="instance.group || ''"
                   :options="groupOptions"
@@ -334,7 +357,7 @@ function formatPlayedTime(value: number): string {
             </div>
           </article>
         </div>
-        <div v-else-if="section.instances.length" class="instance-list">
+        <div v-else-if="section.instances.length" key="list" class="instance-list">
           <article v-for="instance in section.instances" :key="instance.name" class="instance-row" @contextmenu="instanceMenu($event, instance)">
             <div class="instance-row-primary">
               <span class="instance-row-mark">
@@ -365,7 +388,6 @@ function formatPlayedTime(value: number): string {
             </div>
             <div class="instance-row-controls">
               <div class="instance-row-group">
-                <span>Подборка</span>
                 <CustomSelect
                   :model-value="instance.group || ''"
                   :options="groupOptions"
@@ -379,13 +401,14 @@ function formatPlayedTime(value: number): string {
                   <Icon :name="instance.running ? 'stop' : 'play'" :size="14" />{{ instance.running ? 'Остановить' : (instance.kind === 'server' ? 'Запустить' : 'Играть') }}
                 </button>
                 <button class="icon-button" type="button" :aria-label="`Настройки экземпляра ${instance.display_name || instance.name}`" v-tooltip="'Настройки'" @click="emit('settings', instance)"><Icon name="settings" :size="15" /></button>
+                <button v-if="instance.game_edition !== 'bedrock' && instance.kind !== 'server' && javaClientCount > 1" class="icon-button" type="button" :aria-label="`Сравнить ${instance.display_name || instance.name} с другой сборкой`" v-tooltip="'Сравнить с другой сборкой'" @click="emit('compare', instance)"><Icon name="eye" :size="15" /></button>
                 <button v-if="instance.game_edition !== 'bedrock'" class="icon-button" type="button" :aria-label="`Дублировать ${instance.display_name || instance.name}`" v-tooltip="'Дублировать'" @click="emit('duplicate', instance)"><Icon name="copy" :size="15" /></button>
                 <button class="icon-button icon-button--danger" type="button" :aria-label="`Удалить ${instance.display_name || instance.name}`" v-tooltip="'Удалить'" @click="emit('delete-instance', instance)"><Icon name="trash" :size="15" /></button>
               </div>
             </div>
           </article>
         </div>
-        <div v-else class="instance-group-empty">
+        <div v-else key="empty" class="instance-group-empty">
           <span class="empty-orb"><Icon :name="section.group ? 'folder' : 'instances'" :size="20" /></span>
           <div>
             <strong>{{ section.group ? 'В этой группе пока пусто' : 'Нет экземпляров без группы' }}</strong>
@@ -393,6 +416,7 @@ function formatPlayedTime(value: number): string {
             <button v-if="activeFilter !== 'all'" class="text-button" type="button" @click="emit('update:activeFilter', 'all')">Показать все экземпляры</button>
           </div>
         </div>
+        </Transition>
       </section>
     </div>
   </section>

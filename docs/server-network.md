@@ -57,13 +57,11 @@
 
 ## Границы реализации
 
-UPnP использует отдельный ограниченный LAN-клиент, без изменения политик публичного HTTP-клиента. Description/control URLs должны содержать RFC1918 IPv4, совпадающий с источником SSDP-ответа. DNS-имена, loopback, link-local, сторонние адреса, URL credentials и redirects запрещены. XML ограничен по размеру и разбирается через defusedxml; DTD/entities не разрешены. Запросы не содержат учётных данных Microsoft или Minecraft.
-
-Проверки выполняются unit/integration-тестами с поддельным роутером: аренда и продление, удаление после остановки, конфликты, неподдерживаемые постоянные правила, CGNAT, подтверждение публикации, сохранение server.properties, XML/URL ограничения, HTTP redirects, мост frontend → desktop → backend. Подключение к настоящему роутеру и вход из внешнего интернета проверяются на целевой системе.
+UPnP использует отдельный ограниченный LAN-клиент, без изменения политик публичного HTTP-клиента. Description/control URLs должны содержать RFC1918 IPv4, совпадающий с источником SSDP-ответа. DNS-имена, loopback, link-local, сторонние адреса, URL credentials и redirects запрещены. XML ограничен по размеру; собственный парсер отклоняет DTD и неизвестные сущности. Запросы не содержат учётных данных Microsoft или Minecraft.
 
 ---
 
-<!-- English version / Английская версия -->
+<!-- english version / Английская версия -->
 
 # Publishing a server over a white IPv4
 
@@ -124,6 +122,6 @@ The diagnostics are not an external security audit. The **"UPnP forwarding creat
 
 ## Implementation boundaries
 
-UPnP uses a separate restricted LAN client and does not touch the public HTTP client policies. Description/control URLs must contain an RFC1918 IPv4 matching the source of the SSDP response. DNS names, loopback, link-local, third-party addresses, URL credentials and redirects are forbidden. XML is size-limited and parsed through defusedxml; DTD/entities are not allowed. Requests carry no Microsoft or Minecraft credentials.
+UPnP uses a separate restricted LAN client and does not touch the public HTTP client policies. Description/control URLs must contain an RFC1918 IPv4 matching the source of the SSDP response. DNS names, loopback, link-local, third-party addresses, URL credentials and redirects are forbidden. XML is size-limited; the in-tree parser rejects DTD and unknown entities. Requests carry no Microsoft or Minecraft credentials.
 
-The checks are covered by unit/integration tests with a fake router: lease and renewal, deletion after stop, conflicts, unsupported permanent rules, CGNAT, publication confirmation, server.properties saving, XML/URL limits, HTTP redirects, and the frontend → desktop → backend bridge. Connecting to a real router and joining from the external internet are verified on the target system.
+

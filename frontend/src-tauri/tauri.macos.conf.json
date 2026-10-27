@@ -4,7 +4,9 @@
     "targets": ["app", "dmg"],
     "createUpdaterArtifacts": false,
     "resources": {
-      "resources/backend/app": "backend"
+      "resources/backend/nivora-turbo": "backend/nivora-turbo",
+      "resources/backend/nivora-modcat": "backend/nivora-modcat",
+      "resources/backend/ModScan.java": "backend/ModScan.java"
     },
     "macOS": {
       "minimumSystemVersion": "10.15",

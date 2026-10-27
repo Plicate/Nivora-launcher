@@ -18,7 +18,7 @@ import { bridge } from './bridge'
 
 const tones = new Set<PluginUiTone>(['default', 'muted', 'success', 'warning', 'danger'])
 
-export interface PluginHostContext {
+interface PluginHostContext {
   pluginId: string
   manifest: RuntimePluginManifest
   selectedInstance(): PluginInstanceRef | null

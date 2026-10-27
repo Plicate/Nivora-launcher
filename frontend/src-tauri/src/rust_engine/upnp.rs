@@ -1,4 +1,4 @@
-// ограниченный UPnP IGD-клиент. Трафик к роутеру никогда не идёт через общий
+// ограниченный UPnP IGD-клиент с прямым соединением к роутеру
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpStream, UdpSocket};
 use std::time::{Duration, Instant};
@@ -32,7 +32,7 @@ impl UpnpError {
 
 type UpnpResult<T> = Result<T, UpnpError>;
 
-/// строгий разбор dotted-quad: как IPv4Address — без ведущих нулей и мусора.
+/// разбирает IPv4 в строгой десятичной записи без ведущих нулей
 pub(crate) fn parse_ipv4(value: &str) -> Option<Ipv4Addr> {
     let octets: Vec<&str> = value.split('.').collect();
     if octets.len() != 4 {
@@ -148,7 +148,7 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|window| window == needle)
 }
 
-/// прямой запрос к роутеру: никакой переадресации, лимит тела MAX_XML_BYTES.
+/// отправляет прямой запрос роутеру без перенаправлений и с лимитом ответа
 pub(crate) fn router_request(
     url: &str,
     peer: &str,
@@ -210,7 +210,7 @@ pub(crate) struct XmlNode {
 }
 
 impl XmlNode {
-    /// все узлы поддерева в порядке документа, начиная с себя (как Element.iter).
+    /// собирает узлы поддерева в порядке документа, начиная с корня
     fn iter_nodes<'a>(&'a self, sink: &mut Vec<&'a XmlNode>) {
         sink.push(self);
         for child in &self.children {
@@ -312,7 +312,7 @@ impl<'a> XmlParser<'a> {
         }
         self.position += 1;
         let tag = self.parse_name()?;
-        // атрибуты разбираем и выбрасываем, но кавычки в них уважаем.
+        // атрибуты игнорируем, но корректно разбираем кавычки
         loop {
             self.skip_whitespace();
             match self.peek() {
@@ -384,7 +384,7 @@ impl<'a> XmlParser<'a> {
                 continue;
             }
             if self.starts_with(b"<!") || self.starts_with(b"<?") {
-                // DOCTYPE, ENTITY и инструкции — запрещены как у defusedxml.
+                // запрещаем DTD, сущности и инструкции
                 return Err(());
             }
             if self.peek() == Some(b'<') {
@@ -444,14 +444,14 @@ impl<'a> XmlParser<'a> {
                 };
                 char::from_u32(code).ok_or(())?.to_string()
             }
-            _ => return Err(()), // неопределённые сущности — как запрет DTD
+            _ => return Err(()),
         };
         self.position = start + semicolon + 1;
         Ok(decoded)
     }
 }
 
-/// xml.sax.saxutils.escape: только &, < и >.
+/// экранирует `&`, `<` и `>`
 pub(crate) fn xml_escape(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for character in value.chars() {
@@ -476,7 +476,7 @@ pub(crate) fn ssdp_locations(timeout: f64) -> UpnpResult<Vec<(String, String)>> 
     let socket = UdpSocket::bind("0.0.0.0:0").map_err(|_| UpnpError::new("UPnP-поиск недоступен. Проверьте локальную сеть и firewall"))?;
     #[cfg(unix)]
     {
-        // TTL=1: multicast не должен покидать локальную сеть.
+        // значение TTL=1 не должно выпускать multicast за пределы локальной сети
         use std::os::fd::AsRawFd;
         let ttl: libc::c_int = 1;
         unsafe {
@@ -491,7 +491,7 @@ pub(crate) fn ssdp_locations(timeout: f64) -> UpnpResult<Vec<(String, String)>> 
         .map_err(|_| UpnpError::new("UPnP-поиск недоступен. Проверьте локальную сеть и firewall"))?;
 
     let mut result: Vec<(String, String)> = Vec::new();
-    // ограничены и время, и число пакетов — включая мусорные ответы из LAN.
+    // ограничиваем время поиска и число ответов из локальной сети
     for _ in 0..64 {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
@@ -513,7 +513,7 @@ pub(crate) fn ssdp_locations(timeout: f64) -> UpnpResult<Vec<(String, String)>> 
         if !lan_ipv4(&peer) {
             continue;
         }
-        // iso-8859-1: каждый байт — символ.
+        // заголовки SSDP читаем побайтно как ISO-8859-1
         let raw: String = buffer[..count].iter().map(|byte| *byte as char).collect();
         let mut lines = raw.split("\r\n");
         if !lines.next().unwrap_or("").starts_with("HTTP/1.1 200") {
@@ -551,7 +551,7 @@ pub(crate) struct Gateway {
 }
 
 impl Gateway {
-    /// имена аргументов задаются этим модулем, а не XML от роутера.
+    /// имена элементов задаёт код, значения экранируются
     pub(crate) fn action(&self, action: &str, values: &[(&str, &str)]) -> UpnpResult<Vec<(String, String)>> {
         let elements: String = values
             .iter()
@@ -650,7 +650,7 @@ impl Gateway {
     }
 }
 
-/// только UDP-маршрутизация; connect() не отправляет пакеты.
+/// определяет исходный адрес через UDP без отправки данных
 pub(crate) fn source_ip(peer: &str) -> String {
     let port = if lan_ipv4(peer) { 1900 } else { 443 };
     let Ok(socket) = UdpSocket::bind("0.0.0.0:0") else { return String::new() };
@@ -766,11 +766,8 @@ mod tests {
         assert_eq!(router_url("http://192.168.1.1:49152/rootDesc.xml", "192.168.1.1").unwrap().1, 49152);
         let (_, port, path) = router_url("http://10.0.0.138/desc.xml?x=1", "10.0.0.138").unwrap();
         assert_eq!((port, path.as_str()), (80, "/desc.xml?x=1"));
-        // хост не равен пиру.
         assert!(router_url("http://192.168.1.2/rootDesc.xml", "192.168.1.1").is_err());
-        // не LAN-адрес.
         assert!(router_url("http://8.8.8.8/rootDesc.xml", "8.8.8.8").is_err());
-        // HTTPS, учётные данные, фрагмент, кривой порт — мимо.
         assert!(router_url("https://192.168.1.1/x", "192.168.1.1").is_err());
         assert!(router_url("http://user:pass@192.168.1.1/x", "192.168.1.1").is_err());
         assert!(router_url("http://192.168.1.1/x#frag", "192.168.1.1").is_err());
@@ -806,7 +803,6 @@ mod tests {
 
         assert!(parse_xml(b"<!DOCTYPE r [<!ENTITY xxe SYSTEM \"file:///etc/passwd\">]><r>&xxe;</r>").is_err());
         assert!(parse_xml(b"<r>&unknown;</r>").is_err());
-        // незакрытый CDATA — обрыв документа.
         assert!(parse_xml(b"<r><![CDATA[unterminated</r>").is_err());
         assert_eq!(
             parse_xml("<r><![CDATA[значение]]></r>".as_bytes()).unwrap().text,
@@ -827,7 +823,7 @@ mod tests {
             "<controlURL>/ctl/IPConn</controlURL>",
             "</service></serviceList></device></root>"
         );
-        // source_ip зависит от маршрута — на CI шлюзы не проверяем, только разбор.
+        // на CI не проверяем шлюз: результат зависит от сетевого маршрута
         let root = parse_xml(description.as_bytes()).unwrap();
         assert_eq!(root.first_text("friendlyName").unwrap(), "Keenetic");
         let services = root.find_all("service");

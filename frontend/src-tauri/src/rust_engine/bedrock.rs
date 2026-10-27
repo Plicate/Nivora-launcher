@@ -1,4 +1,3 @@
-// minecraft Bedrock для всех поддерживаемых ОС — целиком в Rust.
 use base64::Engine;
 use regex::Regex;
 use serde_json::{json, Value};
@@ -19,14 +18,43 @@ use super::platform_support::{is_reparse_point, process_exists};
 use super::process_guard::InstanceProcessLock;
 use super::state::{launcher_roots, read_bounded_json, safe_instance_name, settings_game_dir};
 
+// дочерние модули обращаются к платформе и помощникам через `super::platform::*`
+#[allow(unused_imports)]
+pub(super) use super::platform;
+mod content;
+mod profiles;
+mod runtime;
+#[cfg(test)]
+use content::{classify_archive, import_extension, scope_tail};
+pub use profiles::{
+    account_status, create_instance, store_login, store_login_cancel, store_login_status,
+};
+pub(crate) use profiles::{delete_profile, profile_path_for, snapshot_root_for};
+use profiles::{
+    bol_profile_signed_in, engine_ready, linux_profile_path, profile_paths, selected_version,
+    store_status, BEDROCK_LOGIN_REQUIRED_MESSAGE,
+};
+#[cfg(test)]
+use profiles::{
+    keyring_file_signed_in, profile_name, profile_name_re, share_xodus_keyring, ProfilePaths,
+};
+use runtime::{
+    bol_require_runtime, bol_run, bol_runtime, bol_select_supported, glibc_version,
+    python_for_zipapp, spawn_line_reader, stop_registered_process, DownloadWatchdog,
+};
+#[cfg(test)]
+use runtime::{
+    bol_environment, bol_probe, bundled_pyz_candidates, clean_process_line, WatchdogVerdict,
+};
+
 const BEDROCK_ON_LINUX_URL: &str = "https://github.com/Wyze3306/BedrockOnLinux";
 const BEDROCK_ON_LINUX_BUNDLED_VERSION: &str = "2.2.9";
 const BEDROCK_ON_LINUX_BUNDLED_SHA256: &str =
     "bb894a86ed19575635d63f11cef466b70da2b99a12a3bda8468386630c40ed5c";
 const BUNDLED_PYZ_MAX_BYTES: u64 = 4 * 1024 * 1024;
-/// минимальная поддержка версии среды (2.2.0).
+/// минимальная поддержка версии среды (2.2.0)
 const MIN_BOL_VERSION: (u32, u32, u32) = (2, 2, 0);
-/// glibc, ниже которого xodus-вход в Microsoft Store не работает.
+/// glibc, ниже которого xodus-вход в Microsoft Store не работает
 const MIN_GLIBC_VERSION: (u32, u32, u32) = (2, 39, 0);
 
 pub(crate) const MAX_CONTENT_UPLOAD_BYTES: usize = 128 * 1024 * 1024;
@@ -36,11 +64,6 @@ const MAX_JOB_LOG_LINES: usize = 200;
 const MAX_SESSION_LOG_LINES: usize = 500;
 const MAX_LOG_ARCHIVE_BYTES: u64 = 5 * 1024 * 1024;
 
-/// внутрипрофильный путь BoL к данным игры (относительно профиля).
-const BOL_CONTENT_ROOT_PARTS: &[&str] = &[
-    "compatdata", "pfx", "drive_c", "users", "steamuser", "AppData", "Roaming",
-    "Minecraft Bedrock", "Users",
-];
 const CONTENT_DIRECTORIES: &[(&str, &[&str])] = &[
     ("addons", &["behavior_packs"]),
     ("resourcepacks", &["resource_packs"]),
@@ -113,14 +136,10 @@ fn secret_line_re() -> &'static Regex {
     });
     &RE
 }
-/// bedrockOnLinux пишет уровень в начало строки («error …»); среда может
-/// завершиться с кодом 0 даже после собственных «error».
+/// bedrockOnLinux пишет уровень в начало строки ("error …"); среда может
+/// завершиться с кодом 0 даже после собственных "error"
 fn bol_error_line_re() -> &'static Regex {
     static RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)^(?:error|critical|fatal)\b").unwrap());
-    &RE
-}
-fn profile_name_re() -> &'static Regex {
-    static RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^nivora-[0-9a-f]{16}\z").unwrap());
     &RE
 }
 fn glibc_re() -> &'static Regex {
@@ -204,7 +223,7 @@ fn random_hex(byte_count: usize) -> String {
             return buffer.iter().map(|byte| format!("{byte:02x}")).collect();
         }
     }
-    // фолбэк: pid + время через SHA-256 (на Windows urandom недоступен напрямую).
+    // фолбэк: pid + время через SHA-256 (на Windows urandom недоступен напрямую)
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|value| value.subsec_nanos())
@@ -271,7 +290,7 @@ fn request_field<'a>(request: &'a Value, name: &str) -> Result<&'a str, String> 
     Ok(value)
 }
 
-/// CREATE_NO_WINDOW: вспомогательные утилиты Windows не должны мелькать консолью.
+/// флаг CREATE_NO_WINDOW: вспомогательные утилиты Windows не должны мелькать консолью
 fn prepare_command(command: &mut Command) -> &mut Command {
     #[cfg(windows)]
     {
@@ -282,7 +301,7 @@ fn prepare_command(command: &mut Command) -> &mut Command {
     command
 }
 
-/// запуск с общим таймаутом; возвращает (код, stdout+stderr). None — таймаут.
+/// запускает процесс с общим таймаутом и возвращает код с выводом. `None` означает таймаут
 fn run_timed(command: &mut Command, timeout: Duration) -> Option<(i32, String)> {
     let child = command
         .stdin(Stdio::null())
@@ -448,806 +467,6 @@ fn job_fail(job: &Arc<Mutex<JobState>>, error: &str, cancelled: bool) {
     state.error = error.to_owned();
 }
 
-struct BolRuntime {
-    /// готовые к запуску команды (системная среда и/или встроенный pyz).
-    commands: Vec<Vec<String>>,
-    setup_error: String,
-}
-
-struct ProbeStatus {
-    supported: bool,
-    version: String,
-    message: String,
-}
-
-/// имя файла встроенной среды: версия и имя держатся в синхроне.
-fn bundled_pyz_name() -> &'static str {
-    static NAME: LazyLock<String> =
-        LazyLock::new(|| format!("bedrock-on-linux-{BEDROCK_ON_LINUX_BUNDLED_VERSION}.pyz"));
-    &NAME
-}
-
-fn bundled_pyz_candidates() -> Vec<PathBuf> {
-    let mut candidates = Vec::new();
-    if let Some(path) = std::env::var_os("NIVORA_BEDROCK_ON_LINUX_PYZ") {
-        candidates.push(PathBuf::from(path));
-    }
-    if let Ok(current) = std::env::current_exe() {
-        if let Some(dir) = current.parent() {
-            candidates.push(dir.join("vendor").join(bundled_pyz_name()));
-            candidates.push(dir.join("nivora_launcher").join("vendor").join(bundled_pyz_name()));
-            candidates.push(dir.join("../share/nivora-launcher/vendor").join(bundled_pyz_name()));
-            candidates.push(dir.join("../Resources/vendor").join(bundled_pyz_name()));
-            // режим разработки: binary лежит в target/debug, pyz — в
-            // src-tauri/resources/vendor.
-            candidates.push(dir.join("../../resources/vendor").join(bundled_pyz_name()));
-        }
-    }
-    if let Ok(cwd) = std::env::current_dir() {
-        candidates.push(cwd.join("nivora_launcher").join("vendor").join(bundled_pyz_name()));
-    }
-    candidates.push(launcher_roots().data_home.join("vendor").join(bundled_pyz_name()));
-    candidates
-}
-
-fn python_for_zipapp() -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os("NIVORA_PYTHON") {
-        return Some(PathBuf::from(path));
-    }
-    for name in ["python3", "python"] {
-        if let Some(found) = find_in_path(name) {
-            return Some(found);
-        }
-    }
-    None
-}
-
-fn bol_runtime() -> BolRuntime {
-    let mut commands: Vec<Vec<String>> = Vec::new();
-    if let Some(executable) = find_in_path("bedrock-on-linux") {
-        commands.push(vec![executable.to_string_lossy().into_owned()]);
-    }
-    let mut bundled_error = String::new();
-    let mut bundled: Option<PathBuf> = None;
-    for candidate in bundled_pyz_candidates() {
-        if is_reparse_point(&candidate) {
-            bundled_error = "Среда запуска Bedrock повреждена. Переустановите Nivora.".to_owned();
-            break;
-        }
-        match fs::metadata(&candidate) {
-            Ok(meta) if meta.is_file() => {
-                if meta.len() > BUNDLED_PYZ_MAX_BYTES {
-                    bundled_error =
-                        "Размер среды запуска Bedrock не прошёл проверку. Переустановите приложение."
-                            .to_owned();
-                    break;
-                }
-                match fs::read(&candidate) {
-                    Ok(bytes) => {
-                        if sha256_hex(&bytes) != BEDROCK_ON_LINUX_BUNDLED_SHA256 {
-                            bundled_error =
-                                "Проверка среды запуска Bedrock не пройдена. Переустановите Nivora."
-                                    .to_owned();
-                            break;
-                        }
-                        bundled = Some(candidate);
-                    }
-                    Err(error) => {
-                        bundled_error = format!("Не удалось проверить среду запуска Bedrock: {error}");
-                        break;
-                    }
-                }
-            }
-            _ => continue,
-        }
-    }
-    match &bundled {
-        Some(path) => match python_for_zipapp() {
-            Some(python) => {
-                commands.push(vec![python.to_string_lossy().into_owned(), path.to_string_lossy().into_owned()])
-            }
-            None => {
-                bundled_error = "Для среды запуска Bedrock нужен Python 3; переустановите Nivora с зависимостями."
-                    .to_owned()
-            }
-        },
-        None => {
-            if bundled_error.is_empty() {
-                bundled_error =
-                    "Среда запуска Bedrock отсутствует в пакете Nivora. Переустановите приложение.".to_owned();
-            }
-        }
-    }
-    BolRuntime { commands, setup_error: bundled_error }
-}
-
-/// glibc для store-login BedrockOnLinux (xodus требует 2.39+).
-fn glibc_version() -> Option<String> {
-    if !cfg!(target_os = "linux") {
-        return None;
-    }
-    let ldd = find_in_path("ldd")?;
-    let output = run_timed(prepare_command(super::platform::command(ldd).arg("--version")), Duration::from_secs(10))?;
-    glibc_re()
-        .captures(&output.1)
-        .and_then(|captures| captures.get(1).map(|value| value.as_str().to_owned()))
-}
-
-fn bol_probe(command: &[String], home: &Path) -> ProbeStatus {
-    let unsupported = |version: String, message: &str| ProbeStatus {
-        supported: false,
-        version,
-        message: message.to_owned(),
-    };
-    let mut process = super::platform::command(&command[0]);
-    process.args(&command[1..]).arg("--help");
-    if home.is_dir() {
-        process.current_dir(home);
-    }
-    let mut environment: HashMap<String, String> = std::env::vars().collect();
-    environment.insert("BOL_HOME".to_owned(), home.to_string_lossy().into_owned());
-    process.envs(&environment);
-    let Some((code, output)) = run_timed(prepare_command(&mut process), Duration::from_secs(15)) else {
-        return unsupported(
-            String::new(),
-            "Не удалось проверить среду запуска Bedrock: время ожидания истекло",
-        );
-    };
-    let Some(captures) = version_re().captures(&output) else {
-        return unsupported(
-            String::new(),
-            "Не удалось проверить совместимость среды запуска Bedrock. Переустановите приложение.",
-        );
-    };
-    let version = captures.get(1).map(|value| value.as_str().to_owned()).unwrap_or_default();
-    if code != 0 {
-        return unsupported(
-            version,
-            "Не удалось проверить совместимость среды запуска Bedrock. Переустановите приложение.",
-        );
-    }
-    let supported = version_tuple(&version) >= MIN_BOL_VERSION;
-    ProbeStatus {
-        supported,
-        version,
-        message: if supported {
-            "Среда запуска Bedrock готова к работе.".to_owned()
-        } else {
-            "Среда запуска Bedrock устарела. Обновите Nivora до актуальной версии.".to_owned()
-        },
-    }
-}
-
-fn bol_select_supported(commands: &[Vec<String>], home: &Path) -> (Vec<String>, ProbeStatus) {
-    let mut last = ProbeStatus {
-        supported: false,
-        version: String::new(),
-        message: "Не удалось проверить совместимость среды запуска Bedrock. Переустановите приложение."
-            .to_owned(),
-    };
-    for command in commands {
-        last = bol_probe(command, home);
-        if last.supported {
-            return (command.clone(), last);
-        }
-    }
-    (commands.last().cloned().unwrap_or_default(), last)
-}
-
-fn bol_require_runtime(home: &Path) -> Result<(Vec<String>, ProbeStatus), String> {
-    let runtime = bol_runtime();
-    if runtime.commands.is_empty() {
-        return Err(runtime.setup_error);
-    }
-    let selected = bol_select_supported(&runtime.commands, home);
-    if !selected.1.supported {
-        return Err(selected.1.message);
-    }
-    Ok(selected)
-}
-
-static ACTIVE_PROCESSES: LazyLock<Mutex<HashMap<String, Arc<Mutex<Child>>>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-
-fn register_process(key: &str, child: Child) -> Arc<Mutex<Child>> {
-    let shared = Arc::new(Mutex::new(child));
-    ACTIVE_PROCESSES.lock().unwrap().insert(key.to_owned(), Arc::clone(&shared));
-    shared
-}
-
-fn unregister_process(key: &str, shared: &Arc<Mutex<Child>>) {
-    let mut map = ACTIVE_PROCESSES.lock().unwrap();
-    if map.get(key).is_some_and(|existing| Arc::ptr_eq(existing, shared)) {
-        map.remove(key);
-    }
-}
-
-fn stop_registered_process(key: &str) -> bool {
-    let shared = {
-        let map = ACTIVE_PROCESSES.lock().unwrap();
-        map.get(key).cloned()
-    };
-    let Some(shared) = shared else { return false };
-    let mut child = shared.lock().unwrap();
-    if child.try_wait().ok().flatten().is_some() {
-        return false;
-    }
-    terminate_process_tree(&mut child, false);
-    true
-}
-
-fn terminate_process_tree(child: &mut Child, force: bool) {
-    if child.try_wait().ok().flatten().is_some() {
-        return;
-    }
-    #[cfg(target_os = "linux")]
-    {
-        terminate_linux_tree(child, force);
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        terminate_generic(child, force);
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn terminate_linux_tree(child: &mut Child, force: bool) {
-    let pid = child.id() as i32;
-    if pid <= 0 {
-        terminate_generic(child, force);
-        return;
-    }
-    let tree = linux_process_tree(pid);
-    if tree.is_empty() {
-        terminate_generic(child, force);
-        return;
-    }
-    let signal = if force { libc::SIGKILL } else { libc::SIGTERM };
-    for item in tree.iter().rev() {
-        unsafe {
-            libc::kill(*item, signal);
-        }
-    }
-    if force {
-        return;
-    }
-    let deadline = Instant::now() + Duration::from_secs(4);
-    while Instant::now() < deadline {
-        if !tree.iter().any(|pid| linux_process_alive(*pid)) {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    for item in tree.iter().rev() {
-        unsafe {
-            libc::kill(*item, libc::SIGKILL);
-        }
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn linux_process_tree(root_pid: i32) -> Vec<i32> {
-    let mut pending = vec![root_pid];
-    let mut seen: Vec<i32> = Vec::new();
-    let mut ordered = Vec::new();
-    while let Some(pid) = pending.pop() {
-        if seen.contains(&pid) {
-            continue;
-        }
-        seen.push(pid);
-        ordered.push(pid);
-        let children_path = format!("/proc/{pid}/task/{pid}/children");
-        if let Ok(text) = fs::read_to_string(children_path) {
-            for token in text.split_whitespace() {
-                if let Ok(child) = token.parse::<i32>() {
-                    pending.push(child);
-                }
-            }
-        }
-    }
-    ordered
-}
-
-#[cfg(target_os = "linux")]
-fn linux_process_alive(pid: i32) -> bool {
-    let Ok(value) = fs::read_to_string(format!("/proc/{pid}/stat")) else { return false };
-    let tail = &value[value.rfind(')').map(|index| index + 1).unwrap_or(0)..];
-    !tail.trim_start().starts_with('Z')
-}
-
-fn terminate_generic(child: &mut Child, _force: bool) {
-    #[cfg(windows)]
-    {
-        if let Some(taskkill) = find_in_path("taskkill.exe").or_else(|| find_in_path("taskkill")) {
-            let _ = super::platform::command(taskkill)
-                .args(["/PID", &child.id().to_string(), "/T", "/F"])
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
-            return;
-        }
-    }
-    let _ = child.kill();
-    let _ = child.wait();
-}
-
-fn bol_environment(home: &Path, xdg_data_home: Option<&Path>) -> HashMap<String, String> {
-    let mut environment: HashMap<String, String> = std::env::vars().collect();
-    environment.insert("BOL_HOME".to_owned(), home.to_string_lossy().into_owned());
-    if let Some(xdg) = xdg_data_home {
-        environment.insert("XDG_DATA_HOME".to_owned(), xdg.to_string_lossy().into_owned());
-    }
-    if let Some(stub_dir) = notification_stub_dir(home) {
-        let separator = if cfg!(windows) { ";" } else { ":" };
-        let path = environment.get("PATH").cloned().unwrap_or_default();
-        environment.insert("PATH".to_owned(), format!("{stub_dir}{separator}{path}"));
-    }
-    environment
-}
-
-fn notification_stub_dir(home: &Path) -> Option<String> {
-    let stub_dir = home.join(".nivora-bin");
-    let result = (|| -> std::io::Result<()> {
-        fs::create_dir_all(&stub_dir)?;
-        let stub = stub_dir.join("notify-send");
-        if !stub.exists() {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                fs::write(&stub, "#!/bin/sh\nexit 0\n")?;
-                fs::set_permissions(&stub, fs::Permissions::from_mode(0o755))?;
-            }
-            #[cfg(not(unix))]
-            fs::write(&stub, "")?;
-        }
-        Ok(())
-    })();
-    match result {
-        Ok(()) if stub_dir.join("notify-send").is_file() => Some(stub_dir.to_string_lossy().into_owned()),
-        _ => None,
-    }
-}
-
-fn bol_run(
-    argv: &[String],
-    home: &Path,
-    process_key: &str,
-    cancellation: Option<&CancellationToken>,
-    mut on_line: Option<&mut dyn FnMut(&str)>,
-    stall_timeout: Duration,
-    max_lines: usize,
-    quiet: bool,
-    xdg_data_home: Option<&Path>,
-    on_start: Option<&dyn Fn(u32)>,
-    mut watchdog: Option<&mut DownloadWatchdog>,
-) -> Result<(i32, Vec<String>), String> {
-    let (command, status) = {
-        let runtime = bol_runtime();
-        if runtime.commands.is_empty() {
-            return Err(runtime.setup_error);
-        }
-        bol_select_supported(&runtime.commands, home)
-    };
-    if !status.supported {
-        return Err(status.message);
-    }
-    if let Some(token) = cancellation {
-        token.check()?;
-    }
-    let mut process = super::platform::command(&command[0]);
-    process
-        .args(&command[1..])
-        .args(argv)
-        .current_dir(home)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .envs(bol_environment(home, xdg_data_home));
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        process.process_group(0);
-    }
-    prepare_command(&mut process);
-    let mut child = process
-        .spawn()
-        .map_err(|error| format!("Не удалось запустить Minecraft Bedrock: {error}"))?;
-    if let Some(started) = on_start {
-        started(child.id());
-    }
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
-    let (sender, receiver) = mpsc::channel::<Option<String>>();
-    spawn_line_reader(stdout, sender.clone());
-    spawn_line_reader(stderr, sender);
-    let shared = register_process(process_key, child);
-    let mut lines: Vec<String> = Vec::new();
-    let mut stalled = false;
-    let mut last_output = Instant::now();
-    let mut exit_code: Option<i32> = None;
-    let mut reader_done = false;
-    while !reader_done || exit_code.is_none() {
-        if let Some(token) = cancellation {
-            if token.cancelled() {
-                if let Ok(mut child) = shared.try_lock() {
-                    terminate_process_tree(&mut child, false);
-                }
-                unregister_process(process_key, &shared);
-                return Err("Операция остановлена пользователем".to_owned());
-            }
-        }
-        match receiver.recv_timeout(Duration::from_millis(100)) {
-            Ok(Some(line)) => {
-                last_output = Instant::now();
-                if !quiet {
-                    let safe = redact_line(&line);
-                    lines.push(safe.clone());
-                    if lines.len() > max_lines {
-                        let drop = lines.len() - max_lines;
-                        lines.drain(..drop);
-                    }
-                    if let Some(callback) = on_line.as_deref_mut() {
-                        callback(&safe);
-                    }
-                }
-            }
-            Ok(None) => reader_done = true,
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                if !stall_timeout.is_zero() && last_output.elapsed() > stall_timeout {
-                    // молчание stdout ≠ зависание: CLI-путь do_setup в
-                    let verdict = watchdog.as_deref_mut().map(|state| state.check());
-                    match verdict {
-                        Some(WatchdogVerdict::Active(bytes)) => {
-                            last_output = Instant::now();
-                            if let Some(callback) = on_line.as_deref_mut() {
-                                callback(&format!(
-                                    "Скачивание продолжается: {} данных получено",
-                                    human_bytes(bytes)
-                                ));
-                            }
-                        }
-                        Some(WatchdogVerdict::Pending) => {}
-                        _ => {
-                            stalled = true;
-                            break;
-                        }
-                    }
-                }
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => reader_done = true,
-        }
-        if exit_code.is_none() {
-            if let Ok(mut child) = shared.try_lock() {
-                if let Some(code) = child.try_wait().ok().flatten() {
-                    exit_code = code.code();
-                }
-            }
-        }
-    }
-    if stalled {
-        if let Ok(mut child) = shared.try_lock() {
-            terminate_process_tree(&mut child, false);
-        }
-        unregister_process(process_key, &shared);
-        return Err(format!(
-            "Среда запуска Bedrock перестала отвечать ({} сек без вывода) и была остановлена. Проверьте подключение к сети и повторите попытку.",
-            stall_timeout.as_secs()
-        ));
-    }
-    let final_code = match exit_code {
-        Some(code) => code,
-        None => match shared.lock() {
-            Ok(mut child) => child.wait().map(|status| status.code().unwrap_or(-1)).unwrap_or(-1),
-            Err(_) => -1,
-        },
-    };
-    unregister_process(process_key, &shared);
-    Ok((final_code, lines))
-}
-
-fn spawn_line_reader<S: Read + Send + 'static>(stream: Option<S>, sender: mpsc::Sender<Option<String>>) {
-    if let Some(stream) = stream {
-        std::thread::spawn(move || {
-            let mut reader = BufReader::new(stream);
-            let mut pending: Vec<u8> = Vec::with_capacity(256);
-            loop {
-                let (length, lines): (usize, Vec<String>) = {
-                    let available = match reader.fill_buf() {
-                        Ok(slice) => slice,
-                        Err(_) => break,
-                    };
-                    if available.is_empty() {
-                        break;
-                    }
-                    let mut lines: Vec<String> = Vec::new();
-                    let length = available.len();
-                    for &byte in available.iter() {
-                        if byte == b'\n' || byte == b'\r' {
-                            if !pending.is_empty() {
-                                if let Some(line) = clean_process_line(&pending) {
-                                    lines.push(line);
-                                }
-                                pending.clear();
-                            }
-                        } else if pending.len() < 8192 {
-                            pending.push(byte);
-                        }
-                    }
-                    (length, lines)
-                };
-                reader.consume(length);
-                let mut closed = false;
-                for line in lines {
-                    if sender.send(Some(line)).is_err() {
-                        closed = true;
-                        break;
-                    }
-                }
-                if closed {
-                    return;
-                }
-            }
-            if !pending.is_empty() {
-                if let Some(line) = clean_process_line(&pending) {
-                    let _ = sender.send(Some(line));
-                }
-            }
-            let _ = sender.send(None);
-        });
-    }
-}
-
-fn clean_process_line(raw: &[u8]) -> Option<String> {
-    let mut cleaned: Vec<u8> = Vec::with_capacity(raw.len().min(1024));
-    let mut index = 0;
-    while index < raw.len() {
-        let byte = raw[index];
-        // ESC [ … конечный байт 0x40..=0x7E — CSI-последовательность (цвет, курсор).
-        // ESC ] … BEL — OSC-последовательность (заголовок окна).
-        if byte == 0x1b && index + 1 < raw.len() {
-            match raw[index + 1] {
-                b'[' => {
-                    let mut cursor = index + 2;
-                    while cursor < raw.len() && !(0x40..=0x7e).contains(&raw[cursor]) {
-                        cursor += 1;
-                    }
-                    index = (cursor + 1).min(raw.len());
-                    continue;
-                }
-                b']' => {
-                    let mut cursor = index + 2;
-                    while cursor < raw.len() && raw[cursor] != 0x07 {
-                        cursor += 1;
-                    }
-                    index = (cursor + 1).min(raw.len());
-                    continue;
-                }
-                _ => {
-                    index += 2;
-                    continue;
-                }
-            }
-        }
-        if byte != 0 && byte != 0x08 {
-            cleaned.push(byte);
-        }
-        index += 1;
-    }
-    let text = String::from_utf8_lossy(&cleaned).trim_end().to_owned();
-    if text.is_empty() {
-        None
-    } else {
-        Some(text)
-    }
-}
-
-/// размер в человекочитаемом виде для heartbeat-строк скачивания.
-fn human_bytes(bytes: u64) -> String {
-    const GIB: f64 = 1_073_741_824.0;
-    const MIB: f64 = 1_048_576.0;
-    let value = bytes as f64;
-    if value >= GIB {
-        format!("{value:.2} ГиБ")
-    } else if value >= MIB {
-        format!("{value:.1} МиБ")
-    } else {
-        format!("{} КиБ", bytes / 1024)
-    }
-}
-
-fn walk_tree_size(root: &Path) -> u64 {
-    let mut total: u64 = 0;
-    let mut entries: usize = 0;
-    let mut stack: Vec<PathBuf> = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let Ok(read_dir) = fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in read_dir.flatten() {
-            entries += 1;
-            if entries > 200_000 {
-                return total;
-            }
-            let Ok(file_type) = entry.file_type() else {
-                continue;
-            };
-            if file_type.is_symlink() {
-                continue;
-            }
-            if file_type.is_dir() {
-                if stack.len() < 64 {
-                    stack.push(entry.path());
-                }
-            } else {
-                total += entry.metadata().map(|meta| meta.len()).unwrap_or(0);
-            }
-        }
-    }
-    total
-}
-
-/// вердикт watchdog'а для фазы, когда процесс молчит по stdout.
-#[derive(Debug, PartialEq)]
-enum WatchdogVerdict {
-    /// снимка ещё нет / прошёл слишком мало времени — решения нет.
-    Pending,
-    /// дерево выросло — скачивание или распаковка живы.
-    Active(u64),
-    /// дерево не меняется — процесс действительно завис.
-    Silent,
-}
-
-struct DownloadWatchdog {
-    root: PathBuf,
-    snapshot: u64,
-    have_snapshot: bool,
-    last_walk: Option<Instant>,
-    interval: Duration,
-}
-
-impl DownloadWatchdog {
-    fn new(root: &Path) -> Self {
-        Self::with_interval(root, Duration::from_secs(20))
-    }
-
-    fn with_interval(root: &Path, interval: Duration) -> Self {
-        Self {
-            root: root.to_path_buf(),
-            snapshot: 0,
-            have_snapshot: false,
-            last_walk: None,
-            interval,
-        }
-    }
-
-    fn check(&mut self) -> WatchdogVerdict {
-        if let Some(last) = self.last_walk {
-            if last.elapsed() < self.interval {
-                return WatchdogVerdict::Pending;
-            }
-        }
-        let total = walk_tree_size(&self.root);
-        if !self.have_snapshot {
-            self.snapshot = total;
-            self.have_snapshot = true;
-            self.last_walk = Some(Instant::now());
-            return WatchdogVerdict::Pending;
-        }
-        let grew = total > self.snapshot;
-        self.snapshot = total;
-        self.last_walk = Some(Instant::now());
-        if grew {
-            WatchdogVerdict::Active(total)
-        } else {
-            WatchdogVerdict::Silent
-        }
-    }
-}
-
-fn profile_name(instance_name: &str) -> String {
-    format!("nivora-{}", &sha256_hex(instance_name.as_bytes())[..16])
-}
-
-struct ProfilePaths {
-    root: PathBuf,
-    profiles_root: PathBuf,
-}
-
-fn profile_paths(ctx: &Ctx) -> Result<ProfilePaths, String> {
-    let root = ctx.game_dir.join("bedrock");
-    let profiles = root.join("profiles");
-    if is_reparse_point(&root) || is_reparse_point(&profiles) {
-        return Err("Каталог Bedrock является символьной ссылкой".to_owned());
-    }
-    fs::create_dir_all(&profiles).map_err(|_| "Каталог Bedrock недоступен".to_owned())?;
-    if is_symlink_or_missing_dir(&root) || is_symlink_or_missing_dir(&profiles) {
-        return Err("Каталог Bedrock недоступен".to_owned());
-    }
-    super::platform::restrict_dir(&root);
-    super::platform::restrict_dir(&profiles);
-    Ok(ProfilePaths { root, profiles_root: profiles })
-}
-
-fn validate_profile_path(paths: &ProfilePaths, profile_name: &str) -> Result<PathBuf, String> {
-    if !profile_name_re().is_match(profile_name) {
-        return Err("Недопустимый идентификатор профиля Bedrock".to_owned());
-    }
-    let profile = paths.profiles_root.join(profile_name);
-    if is_reparse_point(&profile) || !profile.is_dir() {
-        return Err("Профиль Bedrock не найден".to_owned());
-    }
-    match (profile.canonicalize(), paths.profiles_root.canonicalize()) {
-        (Ok(resolved), Ok(root)) if resolved.starts_with(&root) => {}
-        _ => return Err("Путь профиля Bedrock выходит за пределы хранилища".to_owned()),
-    }
-    let metadata = profile.join("profile.json");
-    if is_reparse_point(&metadata) || !metadata.is_file() {
-        return Err("Метаданные профиля Bedrock не найдены".to_owned());
-    }
-    let metadata =
-        read_bounded_json(&metadata, 64 * 1024).ok_or_else(|| "Не удалось прочитать профиль Bedrock".to_owned())?;
-    if metadata.get("slug").and_then(Value::as_str) != Some(profile_name) {
-        return Err("Идентификатор профиля Bedrock не совпадает".to_owned());
-    }
-    Ok(profile)
-}
-
-fn profile_settings(profile: &Path) -> Value {
-    read_bounded_json(&profile.join("settings.json"), 1024 * 1024).unwrap_or(Value::Null)
-}
-
-/// выбранная версия игры из настроек профиля.
-fn selected_version(profile: &Path) -> (String, String) {
-    let settings = profile_settings(profile);
-    if !settings.is_object() {
-        return (String::new(), String::new());
-    }
-    let edition = settings
-        .get("mc_edition")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .trim()
-        .to_lowercase();
-    let version = settings.get("mc_version").and_then(Value::as_str).unwrap_or("").trim().to_owned();
-    let valid_edition = edition == "release" || edition == "preview";
-    if !valid_edition || !game_version_re().is_match(&version) {
-        return (String::new(), String::new());
-    }
-    (edition, version)
-}
-
-fn engine_ready(profile: &Path) -> bool {
-    // boL пишет выбранный движок (GDK-Proton/WineGDK) в settings.json;
-    // «play» без него умирал с «GDK-Proton missing».
-    let proton = profile_settings(profile)
-        .get("proton")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .trim()
-        .to_owned();
-    if proton.is_empty() {
-        return false;
-    }
-    Path::new(&proton).is_dir()
-}
-
-fn store_status(profile: &Path) -> (bool, String) {
-    let mut signed_in = false;
-    let mut gamertag = String::new();
-    if let Some(token) = read_bounded_json(&profile.join("msa").join("token.json"), 1024 * 1024) {
-        if token.get("refresh_token").is_some() {
-            signed_in = true;
-        }
-    }
-    if let Some(device) = read_bounded_json(&profile.join("winegdk-preauth").join("device.json"), 1024 * 1024) {
-        if let Some(tag) = device.get("xbl_gamertag").and_then(Value::as_str) {
-            gamertag = tag.to_owned();
-        }
-    }
-    (signed_in, gamertag)
-}
-
 fn win_local_appdata() -> Option<PathBuf> {
     let value = std::env::var_os("LOCALAPPDATA")?;
     let path = PathBuf::from(value);
@@ -1368,7 +587,7 @@ fn winget_executable() -> Option<PathBuf> {
         .filter(|path| path.is_file())
 }
 
-/// открыть официальную страницу продукта в Microsoft Store.
+/// открыть официальную страницу продукта в Microsoft Store
 fn open_store_product(edition: &str) -> bool {
     let channel = win_channel(edition);
     let uri = format!("ms-windowsstore://pdp/?ProductId={}", channel.product_id);
@@ -1383,7 +602,7 @@ fn open_store_product(edition: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// запуск официальной игры по протоколу (minecraft:// / minecraft-preview://).
+/// запуск официальной игры по протоколу (minecraft:// / minecraft-preview://)
 fn launch_official(edition: &str) -> Result<(), String> {
     let channel = win_channel(edition);
     let mut command = super::platform::command("cmd.exe");
@@ -1396,7 +615,7 @@ fn launch_official(edition: &str) -> Result<(), String> {
     if started.map(|status| status.success()).unwrap_or(false) {
         return Ok(());
     }
-    // запасной путь — AUMID через AppsFolder.
+    // используем AUMID через `AppsFolder` как запасной способ
     let mut fallback = super::platform::command("explorer.exe");
     fallback.arg(format!("shell:AppsFolder\\{}", channel.aumid));
     let fallback_ok = prepare_command(&mut fallback)
@@ -1415,7 +634,7 @@ fn launch_official(edition: &str) -> Result<(), String> {
     ))
 }
 
-/// PID игры по образу процесса (tasklist есть на любой Windows).
+/// идентификатор PID игры по образу процесса (tasklist есть на любой Windows)
 fn windows_game_pids() -> Vec<u32> {
     let mut command = super::platform::command("tasklist.exe");
     command.args(["/FO", "CSV", "/NH"]);
@@ -1454,7 +673,7 @@ fn windows_kill_pid(pid: u32) -> bool {
 }
 
 fn read_instance_metadata(path: &Path) -> Value {
-    // python-воркер исторически пишет .trial-launcher-instance.json
+    // старые профили могут содержать файл .trial-launcher-instance.json
     for name in [
         INSTANCE_METADATA_FILE,
         ".trial-launcher-instance.json",
@@ -1472,7 +691,7 @@ fn write_instance_metadata(path: &Path, metadata: &Value) -> Result<(), String> 
     write_private_json(&path.join(INSTANCE_METADATA_FILE), metadata)
 }
 
-/// выбранный канал официальной версии хранится в метаданных экземпляра.
+/// выбранный канал официальной версии хранится в метаданных экземпляра
 fn windows_selected(instance_path: &Path) -> (String, String) {
     let metadata = read_instance_metadata(instance_path);
     let edition = metadata
@@ -1615,7 +834,7 @@ fn validate_content_archive(content: &[u8]) -> Result<zip::ZipArchive<std::io::C
         if total > MAX_CONTENT_UNPACKED_BYTES {
             return Err("Распакованный файл Bedrock превышает лимит 1 GiB".to_owned());
         }
-        let name = entry.name().replace('\\', "/");
+        let name = entry.name().map(|v| v.replace('\\', "/")).unwrap_or_default();
         let is_symlink = entry
             .unix_mode()
             .map(|mode| mode & 0o170000 == 0o120000)
@@ -1808,8 +1027,7 @@ fn linux_versions(name: &str, refresh: bool) -> Result<Value, String> {
     if refresh {
         argv.push("--refresh".to_owned());
     }
-    // свежий индекс версий тоже скачивается молча: stall-таймаут с watchdog'ом
-    // не убивает медленную сеть (файлы индекса растут на диске).
+    // индекс растёт на диске без вывода; watchdog отслеживает его загрузку
     let mut watchdog = DownloadWatchdog::new(&profile);
     let (code, lines) =
         bol_run(&argv, &profile, "versions", None, None, Duration::from_secs(300), 10_000, false, None, None, Some(&mut watchdog))
@@ -1819,8 +1037,7 @@ fn linux_versions(name: &str, refresh: bool) -> Result<Value, String> {
         return Err(format!("Не удалось загрузить список версий Minecraft: {detail}"));
     }
     let mut parsed = parse_game_versions(&lines);
-    // выбранная в профиле версия тоже установленная — иначе после успешного
-    // setup список показывал «Будет загружена».
+    // отмечаем выбранную версию установленной после успешной настройки
     if !selected.0.is_empty() && !selected.1.is_empty() {
         for item in parsed.iter_mut() {
             if item.get("edition").and_then(Value::as_str) == Some(&selected.0)
@@ -1844,8 +1061,7 @@ fn windows_versions(name: &str) -> Result<Value, String> {
         let entry = if state.installed && !state.version.is_empty() {
             json!({ "edition": edition, "version": state.version, "installed": true })
         } else {
-            // официальный Store всегда ставит последний выпуск; конкретную
-            // версию для Windows выбрать нельзя — ставим «latest».
+            // microsoft Store устанавливает только последнюю версию
             json!({ "edition": edition, "version": "latest", "installed": false })
         };
         list.push(entry);
@@ -1933,13 +1149,12 @@ fn linux_setup(
         version.to_owned(),
         "--beta".to_owned(),
     ];
-    // игра (2+ ГиБ) скачивается почти без вывода в stdout: без watchdog'а
-    // stall-таймаут убивал живую загрузку, а BoL каждый ретрай начинал с нуля.
+    // загрузка может идти без вывода; watchdog проверяет её по изменению файлов
     let mut watchdog = DownloadWatchdog::new(&profile);
     let (code, logs) =
         bol_run(&argv, &profile, "setup", cancellation, Some(&mut logger), Duration::from_secs(600), 500, false, None, None, Some(&mut watchdog))?;
     let (selected_edition, selected_version) = selected_version(&profile);
-    // boL ПАДАЕТ С КОДОМ 0: источник правды — строки «error» и settings.json.
+    // bol может вернуть 0 при ошибке; проверяем вывод и settings.json
     let error_lines: Vec<String> = logs
         .iter()
         .filter(|line| bol_error_line_re().is_match(line.trim()))
@@ -2006,7 +1221,7 @@ fn windows_setup(
     job_log(job, &format!("Официальная установка: {} (Microsoft Store).", channel.title));
     let mut state = windows_package_state(edition);
     if !state.installed {
-        // 1) Автоматическая попытка winget: срабатывает не для всех учётных
+        // автоматическая попытка winget срабатывает не для всех учётных
         if let Some(winget) = winget_executable() {
             job_log(job, &format!("Пробую установку через winget ({}):", channel.product_id));
             let mut command = super::platform::command(&winget);
@@ -2031,8 +1246,7 @@ fn windows_setup(
                 &mut command,
                 cancellation,
                 &mut move |line: &str| job_log(&log_job, line),
-                // игра весит гигабайты: медленная сеть легально качается часами.
-                // потолок — защита от вечного winget, тишина 10 мин — от тупика.
+                // долгая загрузка допустима; таймаут тишины обнаруживает зависание
                 Duration::from_secs(3 * 60 * 60),
                 Duration::from_secs(10 * 60),
             );
@@ -2051,7 +1265,7 @@ fn windows_setup(
         state = windows_package_state(edition);
     }
     if !state.installed {
-        // 2) Официальная точка входа: страница продукта в Microsoft Store.
+        // если winget не сработал, предлагаем страницу продукта в Microsoft Store
         job_log(job, "Открываю страницу Minecraft в Microsoft Store — нажмите «Установить».");
         let _ = open_store_product(edition);
         invalidate_windows_package_cache();
@@ -2161,856 +1375,20 @@ pub fn setup_cancel(request: &Value) -> Result<Value, String> {
     Ok(json!({ "stopped": cancel_job("setup", request_field(request, "name")?) }))
 }
 
-pub fn store_login(request: &Value) -> Result<Value, String> {
-    let name = request_field(request, "name")?.to_owned();
-    let store = instance_store()?;
-    let info = bedrock_instance(&store, &name)?;
-    if info.running {
-        return Err("Сначала закройте Minecraft Bedrock".to_owned());
-    }
-    match bedrock_platform() {
-        BedrockPlatform::LinuxBol => {
-            let job_name = name.clone();
-            spawn_job("login", &name, move |job, cancellation| {
-                match linux_store_login(&job_name, Some(cancellation), &job) {
-                    Ok(value) => job_finish(&job, value),
-                    Err(error) => job_fail(&job, &error, cancellation.cancelled()),
-                }
-            })
-        }
-        BedrockPlatform::WindowsOfficial => spawn_job("login", &name, move |job, _cancellation| {
-            // официальная версия подписывается в самой игре (Xbox Live);
-            // отдельного входа через лаунчер не требуется.
-            job_log(&job, "Официальный Minecraft for Windows выполняет вход внутри игры:");
-            job_log(&job, "запустите игру и войдите в аккаунт Microsoft/Xbox — Nivora ничего не хранит.");
-            job_finish(
-                &job,
-                json!({
-                    "exit_code": 0,
-                    "logs": [],
-                    "logs_tail": [],
-                    "error_hint": "",
-                    "failed": false,
-                }),
-            )
-        }),
-        BedrockPlatform::Unsupported => Err("Minecraft Bedrock не поддерживается на этой ОС".to_owned()),
-    }
-}
-
-fn linux_store_login(
-    name: &str,
-    cancellation: Option<&CancellationToken>,
-    job: &Arc<Mutex<JobState>>,
-) -> Result<Value, String> {
-    let ctx = context()?;
-    let store = instance_store()?;
-    let info = bedrock_instance(&store, name)?;
-    let profile = linux_profile_path(&ctx, &info)?;
-    let mut logger = |line: &str| job_log(job, line);
-    let (code, logs) = bol_run(
-        &["store-login".to_owned()],
-        &profile,
-        &format!("bedrock-login:{name}"),
-        cancellation,
-        Some(&mut logger),
-        Duration::ZERO,
-        500,
-        false,
-        None,
-        None,
-        None,
-    )?;
-    let error_hint: String = logs
-        .iter()
-        .rev()
-        .map(|line| line.trim())
-        .find(|line| !line.is_empty() && bol_error_line_re().is_match(line))
-        .unwrap_or("")
-        .chars()
-        .take(300)
-        .collect();
-    let tail_start = logs.len().saturating_sub(40);
-    Ok(json!({
-        "exit_code": code,
-        "logs": logs.clone(),
-        "logs_tail": logs[tail_start..],
-        "error_hint": error_hint,
-        "failed": !error_hint.is_empty() || code != 0,
-    }))
-}
-
-pub fn store_login_status(request: &Value) -> Result<Value, String> {
-    Ok(job_snapshot("login", request_field(request, "name")?))
-}
-
-fn bol_profile_signed_in(profile: &Path) -> bool {
-    keyring_file_signed_in(&profile.join("xodus-home").join(".xodus-keyring.ron"))
-}
-
-fn keyring_file_signed_in(keyring: &Path) -> bool {
-    const MAX_KEYRING_BYTES: u64 = 1024 * 1024;
-    let Ok(meta) = fs::metadata(keyring) else { return false };
-    if !meta.is_file() || meta.len() > MAX_KEYRING_BYTES {
-        return false;
-    }
-    let Ok(blob) = fs::read(keyring) else { return false };
-    let contains = |marker: &[u8]| blob.windows(marker.len()).any(|window| window == marker);
-    contains(b"\"user-tokens\"") && contains(b"\"user-DA\"")
-}
-
-fn share_xodus_keyring(paths: &ProfilePaths) {
-    let shared = paths.root.join("xodus-home");
-    if xodus_is_symlink(&shared) || fs::create_dir_all(&shared).is_err() {
-        return;
-    }
-    let shared_keyring = shared.join(".xodus-keyring.ron");
-    let mut shared_signed = keyring_file_signed_in(&shared_keyring);
-    let Ok(entries) = fs::read_dir(&paths.profiles_root) else { return };
-    for entry in entries.flatten() {
-        let profile = entry.path();
-        if xodus_is_symlink(&profile) || !profile.is_dir() {
-            continue;
-        }
-        let local = profile.join("xodus-home");
-        if xodus_is_symlink(&local) {
-            continue; // уже на общем доме
-        }
-        if !local.try_exists().unwrap_or(false) {
-            let _ = link_shared_xodus(&shared, &local);
-            continue;
-        }
-        if !local.is_dir() {
-            continue;
-        }
-        let local_keyring = local.join(".xodus-keyring.ron");
-        // поднимаем первый найденный вход в общий дом. Если нашлось
-        if !shared_signed && keyring_file_signed_in(&local_keyring) {
-            if fs::rename(&local_keyring, &shared_keyring).is_ok() {
-                shared_signed = true;
-            }
-        }
-        let retired = profile.join("xodus-home.local");
-        if !retired.exists() {
-            let _ = fs::rename(&local, &retired);
-        } else {
-            let _ = fs::remove_dir_all(&local);
-        }
-        let _ = link_shared_xodus(&shared, &local);
-    }
-}
-
-fn link_shared_xodus(shared: &Path, local: &Path) -> std::io::Result<()> {
-    #[cfg(unix)]
-    {
-        std::os::unix::fs::symlink(shared, local)
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (shared, local);
-        Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "символические ссылки недоступны"))
-    }
-}
-
-/// символическая ссылка (Unix) или точка повторной обработки (Windows).
-fn xodus_is_symlink(path: &Path) -> bool {
-    #[cfg(unix)]
-    {
-        fs::symlink_metadata(path).map(|meta| meta.file_type().is_symlink()).unwrap_or(false)
-    }
-    #[cfg(not(unix))]
-    {
-        is_reparse_point(path)
-    }
-}
-
-const BEDROCK_LOGIN_REQUIRED_MESSAGE: &str = "Для запуска Bedrock нужен подключённый аккаунт Microsoft, которому принадлежит игра. Нажмите «Подключить аккаунт» в карточке «Лицензия Microsoft Store» на вкладке «Обзор» и запустите игру снова.";
-
-pub fn account_status(request: &Value) -> Result<Value, String> {
-    let name = request_field(request, "name")?;
-    match bedrock_platform() {
-        BedrockPlatform::LinuxBol => {
-            let ctx = context()?;
-            let store = instance_store()?;
-            let info = bedrock_instance(&store, &name)?;
-            let profile = linux_profile_path(&ctx, &info)?;
-            Ok(json!({
-                "signed_in": bol_profile_signed_in(&profile),
-                "platform": "linux-bol",
-            }))
-        }
-        BedrockPlatform::WindowsOfficial => Ok(json!({
-            // официальная версия подписывается в самой игре (Xbox Live).
-            "signed_in": true,
-            "platform": "windows-official",
-        })),
-        BedrockPlatform::Unsupported => Err("Minecraft Bedrock не поддерживается на этой ОС".to_owned()),
-    }
-}
-
-pub fn store_login_cancel(request: &Value) -> Result<Value, String> {
-    let name = request_field(request, "name")?.to_owned();
-    let stopped_job = cancel_job("login", &name);
-    let stopped_process = stop_registered_process(&format!("bedrock-login:{name}"));
-    Ok(json!({ "stopped": stopped_job || stopped_process }))
-}
-
-pub fn create_instance(request: &Value) -> Result<Value, String> {
-    let raw_name = request_field(request, "name")?;
-    let display_name = request_field(request, "display_name").unwrap_or_default().trim().to_owned();
-    let instance_name = safe_instance_name(raw_name);
-    if instance_name.is_empty() || instance_name == "." || instance_name == ".." {
-        return Err("Укажите имя экземпляра Bedrock".to_owned());
-    }
-    let ctx = context()?;
-    let store = instance_store()?;
-    let instance_path = store.root().join(&instance_name);
-    if instance_path.exists() {
-        return Err(format!("Экземпляр уже существует: {instance_name}"));
-    }
-    let pretty_name = if display_name.is_empty() { instance_name.clone() } else { display_name.chars().take(80).collect() };
-    match bedrock_platform() {
-        BedrockPlatform::LinuxBol => {
-            let paths = profile_paths(&ctx)?;
-            bol_require_runtime(&paths.root)?;
-            // новый экземпляр сразу получает доступ к общему входу Microsoft.
-            share_xodus_keyring(&paths);
-            let profile = profile_name(&instance_name);
-            let profile_path = paths.profiles_root.join(&profile);
-            if profile_path.exists() {
-                return Err("Для этого имени уже существует профиль Bedrock; сначала удалите его в библиотеке".to_owned());
-            }
-            let shortcut_storage = paths.root.join(".nivora-xdg-data");
-            fs::create_dir_all(&shortcut_storage).map_err(|_| "Каталог ярлыков Bedrock недоступен".to_owned())?;
-            let (code, _logs) = bol_run(
-                &["profiles".to_owned(), "create".to_owned(), profile.clone()],
-                &paths.root,
-                "profiles-create",
-                None,
-                None,
-                Duration::from_secs(120),
-                100,
-                true,
-                Some(&shortcut_storage),
-                None,
-                None,
-            )?;
-            if code != 0 {
-                return Err(format!("Не удалось создать профиль Bedrock (код {code})"));
-            }
-            if let Err(error) = validate_profile_path(&paths, &profile) {
-                let _ = fs::remove_dir_all(&profile_path);
-                return Err(error);
-            }
-            let metadata = json!({
-                "kind": "client",
-                "game_edition": "bedrock",
-                "bedrock_profile": profile,
-                "display_name": pretty_name,
-                "description": "Minecraft Bedrock Edition",
-                "group": "",
-                "played_seconds": 0,
-            });
-            fs::create_dir_all(&instance_path).map_err(|_| "Не удалось создать каталог экземпляра".to_owned())?;
-            super::platform::restrict_dir(&instance_path);
-            if let Err(error) = write_instance_metadata(&instance_path, &metadata) {
-                let _ = fs::remove_dir_all(&instance_path);
-                let _ = fs::remove_dir_all(&profile_path);
-                return Err(error);
-            }
-        }
-        BedrockPlatform::WindowsOfficial => {
-            // официальной версии профиль среды не нужен — только экземпляр.
-            let metadata = json!({
-                "kind": "client",
-                "game_edition": "bedrock",
-                "bedrock_profile": "",
-                "display_name": pretty_name,
-                "description": "Minecraft Bedrock Edition (Microsoft Store)",
-                "group": "",
-                "played_seconds": 0,
-            });
-            fs::create_dir_all(&instance_path).map_err(|_| "Не удалось создать каталог экземпляра".to_owned())?;
-            super::platform::restrict_dir(&instance_path);
-            write_instance_metadata(&instance_path, &metadata)?;
-        }
-        BedrockPlatform::Unsupported => return Err("Minecraft Bedrock не поддерживается на этой ОС".to_owned()),
-    }
-    let refreshed = instance_store()?;
-    let info = bedrock_instance(&refreshed, &instance_name)?;
-    Ok(json!({
-        "instance": info.public(),
-        "instances": refreshed.list().iter().map(|item| item.public()).collect::<Vec<Value>>(),
-    }))
-}
-
-/// путь профиля BoL для экземпляра (только Linux).
-fn linux_profile_path(ctx: &Ctx, info: &InstanceInfo) -> Result<PathBuf, String> {
-    let expected = profile_name(&info.name);
-    if info.bedrock_profile != expected {
-        return Err("Профиль Bedrock не совпадает с экземпляром".to_owned());
-    }
-    let paths = profile_paths(ctx)?;
-    // один общий вход Microsoft для всех экземпляров: консолидация
-    // идемпотентна и дёшева (обход профилей), поэтому — на каждом resolve.
-    share_xodus_keyring(&paths);
-    validate_profile_path(&paths, &expected)
-}
-
 pub fn content_list(request: &Value) -> Result<Value, String> {
-    let name = request_field(request, "name")?;
-    match bedrock_platform() {
-        BedrockPlatform::LinuxBol => linux_content_list(name),
-        BedrockPlatform::WindowsOfficial => windows_content_list(name),
-        BedrockPlatform::Unsupported => Err("Minecraft Bedrock не поддерживается на этой ОС".to_owned()),
-    }
-}
-
-fn scope_tail(scope: &str) -> String {
-    let chars: Vec<char> = scope.chars().collect();
-    if chars.len() > 4 {
-        let tail: String = chars[chars.len() - 4..].iter().collect();
-        format!("…{tail}")
-    } else {
-        scope.to_owned()
-    }
-}
-
-/// общий обход каталогов контента; roots — пары (scope, games/com.mojang).
-fn scan_content(roots: &[(String, PathBuf)]) -> Result<Vec<Value>, String> {
-    let mut values: Vec<Value> = Vec::new();
-    for (scope, content_root) in roots {
-        if is_reparse_point(content_root) || !content_root.is_dir() {
-            continue;
-        }
-        for (category, directories) in CONTENT_DIRECTORIES {
-            for directory_name in *directories {
-                let directory = content_root.join(directory_name);
-                if is_reparse_point(&directory) || !directory.is_dir() {
-                    continue;
-                }
-                let mut entries: Vec<_> = match fs::read_dir(&directory) {
-                    Ok(iter) => iter.filter_map(|entry| entry.ok()).collect(),
-                    Err(_) => continue,
-                };
-                entries.sort_by_key(|entry| entry.file_name().to_string_lossy().to_lowercase());
-                for entry in entries {
-                    let path = entry.path();
-                    if is_reparse_point(&path) {
-                        continue;
-                    }
-                    let Ok(meta) = entry.metadata() else { continue };
-                    let is_dir = meta.is_dir();
-                    values.push(json!({
-                        "name": entry.file_name().to_string_lossy(),
-                        "scope": scope,
-                        "scope_label": if scope == "LocalState" {
-                            "Данные игры".to_owned()
-                        } else {
-                            format!("Профиль аккаунта {}", scope_tail(scope))
-                        },
-                        "category": category,
-                        "directory": directory_name,
-                        "item_kind": if is_dir { "directory" } else { "file" },
-                        "size": if is_dir { 0 } else { meta.len() },
-                        "modified_at": meta
-                            .modified()
-                            .ok()
-                            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-                            .map(|value| value.as_secs_f64())
-                            .unwrap_or(0.0),
-                    }));
-                    if values.len() >= 5000 {
-                        return Ok(values);
-                    }
-                }
-            }
-        }
-    }
-    Ok(values)
-}
-
-fn linux_content_list(name: &str) -> Result<Value, String> {
-    let ctx = context()?;
-    let store = instance_store()?;
-    let info = bedrock_instance(&store, name)?;
-    let profile = linux_profile_path(&ctx, &info)?;
-    let mut roots: Vec<(String, PathBuf)> = Vec::new();
-    let users_root = safe_profile_path(&profile, BOL_CONTENT_ROOT_PARTS)?;
-    if users_root.is_dir() {
-        if let Ok(entries) = fs::read_dir(&users_root) {
-            let mut scopes: Vec<PathBuf> = entries
-                .filter_map(|entry| entry.ok())
-                .map(|entry| entry.path())
-                .filter(|path| !is_reparse_point(path) && path.is_dir())
-                .collect();
-            scopes.sort_by_key(|path| path.file_name().map(|name| name.to_string_lossy().to_lowercase()).unwrap_or_default());
-            for scope in scopes {
-                let scope_name =
-                    scope.file_name().map(|value| value.to_string_lossy().into_owned()).unwrap_or_default();
-                if !scope_name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
-                    continue;
-                }
-                let mut parts = BOL_CONTENT_ROOT_PARTS.to_vec();
-                parts.extend_from_slice(&[scope_name.as_str(), "games", "com.mojang"]);
-                let content_root = safe_profile_path(&profile, &parts)?;
-                roots.push((scope_name, content_root));
-            }
-        }
-    }
-    Ok(json!({ "items": scan_content(&roots)? }))
-}
-
-fn windows_content_list(name: &str) -> Result<Value, String> {
-    let store = instance_store()?;
-    let info = bedrock_instance(&store, name)?;
-    let (edition, _) = windows_selected(&info.path);
-    let edition = if edition.is_empty() { "release" } else { edition.as_str() };
-    let content_root = win_content_root(edition)?;
-    Ok(json!({ "items": scan_content(&[("LocalState".to_owned(), content_root)])? }))
+    content::content_list(request)
 }
 
 pub fn screenshots_list(request: &Value) -> Result<Value, String> {
-    const MAX_SCREENSHOTS: usize = 500;
-    let name = request_field(request, "name")?.to_owned();
-    let mut items: Vec<Value> = Vec::new();
-
-    let mut scan = |label: String, content_root: &Path, read_prefix: &[String], items: &mut Vec<Value>| -> Result<(), String> {
-        let directory = content_root.join("minecraftScreenshots");
-        if !directory.is_dir() || is_reparse_point(&directory) {
-            return Ok(());
-        }
-        let entries = fs::read_dir(&directory).map_err(|_| "Не удалось прочитать каталог скриншотов Bedrock".to_owned())?;
-        for entry in entries.flatten() {
-            let file_name = entry.file_name().to_string_lossy().into_owned();
-            if reserved_screenshot_name(&file_name) || is_reparse_point(&entry.path()) {
-                continue;
-            }
-            let Ok(metadata) = entry.metadata() else { continue };
-            if !metadata.is_file() {
-                continue;
-            }
-            let lower = file_name.to_lowercase();
-            if !(lower.ends_with(".png") || lower.ends_with(".jpg") || lower.ends_with(".jpeg")) {
-                continue;
-            }
-            let mut parts = read_prefix.to_vec();
-            parts.push("minecraftScreenshots".to_owned());
-            parts.push(file_name.clone());
-            items.push(json!({
-                "name": file_name,
-                "read_path": parts.join("/"),
-                "scope_label": label,
-                "size": metadata.len() as i64,
-                "modified_at": metadata.modified().ok().and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok()).map(|value| value.as_secs() as i64).unwrap_or(0),
-            }));
-            if items.len() >= MAX_SCREENSHOTS {
-                break;
-            }
-        }
-        Ok(())
-    };
-
-    if cfg!(windows) {
-        let store = instance_store()?;
-        let info = bedrock_instance(&store, &name)?;
-        let (edition, _) = windows_selected(&info.path);
-        let edition = if edition.is_empty() { "release" } else { edition.as_str() };
-        let content_root = win_content_root(edition)?;
-        scan("Скриншоты игры".to_owned(), &content_root, &[], &mut items)?;
-    } else {
-        let ctx = context()?;
-        let store = instance_store()?;
-        let info = bedrock_instance(&store, &name)?;
-        let profile = linux_profile_path(&ctx, &info)?;
-        let users_root = safe_profile_path(&profile, BOL_CONTENT_ROOT_PARTS)?;
-        if users_root.is_dir() {
-            if let Ok(entries) = fs::read_dir(&users_root) {
-                let mut scopes: Vec<PathBuf> = entries
-                    .filter_map(|entry| entry.ok())
-                    .map(|entry| entry.path())
-                    .filter(|path| !is_reparse_point(path) && path.is_dir())
-                    .collect();
-                scopes.sort_by_key(|path| path.file_name().map(|value| value.to_string_lossy().to_lowercase()).unwrap_or_default());
-                for scope in scopes {
-                    let scope_name = scope.file_name().map(|value| value.to_string_lossy().into_owned()).unwrap_or_default();
-                    if !scope_name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
-                        continue;
-                    }
-                    let mut parts = BOL_CONTENT_ROOT_PARTS.to_vec();
-                    parts.push(scope_name.as_str());
-                    let mut prefix: Vec<String> = parts.iter().map(|value| value.to_string()).collect();
-                    prefix.extend_from_slice(&["games".to_owned(), "com.mojang".to_owned()]);
-                    let mut content_root = profile.to_path_buf();
-                    for part in &prefix {
-                        content_root = content_root.join(part);
-                    }
-                    scan(format!("Профиль аккаунта {}", scope_tail(&scope_name)), &content_root, &prefix, &mut items)?;
-                    if items.len() >= MAX_SCREENSHOTS {
-                        break;
-                    }
-                }
-            }
-        }
-    }
-    items.sort_by(|left, right| right["modified_at"].as_i64().cmp(&left["modified_at"].as_i64()));
-    Ok(json!({ "items": items }))
-}
-
-/// служебные и скрытые имена в каталоге скриншотов не показываем.
-fn reserved_screenshot_name(name: &str) -> bool {
-    name.starts_with('.') || name == "Thumbs.db" || name.is_empty()
-}
-
-fn safe_profile_path(profile: &Path, parts: &[&str]) -> Result<PathBuf, String> {
-    if is_reparse_point(profile) {
-        return Err("Путь контента Bedrock содержит символьную ссылку".to_owned());
-    }
-    let root = profile.canonicalize().unwrap_or_else(|_| profile.to_path_buf());
-    let mut path = profile.to_path_buf();
-    for part in parts {
-        if part.is_empty() || *part == "." || *part == ".." || part.contains('/') || part.contains('\\') || part.contains('\0') {
-            return Err("Недопустимый путь контента Bedrock".to_owned());
-        }
-        path = path.join(part);
-        if is_reparse_point(&path) {
-            return Err("Путь контента Bedrock содержит символьную ссылку".to_owned());
-        }
-        if let Ok(resolved) = path.canonicalize() {
-            if !resolved.starts_with(&root) {
-                return Err("Путь контента Bedrock выходит за пределы профиля".to_owned());
-            }
-        }
-    }
-    Ok(path)
+    content::screenshots_list(request)
 }
 
 pub fn content_import(request: &Value) -> Result<Value, String> {
-    let name = request_field(request, "name")?.to_owned();
-    let file_name = request_field(request, "file_name")?.to_owned();
-    let data = request_field(request, "data").unwrap_or_default();
-    let decoded = base64::engine::general_purpose::STANDARD
-        .decode(data.as_bytes())
-        .map_err(|_| "Файл Bedrock не является корректными base64-данными".to_owned())?;
-    if decoded.is_empty() || decoded.len() > MAX_CONTENT_UPLOAD_BYTES {
-        return Err("Файл Bedrock пуст или превышает лимит 128 MiB".to_owned());
-    }
-    match bedrock_platform() {
-        BedrockPlatform::LinuxBol => linux_content_import(&name, &file_name, decoded),
-        BedrockPlatform::WindowsOfficial => windows_content_import(&name, &file_name, decoded),
-        BedrockPlatform::Unsupported => Err("Minecraft Bedrock не поддерживается на этой ОС".to_owned()),
-    }
-}
-
-fn import_extension(file_name: &str) -> Result<String, String> {
-    let suffix = Path::new(file_name)
-        .extension()
-        .map(|value| format!(".{}", value.to_string_lossy().to_lowercase()))
-        .unwrap_or_default();
-    if IMPORT_EXTENSIONS.contains(&suffix.as_str()) {
-        Ok(suffix)
-    } else {
-        Err("Bedrock поддерживает .mcpack, .mcaddon, .mcworld, .mctemplate и .mcskin".to_owned())
-    }
-}
-
-fn linux_content_import(name: &str, file_name: &str, content: Vec<u8>) -> Result<Value, String> {
-    let suffix = import_extension(file_name)?;
-    validate_content_archive(&content)?;
-    let ctx = context()?;
-    let store = instance_store()?;
-    let info = bedrock_instance(&store, name)?;
-    let profile = linux_profile_path(&ctx, &info)?;
-    bol_require_runtime(&profile)?;
-    let temp_root = ctx.cache_home.join("bedrock-imports");
-    if is_reparse_point(&temp_root) {
-        return Err("Временный каталог Bedrock является символьной ссылкой".to_owned());
-    }
-    fs::create_dir_all(&temp_root).map_err(|_| "Временный каталог Bedrock недоступен".to_owned())?;
-    if is_symlink_or_missing_dir(&temp_root) {
-        return Err("Временный каталог Bedrock недоступен".to_owned());
-    }
-    let staged = temp_root.join(format!(".nivora-bedrock-{}{suffix}", random_hex(6)));
-    {
-        let mut file = super::platform::create_private(&staged)
-            .map_err(|_| "Не удалось подготовить файл импорта".to_owned())?;
-        file.write_all(&content)
-            .map_err(|_| "Не удалось подготовить файл импорта".to_owned())?;
-    }
-    let result = bol_run(
-        &["import".to_owned(), staged.to_string_lossy().into_owned()],
-        &profile,
-        "import",
-        None,
-        None,
-        Duration::from_secs(600),
-        500,
-        false,
-        None,
-        None,
-        None,
-    );
-    let _ = fs::remove_file(&staged);
-    let (code, logs) = result.map_err(|error| format!("Не удалось импортировать контент Bedrock: {error}"))?;
-    if code != 0 {
-        let detail = logs.last().cloned().unwrap_or_else(|| format!("код {code}"));
-        return Err(format!("Не удалось импортировать контент Bedrock: {detail}"));
-    }
-    Ok(json!({
-        "items": linux_content_list(name)?.get("items").cloned().unwrap_or_default(),
-        "logs": logs,
-    }))
-}
-
-fn classify_archive(archive: &mut zip::ZipArchive<std::io::Cursor<&[u8]>>) -> Result<Vec<(String, String)>, String> {
-    let names: Vec<String> = (0..archive.len())
-        .filter_map(|index| archive.by_index(index).ok().map(|entry| entry.name().replace('\\', "/")))
-        .collect();
-    let has_manifest = |prefix: &str| {
-        names.iter().any(|name| {
-            name.as_str() == format!("{prefix}manifest.json") || name.as_str() == format!("{prefix}/manifest.json")
-        })
-    };
-    let has_world_files = |prefix: &str| {
-        names.iter().any(|name| {
-            name.as_str() == format!("{prefix}levelname.txt")
-                || name.as_str() == format!("{prefix}level.dat")
-                || name.as_str() == format!("{prefix}/levelname.txt")
-                || name.as_str() == format!("{prefix}/level.dat")
-        })
-    };
-    if has_manifest("") || has_world_files("") {
-        let mut roots = Vec::new();
-        classify_single_root(archive, "", &mut roots)?;
-        return Ok(roots);
-    }
-    // .mcaddon: несколько паков в подкаталогах.
-    let mut directories: Vec<String> = Vec::new();
-    for name in &names {
-        if let Some(index) = name.find('/') {
-            let directory = name[..index].to_owned();
-            if !directory.is_empty() && !directories.contains(&directory) {
-                directories.push(directory);
-            }
-        }
-    }
-    directories.sort();
-    let mut roots: Vec<(String, String)> = Vec::new();
-    let mut found_any = false;
-    for directory in &directories {
-        if has_manifest(directory) || has_world_files(directory) {
-            found_any = true;
-            classify_single_root(archive, directory, &mut roots)?;
-        }
-    }
-    if !found_any {
-        return Err("В архиве не найден manifest.json ни данные мира (levelname.txt/level.dat)".to_owned());
-    }
-    Ok(roots)
-}
-
-fn classify_single_root(
-    archive: &mut zip::ZipArchive<std::io::Cursor<&[u8]>>,
-    prefix: &str,
-    roots: &mut Vec<(String, String)>,
-) -> Result<(), String> {
-    let prefix_slash = if prefix.is_empty() { String::new() } else { format!("{prefix}/") };
-    if let Some(manifest) = read_manifest_value(archive, &prefix_slash) {
-        let mut target = "resource_packs";
-        if let Some(modules) = manifest.get("modules").and_then(Value::as_array) {
-            for module in modules {
-                let kind = module.get("type").and_then(Value::as_str).unwrap_or("");
-                if kind == "data" {
-                    target = "behavior_packs";
-                    break;
-                }
-                if kind == "skin_pack" {
-                    target = "skin_packs";
-                    break;
-                }
-                if kind == "resources" {
-                    target = "resource_packs";
-                }
-            }
-        }
-        roots.push((target.to_owned(), prefix.to_owned()));
-        return Ok(());
-    }
-    // мир без манифеста: levelname.txt / level.dat.
-    let names: Vec<String> = (0..archive.len())
-        .filter_map(|index| archive.by_index(index).ok().map(|entry| entry.name().replace('\\', "/")))
-        .collect();
-    if names
-        .iter()
-        .any(|name| name.as_str() == format!("{prefix_slash}levelname.txt") || name.as_str() == format!("{prefix_slash}level.dat"))
-    {
-        roots.push(("minecraftWorlds".to_owned(), prefix.to_owned()));
-        return Ok(());
-    }
-    Err("В архиве не найден manifest.json ни данные мира".to_owned())
-}
-
-fn read_manifest_value(archive: &mut zip::ZipArchive<std::io::Cursor<&[u8]>>, prefix_slash: &str) -> Option<Value> {
-    let candidates = [
-        format!("{prefix_slash}manifest.json"),
-        format!("{}.manifest.json", prefix_slash.trim_end_matches('/')),
-    ];
-    for candidate in candidates {
-        if let Ok(mut entry) = archive.by_name(&candidate) {
-            let mut text = String::new();
-            if entry.read_to_string(&mut text).is_ok() {
-                if let Ok(value) = serde_json::from_str(&text) {
-                    return Some(value);
-                }
-            }
-        }
-    }
-    None
-}
-
-fn windows_content_import(name: &str, file_name: &str, content: Vec<u8>) -> Result<Value, String> {
-    let suffix = import_extension(file_name)?;
-    let mut archive = validate_content_archive(&content)?;
-    let store = instance_store()?;
-    let info = bedrock_instance(&store, name)?;
-    let (edition, _) = windows_selected(&info.path);
-    let edition = if edition.is_empty() { "release" } else { edition.as_str() };
-    let content_root = win_content_root(edition)?;
-    // быстрая классификация по расширению, точная — по манифесту.
-    let targets: Vec<(String, String)> = match suffix.as_str() {
-        ".mcworld" | ".mctemplate" => vec![("minecraftWorlds".to_owned(), String::new())],
-        ".mcskin" => vec![("skin_packs".to_owned(), String::new())],
-        _ => classify_archive(&mut archive)?,
-    };
-    let pack_name = Path::new(file_name)
-        .file_stem()
-        .map(|value| sanitize_content_name(&value.to_string_lossy()))
-        .unwrap_or_else(|| format!("pack-{}", random_hex(3)));
-    let mut imported: Vec<String> = Vec::new();
-    for (target_directory, archive_prefix) in &targets {
-        let destination = content_root.join(target_directory).join(&pack_name);
-        if is_reparse_point(&destination) {
-            continue;
-        }
-        if destination.is_dir() {
-            fs::remove_dir_all(&destination).map_err(|error| format!("Не удалось заменить контент: {error}"))?;
-        } else if destination.is_file() {
-            let _ = fs::remove_file(&destination);
-        }
-        fs::create_dir_all(&destination).map_err(|error| format!("Не удалось создать каталог контента: {error}"))?;
-        super::platform::restrict_dir(&destination);
-        let prefix_slash = if archive_prefix.is_empty() { String::new() } else { format!("{archive_prefix}/") };
-        for index in 0..archive.len() {
-            let mut entry = archive
-                .by_index(index)
-                .map_err(|error| format!("Не удалось прочитать архив: {error}"))?;
-            if entry.is_dir() {
-                continue;
-            }
-            let entry_name = entry.name().replace('\\', "/");
-            let Some(relative) = entry_name.strip_prefix(&prefix_slash) else { continue };
-            if relative.is_empty() || relative.split('/').any(|part| part == ".." || part.is_empty()) {
-                continue;
-            }
-            let target_path = destination.join(relative);
-            if let Some(parent) = target_path.parent() {
-                fs::create_dir_all(parent).map_err(|error| format!("Не удалось создать каталог контента: {error}"))?;
-            }
-            if is_reparse_point(&target_path) {
-                continue;
-            }
-            let mut file = super::platform::create_private(&target_path)
-                .map_err(|error| format!("Не удалось записать контент: {error}"))?;
-            std::io::copy(&mut entry, &mut file).map_err(|error| format!("Не удалось записать контент: {error}"))?;
-        }
-        imported.push(format!("{target_directory}/{pack_name}"));
-    }
-    Ok(json!({
-        "items": windows_content_list(name)?.get("items").cloned().unwrap_or_default(),
-        "logs": [format!("Импортировано в официальную версию: {}", imported.join(", "))],
-    }))
-}
-
-fn sanitize_content_name(value: &str) -> String {
-    let cleaned: String = value
-        .chars()
-        .map(|c| if c.is_alphanumeric() || c == ' ' || c == '_' || c == '-' || c == '.' { c } else { '_' })
-        .collect();
-    let trimmed = cleaned.trim().trim_matches('.');
-    let result: String = trimmed.chars().take(96).collect();
-    if result.is_empty() {
-        format!("pack-{}", random_hex(3))
-    } else {
-        result
-    }
+    content::content_import(request)
 }
 
 pub fn content_remove(request: &Value) -> Result<Value, String> {
-    let name = request_field(request, "name")?.to_owned();
-    let scope = request_field(request, "scope").unwrap_or_default().to_owned();
-    let directory_name = request_field(request, "directory")?.to_owned();
-    let item_name = request_field(request, "item_name")?.to_owned();
-    let known: Vec<&str> = CONTENT_DIRECTORIES.iter().flat_map(|(_, dirs)| dirs.iter().copied()).collect();
-    if !known.contains(&directory_name.as_str()) {
-        return Err("Неизвестный каталог Bedrock".to_owned());
-    }
-    for value in [&item_name, &scope] {
-        let invalid = value.is_empty()
-            || *value == "."
-            || *value == ".."
-            || value.contains('/')
-            || value.contains('\\')
-            || value.contains('\0')
-            || value.chars().any(|c| (c as u32) < 32)
-            || value.len() > 255;
-        if invalid {
-            return Err("Недопустимое имя ресурса Bedrock".to_owned());
-        }
-    }
-    match bedrock_platform() {
-        BedrockPlatform::LinuxBol => linux_content_remove(&name, &scope, &directory_name, &item_name),
-        BedrockPlatform::WindowsOfficial => windows_content_remove(&name, &directory_name, &item_name),
-        BedrockPlatform::Unsupported => Err("Minecraft Bedrock не поддерживается на этой ОС".to_owned()),
-    }
-}
-
-fn linux_content_remove(name: &str, scope: &str, directory_name: &str, item_name: &str) -> Result<Value, String> {
-    let ctx = context()?;
-    let store = instance_store()?;
-    let info = bedrock_instance(&store, name)?;
-    let profile = linux_profile_path(&ctx, &info)?;
-    let mut parts = BOL_CONTENT_ROOT_PARTS.to_vec();
-    parts.extend_from_slice(&[scope, "games", "com.mojang", directory_name, item_name]);
-    let target = safe_profile_path(&profile, &parts)?;
-    if is_reparse_point(&target) || !target.exists() {
-        return Err("Ресурс Bedrock не найден".to_owned());
-    }
-    if target.is_dir() {
-        fs::remove_dir_all(&target).map_err(|error| format!("Не удалось удалить контент: {error}"))?;
-    } else if target.is_file() {
-        fs::remove_file(&target).map_err(|error| format!("Не удалось удалить контент: {error}"))?;
-    } else {
-        return Err("Можно удалить только файл или папку Bedrock".to_owned());
-    }
-    Ok(json!({ "items": linux_content_list(name)?.get("items").cloned().unwrap_or_default() }))
-}
-
-fn windows_content_remove(name: &str, directory_name: &str, item_name: &str) -> Result<Value, String> {
-    let store = instance_store()?;
-    let info = bedrock_instance(&store, name)?;
-    let (edition, _) = windows_selected(&info.path);
-    let edition = if edition.is_empty() { "release" } else { edition.as_str() };
-    let content_root = win_content_root(edition)?;
-    let target = content_root.join(directory_name).join(item_name);
-    if is_reparse_point(&target) || !target.exists() {
-        return Err("Ресурс Bedrock не найден".to_owned());
-    }
-    if target.is_dir() {
-        fs::remove_dir_all(&target).map_err(|error| format!("Не удалось удалить контент: {error}"))?;
-    } else if target.is_file() {
-        fs::remove_file(&target).map_err(|error| format!("Не удалось удалить контент: {error}"))?;
-    }
-    Ok(json!({ "items": windows_content_list(name)?.get("items").cloned().unwrap_or_default() }))
+    content::content_remove(request)
 }
 
 pub fn stop(request: &Value) -> Result<Value, String> {
@@ -3084,11 +1462,11 @@ fn linux_launch(name: &str, operation: &str) -> Result<Value, String> {
     if !bol_profile_signed_in(&profile) {
         return Err(BEDROCK_LOGIN_REQUIRED_MESSAGE.to_owned());
     }
-    // блокировка экземпляра живёт всю игровую сессию — как в Python-версии.
+    // удерживаем блокировку до завершения игровой сессии
     let mut session_lock = InstanceProcessLock::new(&ctx.data_home, &info.name);
     session_lock.acquire()?;
-    // если установке версии не хватило сети/времени на движок, «play» умирал
-    // с «GDK-Proton missing» — доустанавливаем сами (setup идемпотентен).
+    // если установке версии не хватило сети/времени на движок, "play" умирал
+    // если возникает `GDK-Proton missing`, устанавливаем компонент сами
     if !engine_ready(&profile) {
         let (edition, version) = selected_version(&profile);
         let mut argv = vec!["setup".to_owned(), "--beta".to_owned()];
@@ -3140,7 +1518,7 @@ fn linux_launch(name: &str, operation: &str) -> Result<Value, String> {
             session_log.append(line);
         };
         // pid процесса BoL нужен метрикам и оверлею: они считают дерево
-        // процессов (Wine + игра) от этого корня.
+        // процессов (Wine + игра) от этого корня
         let session_pid = |pid: u32| {
             write_live_state(&info.path, true, pid, None, started_at, &log_id);
         };
@@ -3209,7 +1587,7 @@ fn windows_launch(name: &str, operation: &str) -> Result<Value, String> {
         "Запущен официальный Minecraft Bedrock ({edition}) по протоколу {}.",
         win_channel(&edition).protocol
     ));
-    // ждём появление процесса игры, затем сопровождаем сессию до выхода.
+    // ждём появление процесса игры, затем сопровождаем сессию до выхода
     let mut game_pid: u32 = 0;
     let discover_deadline = Instant::now() + Duration::from_secs(60);
     while Instant::now() < discover_deadline {
@@ -3226,7 +1604,7 @@ fn windows_launch(name: &str, operation: &str) -> Result<Value, String> {
             std::thread::sleep(Duration::from_millis(1000));
         }
     } else {
-        // процесс не найден (tasklist недоступен) — не блокируем сессию навсегда.
+        // если процесс не найден, не ждём его бесконечно
         std::thread::sleep(Duration::from_secs(5));
     }
     write_live_state(&info.path, false, game_pid, Some(0), started_at, &log_id);
@@ -3276,7 +1654,6 @@ mod tests {
         .unwrap();
         assert!(!bol_profile_signed_in(&profile), "девайс-запись без пользовательских токенов — входа нет");
 
-        // нет файла вовсе
         let profile = temp_profile("missing");
         assert!(!bol_profile_signed_in(&profile));
         let _ = fs::remove_dir_all(&profile);
@@ -3295,8 +1672,6 @@ mod tests {
             fs::create_dir_all(dir.join("xodus-home")).unwrap();
             fs::write(dir.join("profile.json"), "{}").unwrap();
         }
-        // единственный вход живёт в профиле A (экземпляр которого «сломан»);
-        // в B — только девайс-записи; в C — пусто.
         fs::write(
             prof_a.join("xodus-home").join(".xodus-keyring.ron"),
             "(device: \"dev_license\", user: \"user-tokens\", account: \"user-DA\")",
@@ -3317,11 +1692,11 @@ mod tests {
             assert!(dir.join("xodus-home").is_symlink(), "профиль {label} ссылается на общий дом");
             assert!(bol_profile_signed_in(dir), "вход виден из профиля {label}");
         }
-        // локальные копии не удалены, а retiring-переименованы
+        // локальный каталог сохранён под именем xodus-home.local
         assert!(prof_a.join("xodus-home.local").is_dir() || prof_b.join("xodus-home.local").is_dir());
         assert!(!prof_a.join("xodus-home.local").join(".xodus-keyring.ron").exists(), "ключница из A переехала, копии не осталось");
 
-        // повторный запуск — no-op: ссылки на месте, ничего не сломано
+        // повторная консолидация не должна нарушать ссылки
         share_xodus_keyring(&paths);
         assert!(shared_keyring.is_file());
         assert!(prof_b.join("xodus-home").is_symlink());
@@ -3411,8 +1786,7 @@ mod tests {
 
     #[test]
     fn log_ids_match_python_log_parser_contract() {
-        // python: [A-Za-z0-9._-]{1,240}\.log, хвост «-bedrock-…» после
-        // <имя>-<sha24>-, и версия в хвосте [A-Za-z0-9._-]+.
+        // идентификатор журнала содержит имя, хеш и суффикс Bedrock
         let log_id = new_log_id("bedrock-one");
         assert!(log_id.ends_with(".log"), "{log_id}");
         assert!(log_id.contains("-bedrock-"), "{log_id}");
@@ -3442,7 +1816,7 @@ mod tests {
         assert!(validate_content_archive(&bad).is_err());
         let empty: Vec<u8> = {
             let mut buffer = std::io::Cursor::new(Vec::new());
-            let mut zip = zip::ZipWriter::new(&mut buffer);
+            let zip = zip::ZipWriter::new(&mut buffer);
             zip.finish().unwrap();
             buffer.into_inner()
         };
@@ -3624,8 +1998,6 @@ mod tests {
     }
 
     #[test]
-    /// живая проверка встроенной среды: настоящий pyz + python3 из репозитория.
-    #[test]
     #[ignore = "нужен настоящий vendor/bedrock-on-linux-2.2.9.pyz из дерева репозитория"]
     fn bol_probe_real_bundle() {
         let candidates = bundled_pyz_candidates();
@@ -3722,20 +2094,20 @@ mod tests {
 
     #[test]
     fn launch_interception_routes_only_bedrock_launches() {
-        // не launch-операции никогда не перехватываются
+        // операции, кроме запуска, не перехватываются
         assert!(!should_intercept_launch(&json!({ "operation": "install", "name": "x" })));
         assert!(!should_intercept_launch(&json!({ "operation": "delete_instance", "name": "x" })));
-        // launch неизвестного экземпляра уходит воркеру (перехвата нет)
+        // неизвестный экземпляр обрабатывается основным маршрутом
         assert!(!should_intercept_launch(&json!({
             "operation": "launch",
             "instance_name": format!("no-such-bedrock-{}", random_hex(4)),
         })));
-        // пустое имя — не перехватываем
+        // пустое имя не перехватывается
         assert!(!should_intercept_launch(&json!({ "operation": "launch", "instance_name": "" })));
-        // launch_intercepted требует имя
         assert!(launch_intercepted(&json!({ "operation": "launch" })).is_err());
     }
 
+    #[test]
     fn request_field_helper_reads_requests() {
         let request = json!({ "name": "  bedrock-one  " });
         assert_eq!(request_field(&request, "name").unwrap(), "bedrock-one");
@@ -3745,16 +2117,12 @@ mod tests {
 
     #[test]
     fn clean_process_line_strips_ansi_and_nul_noise() {
-        // прогресс-бары перерисовываются CSI-курсорами и цветами
         assert_eq!(
             clean_process_line(b"\x1b[2K\x1b[1ADownloading 42%"),
             Some("Downloading 42%".to_owned())
         );
-        // NUL-добивка псевдотерминала и возвраты каретки как хвост
         assert_eq!(clean_process_line(b"\0\0ok  \0"), Some("ok".to_owned()));
-        // OSC-последовательность (заголовок окна) вырезается целиком
         assert_eq!(clean_process_line(b"\x1b]0;title\x07line"), Some("line".to_owned()));
-        // только шум — не строка вовсе
         assert_eq!(clean_process_line(b"\x1b[2K\r\r"), None);
         assert_eq!(clean_process_line(b"   "), None);
     }
@@ -3772,7 +2140,6 @@ mod tests {
                 Err(_) => panic!("читатель не завершился"),
             }
         }
-        // `\r`-перерисовки превращаются в строки, хвост без терминатора тоже доезжает
         assert_eq!(collected, vec!["one", "pre-reload", "two", "three", "four"]);
     }
 
@@ -3784,10 +2151,8 @@ mod tests {
         fs::write(&package, vec![0u8; 1024]).unwrap();
         let mut watchdog = DownloadWatchdog::with_interval(&home, Duration::ZERO);
 
-        // первый обход — только снимок, вердикта ещё нет
         assert_eq!(watchdog.check(), WatchdogVerdict::Pending);
 
-        // дерево выросло — скачивание живо, хотя stdout молчит
         let grown = home.join("package.part");
         fs::write(&grown, vec![0u8; 4096]).unwrap();
         match watchdog.check() {
@@ -3795,10 +2160,8 @@ mod tests {
             other => panic!("рост не замечен: {other:?}"),
         }
 
-        // ничего не менялось — это настоящее зависание
         assert_eq!(watchdog.check(), WatchdogVerdict::Silent);
 
-        // новый файл тоже признак работы
         fs::write(home.join("second.part"), vec![0u8; 10]).unwrap();
         assert!(matches!(watchdog.check(), WatchdogVerdict::Active(_)));
 
@@ -3808,8 +2171,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn run_job_process_kills_stalled_installer() {
-        // установщик, замолчавший навсегда: stall-детекция обязана остановить его
-        // быстрее жёсткого потолка и вернуть внятную ошибку.
         let mut command = std::process::Command::new("sh");
         command.args(["-c", "echo start; sleep 60"]).stdout(Stdio::piped()).stderr(Stdio::piped());
         let started = Instant::now();

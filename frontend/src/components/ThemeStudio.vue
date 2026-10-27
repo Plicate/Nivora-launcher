@@ -45,7 +45,7 @@ const fontFamilyOptions: SelectOption[] = [
   { value: 'manrope', label: 'Manrope', meta: 'Более мягкие формы' },
   { value: 'mono', label: 'DM Mono', meta: 'Технический моноширинный стиль' },
 ]
-const accentPresets = ['#65764b', '#8b653f', '#65747a', '#8c5145', '#756157', '#596f5b', '#81643e', '#686a54']
+const accentPresets = ['#5b8dd9', '#3d6ba8', '#8b653f', '#65764b', '#65747a', '#8c5145', '#756157', '#596f5b']
 const colorTokenOptions: SelectOption[] = [
   { value: 'accent', label: 'Основной акцент', meta: 'Кнопки, selection, focus' },
   { value: 'accent_strong', label: 'Яркий акцент', meta: 'Hover и подсветка' },
@@ -81,7 +81,7 @@ const densityOptions: SelectOption[] = [
 ]
 const instanceLayoutOptions: SelectOption[] = [
   { value: 'default', label: 'Обычный список', meta: 'Строки с подборкой и действиями' },
-  { value: 'compact', label: 'Компактный режим', meta: 'Плитки как в Prism Launcher' },
+  { value: 'compact', label: 'Компактный режим', meta: 'Плотные плитки экземпляров' },
 ]
 const sidebarPositionOptions: SelectOption[] = [
   { value: 'left', label: 'Слева' },
@@ -431,7 +431,7 @@ const contrastAudit = computed(() => contrastPairs.map((pair) => {
 const contrastFailures = computed(() => contrastAudit.value.filter((entry) => !entry.passes))
 
 function fixContrast(entry: { foreground: string; background: string }) {
-  // сдвигаем яркость текста от фона, пока контраст не станет комфортным.
+  // сдвигаем яркость текста от фона, пока контраст не станет комфортным
   const foregroundToken = entry.foreground
   const background = String(props.tokens[entry.background] || '#000000')
   const backgroundIsLight = relativeLuminance(background) > 0.5
@@ -471,8 +471,8 @@ async function copyTokensJson() {
 const copiedTokens = ref(false)
 
 const accentSuggestions = computed(() => {
-  // гармоничные оттенки от тона фона: приглушённые и достаточно контрастные.
-  const background = String(props.tokens.background || '#191a17')
+  // гармоничные оттенки от тона фона: приглушённые и достаточно контрастные
+  const background = String(props.tokens.background || '#0b1220')
   const match = /^#?([0-9a-f]{6})$/i.exec(background.trim())
   if (!match) return []
   const raw = match[1]
@@ -515,7 +515,6 @@ const previewWidthOptions: Array<{ id: PreviewWidth; label: string; hint: string
   { id: 'standard', label: 'Стандарт', hint: 'Обычное окно' },
   { id: 'wide', label: 'Широкое', hint: 'Максимум места' },
 ]
-// мок течёт по ширине сам (внутри — проценты, а не фиксированные пиксели),
 const previewDesignWidth = computed(() => ({ compact: 560, standard: 860, wide: 1180 }[previewWidth.value]))
 
 const radiusKeys: Array<{ key: 'card' | 'button' | 'control'; label: string; hint: string }> = [
@@ -531,8 +530,6 @@ const sidebarWidthDisabled = computed(() =>
 )
 
 function chooseWallpaper() {
-  // сам выбор файла ведёт App.vue: у него рабочий конвейер импорта.
-  // здесь достаточно попросить.
   emit('importWallpaperFile')
 }
 
@@ -556,7 +553,7 @@ const saveLabel = computed(() => {
   <section class="studio-app" @keydown.esc="handleEscape">
     <header class="studio-toolbar">
       <div class="studio-toolbar-copy">
-        <span class="eyebrow">Студия оформления</span>
+        
         <strong>Центр настройки тем</strong>
         <span class="studio-toolbar-context">{{ contextLabel }}</span>
       </div>
@@ -625,7 +622,6 @@ const saveLabel = computed(() => {
         </header>
 
         <div class="studio-inspector-body">
-          <!-- Element editor: picked from the preview -->
           <template v-if="currentTarget">
             <div v-for="token in currentTarget.tokens" :key="token" class="studio-token-row">
               <div class="studio-token-meta">
@@ -671,7 +667,6 @@ const saveLabel = computed(() => {
             <p v-if="currentTarget.note" class="studio-inspector-note">{{ currentTarget.note }}</p>
           </template>
 
-          <!-- Section editors -->
           <template v-else-if="activeSection === 'general'">
             <div class="studio-inspector-field"><div class="field"><span>Основная тема</span><CustomSelect v-model="appearance.theme" :options="themeOptions" /></div></div>
             <div class="studio-inspector-field"><div class="field"><span>Шрифт интерфейса</span><CustomSelect v-model="fontFamilyValue" :options="fontFamilyOptions" /></div></div>

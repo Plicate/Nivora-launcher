@@ -1,4 +1,4 @@
-// бюджеты вызовов/данных на стороне хоста и красный (без значений) аудит операций.
+// квоты вызовов и данных, а также аудит без значений
 use serde_json::{json, Map, Value};
 use std::collections::{HashMap, VecDeque};
 use std::fs;
@@ -29,6 +29,8 @@ impl PluginOperationGuard {
         }
     }
 
+    /// проверяет размер запроса и списывает его из квоты плагина
+    #[allow(dead_code)]
     pub(crate) fn consume(
         &self,
         plugin_id: &str,
@@ -41,8 +43,8 @@ impl PluginOperationGuard {
         if !IDENTITY_RE.is_match(plugin_id) {
             return Err("Invalid plugin identity".to_owned());
         }
-        // serde_json не умеет выдавать NaN/Infinity, так что «bounded JSON» ломается
-        // только на слишком глубокой вложенности.
+        // serde_json не умеет выдавать NaN/Infinity, так что "bounded JSON" ломается
+        // только на слишком глубокой вложенности
         let data = serde_json::to_vec(payload).map_err(|_| "Plugin request is not bounded JSON".to_owned())?;
         if data.len() > MAX_PAYLOAD {
             return Err("Plugin request exceeds the payload limit".to_owned());
@@ -51,7 +53,7 @@ impl PluginOperationGuard {
         let identity = (plugin_id.to_owned(), bucket.to_owned());
         let mut windows = self.lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         if !windows.map.contains_key(&identity) && windows.map.len() >= 256 {
-            // активный бюджет не выселяем — иначе вызывающий код потеряет свой лимит.
+            // сохраняем активный бюджет, чтобы вызывающий код не потерял свой лимит
             let stale: Vec<(String, String)> = windows
                 .map
                 .iter()
@@ -116,7 +118,7 @@ impl PluginOperationGuard {
         static LISTENER_RE: LazyLock<regex::Regex> =
             LazyLock::new(|| regex::Regex::new(LISTENER).expect("валидный regex слушателя"));
         // намеренно не храним значения: URL, заголовки, тела, куки и токены
-        // могут содержать учётные данные.
+        // могут содержать учётные данные
         let mut keys: Vec<String> = args
             .as_object()
             .map(|fields| fields.keys().map(|key| key.chars().take(80).collect()).collect())
@@ -154,7 +156,7 @@ impl PluginOperationGuard {
         encoded.push('\n');
         let encoded = encoded.into_bytes();
 
-        // весь ввод-вывод аудита — под общим замком, как в Python.
+        // защищаем весь ввод и вывод аудита одним замком
         let _windows = self.lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         if fs::symlink_metadata(root).map(|meta| meta.is_symlink()).unwrap_or(false) {
             return Err("Audit directory cannot be a link".to_owned());
@@ -265,9 +267,9 @@ mod tests {
         }
         let error = guard.consume("counter", &json!({}), "rpc", true).unwrap_err();
         assert!(error.starts_with("Plugin rate/data limit"));
-        // другой плагин не делит бюджет.
+        // другой плагин не делит бюджет
         assert!(guard.consume("other", &json!({}), "rpc", true).is_ok());
-        // не считаемые за вызов — только байтовый лимит.
+        // такие операции расходуют байтовый лимит, но не лимит вызовов
         assert!(guard.consume("counter", &json!({}), "rpc", false).is_ok());
         let usage = guard.usage("counter", "rpc");
         assert_eq!(usage["callLimit"], json!(MAX_CALLS));
@@ -278,8 +280,7 @@ mod tests {
     #[test]
     fn byte_budget_is_shared_across_buckets() {
         let guard = PluginOperationGuard::new();
-        // полезная нагрузка ~3 МиБ (меньше MAX_PAYLOAD в 4 МиБ): пара вызовов
-        // исчерпывает восьмимебайтное окно.
+        // пара запросов такого размера исчерпывает квоту в 8 МиБ
         let payload: String = "x".repeat(3 * 1024 * 1024);
         guard.consume("heavy", &json!({ "blob": payload }), "rpc", false).unwrap();
         guard.consume("heavy", &json!({ "blob": payload }), "rpc", false).unwrap();
@@ -309,7 +310,7 @@ mod tests {
         assert_eq!(entry["plugin"], json!("demo"));
         assert_eq!(entry["operation"], json!("net.fetch"));
         assert_eq!(entry["argumentKeys"], json!(["event", "listener_id", "token", "url"]));
-        // значения не попадают в аудит никогда.
+        // значения не попадают в аудит никогда
         assert!(!log.contains("secret"));
         assert_eq!(entry["event"], json!("launcher.ready"));
         assert_eq!(entry["listenerId"], json!("listener-123"));
@@ -322,7 +323,7 @@ mod tests {
         assert!(!log.contains("custom.event"));
         assert!(!log.contains("bad-listener"));
 
-        // ротация: файл больше лимита уезжает в previous.
+        // ротация: файл больше лимита уезжает в previous
         let path = root.join("plugin-operations.jsonl");
         fs::write(&path, vec![b'x'; (MAX_AUDIT_BYTES + 1) as usize]).unwrap();
         guard.audit(&root, "demo", "op", &json!({}), "ok", 0.5).unwrap();

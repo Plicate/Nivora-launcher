@@ -1,27 +1,3 @@
-// nivora-turbo — пакетное SHA-256 для тяжёлых мест Python-воркера.
-//
-// Зачем отдельный бинарник: облако-синк хеширует каждый файл манифеста,
-// аудит модпака — каждый jar. В Python это километры hashlib подряд, в
-// один поток. Один запуск здесь закрывает целый список: пул потоков по
-// числу ядер, один процесс на всю пачку.
-//
-// Протокол нарочно примитивный, чтобы звать можно было откуда угодно:
-//   nivora-turbo sha256 FILE [FILE...] -> по строке на файл:
-//   <hexdigest>\t<size>\t<path>
-// Порядок строк повторяет порядок аргументов. Файл не читается — строка
-// с "-" в первых двух полях и код выхода 1; вызывающая сторона при
-// неуспехе целиком откатывается на свой путь.
-//
-// Никаких внешних зависимостей, кроме системного zlib (сырой deflate
-// для манифестов внутри jar). SHA-256 свой (переносимый путь плюс
-// аппаратный sha256rnds2 на x86-64, выбор при старте по CPUID), std::thread.
-//
-// Вторая команда — scan-jars: батч-скан модов без распаковки. Читает
-// центральный каталог zip, достаёт первый знакомый манифест
-// (fabric/quilt/mods.toml/neoforge/mcmod/litemod) и печатает строку
-//   loader\tmod_id\tname\tversion\tpath
-// «-» означает «нет». Файл не читается — «-» во всех полях и код 1.
-
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
@@ -30,10 +6,21 @@
 #include <cstring>
 #include <cctype>
 #include <fstream>
+#include <memory>
 #include <string>
 #include <thread>
 #include <vector>
 #include <zlib.h>
+
+#include "instance_manifest.hpp"
+
+#if defined(__MINGW32__) && !defined(_GLIBCXX_HAS_GTHREADS)
+// mingw с win32-потоками не поддерживает std::thread; используем CreateThread
+#include <windows.h>
+#define TURBO_WIN32_THREADS 1
+#else
+#define TURBO_WIN32_THREADS 0
+#endif
 
 #if defined(__x86_64__)
 #define TURBO_X86 1
@@ -43,6 +30,56 @@
 #endif
 
 namespace {
+
+#if TURBO_WIN32_THREADS
+struct win32_task {
+    void (*fn)(void *);
+    void *arg;
+};
+
+inline DWORD WINAPI win32_trampoline(LPVOID raw) {
+    win32_task *task = static_cast<win32_task *>(raw);
+    task->fn(task->arg);
+    return 0;
+}
+#endif
+
+// запускает worker() в workers потоках; вызов WaitForMultipleObjects ждёт не более 64 потоков за раз
+template <typename F>
+void run_parallel(unsigned workers, F worker) {
+#if TURBO_WIN32_THREADS
+    std::vector<HANDLE> threads;
+    std::vector<win32_task> tasks(workers);
+    for (unsigned i = 0; i < workers; i++) {
+        // поток освобождает собственную копию worker через unique_ptr
+        F *copy = new F(worker);
+        tasks[i].fn = [](void *raw) {
+            std::unique_ptr<F> owned(static_cast<F *>(raw));
+            (*owned)();
+        };
+        tasks[i].arg = copy;
+        HANDLE thread = CreateThread(nullptr, 0, win32_trampoline, &tasks[i], 0, nullptr);
+        if (thread == nullptr) {
+            // при ошибке создания потока выполняем задачу здесь
+            tasks[i].fn(tasks[i].arg);
+            continue;
+        }
+        threads.push_back(thread);
+    }
+    for (size_t base = 0; base < threads.size(); ) {
+        size_t left = threads.size() - base;
+        DWORD chunk = left > 64 ? 64 : static_cast<DWORD>(left);
+        WaitForMultipleObjects(chunk, threads.data() + base, TRUE, INFINITE);
+        base += chunk;
+    }
+    for (HANDLE thread : threads) CloseHandle(thread);
+#else
+    std::vector<std::thread> threads;
+    threads.reserve(workers);
+    for (unsigned i = 0; i < workers; i++) threads.emplace_back(worker);
+    for (auto &thread : threads) thread.join();
+#endif
+}
 
 constexpr uint32_t K[64] = {
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
@@ -92,8 +129,7 @@ __m128i ni_k_group(int group) {
 void sha256_compress_ni(uint32_t h[8], const unsigned char block[64]) {
     const __m128i mask = _mm_set_epi64x(0x0c0d0e0f08090a0bULL, 0x0405060700010203ULL);
 
-    // A..H раскладываются в пару ABEF/CDGH (перестановки из примера Intel);
-    // обратная сборка в конце — зеркальная.
+    // регистры A..H переставляются в ABEF/CDGH, затем собираются обратно
     __m128i tmp = _mm_loadu_si128((const __m128i *)&h[0]);
     __m128i state1 = _mm_loadu_si128((const __m128i *)&h[4]);
     tmp = _mm_shuffle_epi32(tmp, 0xB1);
@@ -118,28 +154,26 @@ void sha256_compress_ni(uint32_t h[8], const unsigned char block[64]) {
         state0 = _mm_sha256rnds2_epu32(state0, state1, msg);
 
         if (group >= 3 && group <= 14) {
-            // Достройка W для группы group+1: частичная сумма (msg1 из
-            // группы group-2) + W[i-7] + сигма1 с цепочкой.
+            // достраиваем W группы group+1 через частичную сумму, W[i-7] и сигма1
             tmp = _mm_alignr_epi8(slots[cur], slots[prev], 4);
             slots[next] = _mm_add_epi32(slots[next], tmp);
             slots[next] = _mm_sha256msg2_epu32(slots[next], slots[cur]);
         }
         if (group >= 1 && group <= 12) {
-            // Частичная сумма для группы group+3: слова группы group-1
-            // плюс сигма0 от «следующих четырёх».
+            // частичная сумма для group+3 использует слова group-1 и сигма0
             slots[prev] = _mm_sha256msg1_epu32(slots[prev], slots[cur]);
         }
     }
 
-    tmp = _mm_shuffle_epi32(state0, 0x1B);          /* [A,B,E,F] */
-    __m128i tail = _mm_shuffle_epi32(state1, 0x1B); /* [C,D,G,H] */
-    __m128i abcd = _mm_unpacklo_epi64(tmp, tail);   /* [A,B,C,D] */
-    __m128i efgh = _mm_unpackhi_epi64(tmp, tail);   /* [E,F,G,H] */
+    tmp = _mm_shuffle_epi32(state0, 0x1B);          /* lane order: [A,B,E,F] */
+    __m128i tail = _mm_shuffle_epi32(state1, 0x1B); /* lane order: [C,D,G,H] */
+    __m128i abcd = _mm_unpacklo_epi64(tmp, tail);   /* packed order: [A,B,C,D] */
+    __m128i efgh = _mm_unpackhi_epi64(tmp, tail);   /* packed order: [E,F,G,H] */
     _mm_storeu_si128((__m128i *)&h[0], _mm_add_epi32(abcd, _mm_loadu_si128((const __m128i *)&h[0])));
     _mm_storeu_si128((__m128i *)&h[4], _mm_add_epi32(efgh, _mm_loadu_si128((const __m128i *)&h[4])));
 }
 
-#endif // TURBO_X86
+#endif // closes TURBO_X86
 
 using CompressFn = void (*)(uint32_t[8], const unsigned char[64]);
 
@@ -152,8 +186,6 @@ CompressFn pick_compress() {
 #endif
     return &sha256_compress_generic;
 }
-
-// ------------------------------------------------------------- хеширование ----
 
 struct Sha256State {
     uint32_t h[8];
@@ -261,20 +293,22 @@ FileResult hash_one(const std::string &path, CompressFn compress) {
     return result;
 }
 
-// ------------------------------------------------------------- скан jar-ов ----
-
 struct JarInfo {
     bool ok = false;  // zip прочитан; манифеста может не быть
     std::string loader;
     std::string mod_id;
     std::string name;
     std::string version;
+    // результаты сканирования связывают записи стека ошибок с файлами модов
+    std::vector<std::string> loaders;
+    std::vector<std::string> mixins;
+    std::vector<std::string> packages;
 };
 
 struct ManifestSpec {
     const char *name;
     const char *loader;
-    char kind;  // 'f' — json id/name/version, 't' — toml, 'm' — mcmod, 'l' — litemod
+    char kind;  // 'f': json id/name/version, 't': toml, 'm': mcmod, 'l': litemod
 };
 
 // порядок = приоритет: fabric раньше quilt раньше forge-вариантов
@@ -312,8 +346,7 @@ bool skip_ws(const std::string &doc, size_t &cursor) {
     return false;
 }
 
-// значение первого "key":"value" — без полного разбора JSON: поля модов
-// в этих манифестах всегда идут раньше вложенных объектов с теми же ключами
+// ищет первое строковое поле; в манифестах нужные ключи предшествуют вложенным
 std::string json_field(const std::string &doc, const char *key) {
     std::string needle = std::string("\"") + key + "\"";
     size_t pos = doc.find(needle);
@@ -364,7 +397,7 @@ std::string read_quoted(const std::string &doc, size_t &cursor) {
     return value;
 }
 
-// key="value" без разбора toml-таблиц: modLoader и прочие ключи modId не содержат
+// ищет key="value" без разбора TOML-таблиц
 std::string toml_field(const std::string &doc, const char *key) {
     const size_t key_len = std::strlen(key);
     size_t pos = doc.find(key);
@@ -389,7 +422,7 @@ std::string toml_field(const std::string &doc, const char *key) {
     return {};
 }
 
-// сырой deflate без заголовка zlib — так хранятся члены zip
+// архив ZIP использует raw deflate без заголовка zlib
 std::string inflate_raw(const std::string &input, uint32_t expected) {
     if (expected == 0 || expected > MAX_MANIFEST_BYTES || input.empty()) return {};
     std::string out(expected, '\0');
@@ -405,8 +438,45 @@ std::string inflate_raw(const std::string &input, uint32_t expected) {
     return complete ? out : std::string();
 }
 
-JarInfo scan_one(const std::string &path) {
-    JarInfo info;
+std::string to_lower_name(const std::string &value) {
+    std::string out = value;
+    for (char &c : out) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return out;
+}
+
+void push_unique(std::vector<std::string> &items, const std::string &value) {
+    if (std::find(items.begin(), items.end(), value) == items.end()) items.push_back(value);
+}
+
+// собирает загрузчики, корневые mixin-конфиги и префиксы пакетов классов
+void analyze_entry_name(const std::string &name, JarInfo &info) {
+    const std::string lowered = to_lower_name(name);
+    if (lowered == "fabric.mod.json") push_unique(info.loaders, "fabric");
+    else if (lowered == "quilt.mod.json") push_unique(info.loaders, "quilt");
+    else if (lowered == "meta-inf/neoforge.mods.toml") push_unique(info.loaders, "neoforge");
+    else if (lowered == "meta-inf/mods.toml" || lowered == "mcmod.info") push_unique(info.loaders, "forge");
+    if (lowered.size() > 6 && lowered.size() < 80 && lowered.find('/') == std::string::npos
+        && lowered.rfind(".json") == lowered.size() - 5 && lowered.find("mixin") != std::string::npos
+        && info.mixins.size() < 8) {
+        push_unique(info.mixins, lowered);
+    }
+    if (info.packages.size() < 16 && lowered.size() > 6 && lowered.rfind(".class") == lowered.size() - 6
+        && lowered.compare(0, 9, "meta-inf/") != 0) {
+        // до трёх сегментов пути: com/example/mod
+        size_t slashes[2] = {std::string::npos, std::string::npos};
+        int seen = 0;
+        for (size_t i = 0; i < lowered.size() && seen < 2; i++) {
+            if (lowered[i] == '/') slashes[seen++] = i;
+        }
+        if (seen == 2) {
+            size_t third = lowered.find('/', slashes[1] + 1);
+            size_t end = (third != std::string::npos) ? third : slashes[1];
+            push_unique(info.packages, lowered.substr(0, end));
+        }
+    }
+}
+
+JarInfo scan_one(const std::string &path) {    JarInfo info;
     std::ifstream file(path, std::ios::binary);
     if (!file) return info;
     file.seekg(0, std::ios::end);
@@ -457,8 +527,9 @@ JarInfo scan_one(const std::string &path) {
         uint32_t local_offset = rd32(p + 42);
         if (pos + 46 + size_t(name_len) > central.size()) break;
         std::string name(central, pos + 46, name_len);
+        analyze_entry_name(name, info);
         for (const ManifestSpec &spec : MANIFESTS) {
-            // раньше по массиву = выше приоритет
+            // порядок MANIFESTS задаёт приоритет
             if (name == spec.name && (!best || &spec < best)) {
                 best = &spec;
                 best_method = method;
@@ -530,15 +601,20 @@ std::string clean_field(const std::string &value) {
 
 int main(int argc, char **argv) {
     if (argc < 2) {
-        std::fprintf(stderr, "nivora-turbo sha256 FILE [FILE...]\n         nivora-turbo scan-jars FILE [FILE...]\n");
+        std::fprintf(stderr, "nivora-turbo sha256 FILE [FILE...]\n         nivora-turbo scan-jars FILE [FILE...]\n         nivora-turbo scan-mods FILE [FILE...]\n         nivora-turbo instance-manifest DIR\n");
         return 2;
     }
     if (std::strcmp(argv[1], "version") == 0) {
-        std::printf("nivora-turbo 2\n");
+        std::printf("nivora-turbo 4\n");
         return 0;
     }
+    if (std::strcmp(argv[1], "instance-manifest") == 0) {
+        std::vector<std::string> args(argv + 2, argv + argc);
+        return nivora::run_instance_manifest(args);
+    }
     const bool scan_mode = std::strcmp(argv[1], "scan-jars") == 0;
-    if ((!scan_mode && std::strcmp(argv[1], "sha256") != 0) || argc < 3) {
+    const bool mods_mode = std::strcmp(argv[1], "scan-mods") == 0;
+    if ((!scan_mode && !mods_mode && std::strcmp(argv[1], "sha256") != 0) || argc < 3) {
         std::fprintf(stderr, "неизвестная команда: %s\n", argv[1]);
         return 2;
     }
@@ -548,7 +624,8 @@ int main(int argc, char **argv) {
     std::string out;
     out.reserve(96 * paths.size());
 
-    if (scan_mode) {
+    if (mods_mode) {
+
         std::vector<JarInfo> results(paths.size());
         unsigned workers = std::thread::hardware_concurrency();
         if (workers == 0) workers = 1;
@@ -561,10 +638,49 @@ int main(int argc, char **argv) {
                 results[index] = scan_one(paths[index]);
             }
         };
-        std::vector<std::thread> threads;
-        threads.reserve(workers);
-        for (unsigned i = 0; i < workers; i++) threads.emplace_back(worker);
-        for (auto &thread : threads) thread.join();
+        run_parallel(workers, worker);
+        auto join_plus = [](const std::vector<std::string> &items) {
+            std::string out;
+            for (size_t i = 0; i < items.size(); i++) {
+                if (i) out += '+';
+                out += items[i];
+            }
+            return out;
+        };
+        for (size_t i = 0; i < paths.size(); i++) {
+            const JarInfo &result = results[i];
+            out += clean_field(join_plus(result.loaders));
+            out += '\t';
+            out += clean_field(result.mod_id);
+            out += '\t';
+            out += clean_field(result.name);
+            out += '\t';
+            out += clean_field(result.version);
+            out += '\t';
+            out += clean_field(join_plus(result.mixins));
+            out += '\t';
+            out += clean_field(join_plus(result.packages));
+            out += '\t';
+            out += result.ok ? '0' : '1';
+            out += '\t';
+            out += paths[i];
+            out += '\n';
+            if (!result.ok) all_ok = false;
+        }
+    } else if (scan_mode) {
+        std::vector<JarInfo> results(paths.size());
+        unsigned workers = std::thread::hardware_concurrency();
+        if (workers == 0) workers = 1;
+        if (workers > paths.size()) workers = static_cast<unsigned>(paths.size());
+        std::atomic<size_t> next{0};
+        auto worker = [&]() {
+            for (;;) {
+                size_t index = next.fetch_add(1);
+                if (index >= paths.size()) return;
+                results[index] = scan_one(paths[index]);
+            }
+        };
+        run_parallel(workers, worker);
         for (size_t i = 0; i < paths.size(); i++) {
             if (results[i].ok) {
                 out += clean_field(results[i].loader);
@@ -598,10 +714,7 @@ int main(int argc, char **argv) {
                 results[index] = hash_one(paths[index], compress);
             }
         };
-        std::vector<std::thread> threads;
-        threads.reserve(workers);
-        for (unsigned i = 0; i < workers; i++) threads.emplace_back(worker);
-        for (auto &thread : threads) thread.join();
+        run_parallel(workers, worker);
         for (size_t i = 0; i < paths.size(); i++) {
             if (results[i].ok) {
                 out += results[i].hex;
