@@ -15,6 +15,11 @@ test('кириллица, пробелы и спецсимволы дают ош
   assert.match(nicknameError('a\tb'), /«пробельный символ»/)
 })
 
+test('имена разных Offline-аккаунтов добавляются по одному, разделители не принимаются как список', () => {
+  assert.match(nicknameError('Steve_77,Alex_22'), /недопустимые символы/)
+  assert.match(nicknameError('Steve_77\nAlex_22'), /недопустимые символы/)
+})
+
 test('длина: 3–16 символов', () => {
   assert.equal(nicknameError('ab'), 'Ник должен быть не короче 3 символов')
   assert.equal(nicknameError('a'.repeat(17)), 'Ник должен быть не длиннее 16 символов')

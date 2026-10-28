@@ -34,7 +34,7 @@ import { shouldOpenActivityAfterSessionStart } from './services/activityVisibili
 import { LAUNCHER_VERSION } from './version'
 import { composedBlockIcon } from './services/blockIcon'
 import { setLocale, type Locale } from './i18n'
-import { DEFAULT_OVERLAY_SETTINGS, bindGameHotkeys, initOverlayEventBridge, normalizeHotkey, overlayLastError, overlayWaylandMode, overlayWindowRequested, setOverlayOpaqueWindow, setOverlayVisible, setOverlayWaylandMode, toggleOverlay, toggleRecording, unbindGameHotkeys } from './services/overlay'
+import { DEFAULT_OVERLAY_SETTINGS, bindGameHotkeys, initOverlayEventBridge, normalizeHotkey, normalizeOverlayHotkey, overlayLastError, overlayWaylandMode, overlayWindowRequested, setOverlayOpaqueWindow, setOverlayVisible, setOverlayWaylandMode, shouldDetachOverlayAfterMisses, toggleOverlay, toggleRecording, unbindGameHotkeys } from './services/overlay'
 import { chooseDialog, confirmDialog, promptDialog } from './services/dialogs'
 import { fileBrowserRequest, openInLauncherExplorer, pickFile, pickFiles, resolveFileBrowser, resolveFileBrowserDirectory, resolveFileBrowserMany, type PickedFile } from './services/fileBrowser'
 import ContextMenuHost from './components/ContextMenuHost.vue'
@@ -526,7 +526,7 @@ const javaSelection = ref('auto')
 const memoryValue = ref(8)
 const memoryUnit = ref<MemoryUnit>('GiB')
 const accountName = ref('Player')
-const accountNameError = computed(() => (accountName.value ? nicknameError(accountName.value) : ''))
+const accountNameError = computed(() => nicknameError(accountName.value.trim()))
 const modQuery = ref('')
 const modProjectType = ref<ProjectType>('mod')
 const selectedModCategory = ref('')
@@ -1138,7 +1138,6 @@ function clearPluginNotificationToast(toastIdToClear: number) {
   pluginController.clearNotificationsForToast(toastIdToClear)
 }
 
-// отправляем системное уведомление, только когда окно скрыто
 const launcherHidden = ref(false)
 
 function syncLauncherHidden() {
@@ -1158,8 +1157,6 @@ const overlayMode = overlayWindowRequested()
 let overlayWatchTimer: number | undefined
 let overlayAttachedInstance = ''
 let overlayRecordingBusy = false
-// число пропусков опроса перед отключением клавиш; интервал опроса 3 секунды
-const OVERLAY_DETACH_AFTER_MISSES = 4
 let overlayMissedPolls = 0
 
 function overlaySettingsDraft(): OverlaySettings {
@@ -1167,13 +1164,12 @@ function overlaySettingsDraft(): OverlaySettings {
 }
 
 function overlayHotkeyLabel(): string {
-  return normalizeHotkey(settingsDraft.overlay_settings.hotkey_overlay, 'Shift+Tab')
+  return normalizeOverlayHotkey(settingsDraft.overlay_settings.hotkey_overlay)
 }
 
 const inAppOverlayOpen = ref(false)
 
 async function handleOverlayToggleHotkey() {
-  // на Wayland композитор не позволяет вывести отдельное окно поверх игры
   if (overlayWaylandMode()) {
     inAppOverlayOpen.value = !inAppOverlayOpen.value
     return
@@ -1181,7 +1177,6 @@ async function handleOverlayToggleHotkey() {
   const visible = await toggleOverlay()
   if (!visible) {
     syncLauncherHidden()
-    // если отдельное окно не открылось, показываем оверлей в лаунчере
     inAppOverlayOpen.value = true
     if (overlayLastError()) {
       const message = `Отдельное окно оверлея не открылось (${overlayLastError()}) — оверлей показан поверх лаунчера. Подробный разбор — кнопка «Диагностика оверлея» в Настройках.`
@@ -1209,7 +1204,6 @@ async function attachOverlay(instanceName: string, options: { silent?: boolean }
   overlayAttachedInstance = instanceName
   const failed = await bindGameHotkeys(overlaySettingsDraft(), () => { void handleOverlayToggleHotkey() }, () => { void handleRecordingHotkey() })
   if (failed.length && !options.silent) {
-    // причина "не зарегистрировалась" бывает разной: на нативном Wayland
     const wayland = overlayWaylandMode()
     showToast(wayland
       ? `Глобальные клавиши (${failed.join(', ')}) не работают в нативной Wayland-сессии. Пока окно лаунчера в фокусе, комбинация работает как обычно; иначе открывайте оверлей кнопкой «Оверлей» в шапке или пунктом в меню значка в трее.`
@@ -1224,10 +1218,9 @@ function attachOverlayForLaunch(instanceName: string) {
   if (overlayMode || !inDesktopTauri()) return
   if (!settingsDraft.overlay_settings.enabled) return
   void attachOverlay(instanceName)
-  // полноэкранный режим скрывает оверлей, поэтому предупреждаем один раз
   if (!overlayHintShown) {
     overlayHintShown = true
-    showToast(`Оверлей готов: ${normalizeHotkey(settingsDraft.overlay_settings.hotkey_overlay, 'Shift+Tab')}. Если игра в полноэкранном режиме — переключите её в оконный (F11 в Minecraft)`)
+    showToast(`Оверлей готов: ${normalizeOverlayHotkey(settingsDraft.overlay_settings.hotkey_overlay)}. Если игра в полноэкранном режиме — переключите её в оконный (F11 в Minecraft)`)
   }
 }
 
@@ -1239,9 +1232,7 @@ async function detachOverlay() {
     const status = await bridge.recordingStatus()
     if (status.active) await bridge.recordingStop()
   } catch {
-    // запись могла уже завершиться сама
   }
-  // горячие клавиши остаются назначенными, пока работает лаунчер:
   await setOverlayVisible(false)
 }
 
@@ -1258,19 +1249,17 @@ async function pollOverlaySession() {
       overlayMissedPolls = 0
       if (!overlayAttachedInstance) await attachOverlay(snapshot.instance.name)
     } else {
-      // единичный пропуск не отключает горячие клавиши
-      overlayMissedPolls += 1
-      if (overlayMissedPolls >= OVERLAY_DETACH_AFTER_MISSES) await detachOverlay()
+      if (gameSessionActive.value) overlayMissedPolls = 0
+      else overlayMissedPolls += 1
+      if (shouldDetachOverlayAfterMisses(overlayMissedPolls, gameSessionActive.value)) await detachOverlay()
     }
   } catch {
-    // повторим опрос позже и сохраним текущее состояние клавиш
   }
 }
 
 function startOverlayWatcher() {
   if (overlayWatchTimer !== undefined) return
   void initOverlayEventBridge(() => { void handleOverlayToggleHotkey() }, () => { inAppOverlayOpen.value = false })
-  // привязываем горячие клавиши сразу, а не "когда начнётся игра":
   if (settingsDraft.overlay_settings.enabled) void attachOverlay(overlayAttachedInstance, { silent: true })
   overlayWatchTimer = window.setInterval(() => { void pollOverlaySession() }, 3000)
 }
@@ -1286,7 +1275,6 @@ function stopOverlayWatcher() {
 
 watch(() => settingsDraft.overlay_settings, () => {
   if (overlayMode) return
-  // перерегистрируем клавиши сразу после изменения настроек оверлея
   if (settingsDraft.overlay_settings.enabled) {
     void attachOverlay(overlayAttachedInstance, { silent: true })
   } else {
@@ -1720,12 +1708,13 @@ function handleGlobalKeydown(event: KeyboardEvent) {
   const target = event.target as HTMLElement | null
   const editing = target?.matches('input, textarea, select, [contenteditable="true"]')
   if (!overlayMode && settingsDraft.overlay_settings.enabled) {
-    const overlayHotkey = normalizeHotkey(settingsDraft.overlay_settings.hotkey_overlay, 'Shift+Tab')
+    const overlayHotkey = normalizeOverlayHotkey(settingsDraft.overlay_settings.hotkey_overlay)
     const recordingHotkey = normalizeHotkey(settingsDraft.overlay_settings.hotkey_recording, 'F7')
     const hardModifier = event.ctrlKey || event.altKey || event.metaKey
     if (!editing || hardModifier) {
       if (shortcutMatches(event, overlayHotkey)) {
         event.preventDefault()
+        event.stopImmediatePropagation()
         void handleOverlayToggleHotkey()
         return
       }
@@ -2628,7 +2617,8 @@ async function createServer() {
 
 async function createOfflineAccount(): Promise<boolean> {
   if (busy.value) return false
-  const invalid = nicknameError(accountName.value)
+  const username = accountName.value.trim()
+  const invalid = nicknameError(username)
   if (invalid) {
     if (firstRunPhase.value === 'account') firstRunError.value = invalid
     showToast(invalid)
@@ -2636,15 +2626,17 @@ async function createOfflineAccount(): Promise<boolean> {
   }
   busy.value = true
   try {
-    const result = await bridge.createOfflineAccount(accountName.value)
-    if (!result.account) return false
-    state.accounts = [...state.accounts.filter((account) => account.account_id !== result.account.account_id), result.account]
-    selectedAccount.value = result.account.account_id
-    settingsDraft.default_account_id = result.account.account_id
+    const result = await bridge.createOfflineAccount(username)
+    const account = result.account
+    if (!account) return false
+    state.accounts = [...state.accounts.filter((existing) => existing.account_id !== account.account_id), account]
+    const defaultResult = await bridge.setDefaultAccount(account.account_id)
+    state.accounts = defaultResult.accounts
     await refreshBootstrap()
-    selectedAccount.value = result.account.account_id
-    settingsDraft.default_account_id = result.account.account_id
-    showToast('Offline-аккаунт создан')
+    selectedAccount.value = account.account_id
+    settingsDraft.default_account_id = account.account_id
+    accountName.value = ''
+    showToast('Offline-аккаунт добавлен')
     return true
   } catch (error) {
     if (firstRunPhase.value === 'account') firstRunError.value = errorMessage(error)
@@ -3294,10 +3286,8 @@ function errorMessage(error: unknown): string {
 
 onMounted(async () => {
   if (overlayMode) {
-    // окну оверлея не нужен bootstrap: GameOverlay сам опрашивает состояние
     document.title = 'Nivora Overlay'
     document.body.classList.add('overlay-mode')
-    // в непрозрачном режиме Wayland нужен плотный фон вместо прозрачной вёрстки
     if (new URLSearchParams(window.location.search).get('opaque') === '1') {
       document.body.classList.add('overlay-mode--opaque')
     }
@@ -3460,7 +3450,7 @@ const settingsPageModel = {
 </script>
 
 <template>
-  <GameOverlay v-if="overlayMode || inAppOverlayOpen" />
+  <GameOverlay v-if="overlayMode || inAppOverlayOpen" :in-app="!overlayMode" />
   <DialogHost v-else />
   <ContextMenuHost />
   <Transition name="modal">

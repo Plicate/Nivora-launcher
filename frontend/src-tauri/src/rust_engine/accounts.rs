@@ -127,7 +127,9 @@ pub(crate) fn offline_debug_account(config_home: &Path) -> Result<Map<String, Va
     let index = records
         .iter()
         .position(|record| record_str(record, "account_id") == "offline-debug")
-        .ok_or_else(|| "Debug-аккаунт ещё не создан. Используйте: account debug <имя>".to_owned())?;
+        .or_else(|| records.iter().position(|record| record_str(record, "kind") == "offline" && record_bool(record, "is_default")))
+        .or_else(|| records.iter().position(|record| record_str(record, "kind") == "offline"))
+        .ok_or_else(|| "Offline-аккаунт ещё не создан. Используйте: account debug <имя>".to_owned())?;
     if record_i64(&records[index], "limit_seconds") > 0 {
         records[index].insert("limit_seconds".into(), json!(0));
         records[index].insert("used_seconds".into(), json!(0));
@@ -220,32 +222,39 @@ pub fn create_offline_account(request: &Value) -> Result<Value, String> {
 pub(crate) fn create_offline_account_in(config_home: &Path, request: &Value) -> Result<Value, String> {
     let username = py_str(request, "username", "Player");
     let safe_name = validate_nickname(&username)?;
-    let uuid = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, format!("nivora-launcher:{safe_name}").as_bytes()).simple().to_string();
+    let generated_uuid = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, format!("nivora-launcher:{safe_name}").as_bytes()).simple().to_string();
     migrate_legacy_token_records(config_home);
     let mut records = read_records(config_home)?;
+    let existing = records.iter().position(|item| {
+        record_str(item, "kind") == "offline"
+            && (record_str(item, "uuid") == generated_uuid || record_str(item, "username").eq_ignore_ascii_case(&safe_name))
+    });
+    let uuid = existing
+        .map(|index| record_str(&records[index], "uuid"))
+        .filter(|value| !value.is_empty())
+        .unwrap_or(generated_uuid);
+    let account_id = existing
+        .map(|index| record_str(&records[index], "account_id"))
+        .unwrap_or_else(|| {
+            if records.is_empty() { "offline-debug".to_owned() } else { format!("offline-{uuid}") }
+        });
     let mut record = Map::new();
     // порядок ключей сохраняет прежний формат файла
-    record.insert("account_id".into(), json!("offline-debug"));
+    record.insert("account_id".into(), json!(account_id));
     record.insert("kind".into(), json!("offline"));
     record.insert("username".into(), json!(safe_name));
     record.insert("uuid".into(), json!(uuid));
     record.insert("expires_at".into(), json!(0.0));
     record.insert("xuid".into(), json!(""));
-    record.insert("used_seconds".into(), json!(0));
-    record.insert("limit_seconds".into(), json!(0));
-    record.insert("alias".into(), json!(""));
-    record.insert("is_default".into(), json!(records.is_empty()));
+    record.insert("used_seconds".into(), json!(existing.map(|index| record_i64(&records[index], "used_seconds")).unwrap_or(0)));
+    record.insert("limit_seconds".into(), json!(existing.map(|index| record_i64(&records[index], "limit_seconds")).unwrap_or(0)));
+    record.insert("alias".into(), json!(existing.map(|index| record_str(&records[index], "alias")).unwrap_or_default()));
+    record.insert("is_default".into(), json!(existing.map(|index| record_bool(&records[index], "is_default")).unwrap_or(records.is_empty())));
     record.insert("access_token".into(), json!("nivora-launcher-offline"));
     record.insert("refresh_token".into(), json!(""));
-    let mut replaced = false;
-    for item in records.iter_mut() {
-        if record_str(item, "account_id") == "offline-debug" {
-            *item = record.clone();
-            replaced = true;
-            break;
-        }
-    }
-    if !replaced {
+    if let Some(index) = existing {
+        records[index] = record.clone();
+    } else {
         records.push(record.clone());
     }
     write_private_json(&accounts_file(config_home), &records_value(&records))?;
@@ -1544,26 +1553,28 @@ mod tests {
     }
 
     #[test]
-    fn offline_account_uuid_is_stable_and_replaces_previous() {
+    fn offline_accounts_keep_distinct_profiles_and_stable_ids() {
         let config = temp_root("offline");
         let first = create_offline_account_in(&config, &json!({ "username": "Steve_77" })).expect("создание");
         assert_eq!(first["account"]["username"], json!("Steve_77"));
         assert_eq!(first["account"]["account_id"], json!("offline-debug"));
+        assert_eq!(first["account"]["is_default"], json!(true));
         let uuid_first = fs::read_to_string(accounts_file(&config)).unwrap();
         assert!(uuid_first.contains("\"kind\": \"offline\""));
 
-        // повторное создание с тем же именем замещает запись, а не дублирует
-        create_offline_account_in(&config, &json!({ "username": "Steve_77" })).expect("повторное создание");
+        let second = create_offline_account_in(&config, &json!({ "username": "Alex_22" })).expect("второй аккаунт");
+        assert_eq!(second["account"]["username"], json!("Alex_22"));
+        assert_ne!(second["account"]["account_id"], first["account"]["account_id"]);
+        assert_eq!(second["account"]["is_default"], json!(false));
+
+        // повторное создание того же профиля обновляет запись, не удаляя остальные
+        let repeated = create_offline_account_in(&config, &json!({ "username": "Steve_77" })).expect("повторное создание");
+        assert_eq!(repeated["account"]["account_id"], first["account"]["account_id"]);
+        assert_eq!(repeated["account"]["uuid"], first["account"]["uuid"]);
         let raw = fs::read_to_string(accounts_file(&config)).unwrap();
         let parsed: Value = serde_json::from_str(&raw).unwrap();
-        assert_eq!(parsed.as_array().unwrap().len(), 1);
+        assert_eq!(parsed.as_array().unwrap().len(), 2);
         assert!(raw.ends_with("]\n") && raw.contains("\n    \"account_id\": \"offline-debug\","));
-
-        let second = create_offline_account_in(&config, &json!({ "username": "Steve_77" })).expect("ещё раз");
-        assert_eq!(second["account"]["uuid"], first["account"]["uuid"]);
-        assert_eq!(second["account"]["username"], first["account"]["username"]);
-        assert_eq!(first["account"]["is_default"], json!(true));
-        assert_eq!(second["account"]["is_default"], json!(false));
 
         let error = create_offline_account_in(&config, &json!({ "username": "  Steve_77!  " })).unwrap_err();
         assert_eq!(error, "Ник содержит недопустимые символы: «пробел», «!». Разрешены только латинские буквы, цифры и _");

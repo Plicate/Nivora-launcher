@@ -1,10 +1,10 @@
 pub const APP_NAME: &str = "Nivora Launcher";
 // версия должна совпадать с frontend/package.json и Cargo.toml
-pub const APP_VERSION: &str = "2.0.0";
+pub const APP_VERSION: &str = "2.0.1";
 pub const BUILD_STAMP: &str = "r42";
 
-pub const GITHUB_RELEASES_API_URL: &str = "https://api.github.com/repos/vedrooou0/Nivora-launcher/releases/latest";
-pub const GITHUB_RELEASES_PAGE_URL: &str = "https://github.com/vedrooou0/Nivora-launcher/releases/latest";
+pub const GITHUB_RELEASES_API_URL: &str = "https://api.github.com/repositories/1419334247/releases/latest";
+pub const GITHUB_RELEASES_PAGE_URL: &str = "https://github.com/Plicate/Nivora-launcher/releases/latest";
 
 pub const DEFAULT_MSA_CLIENT_ID: &str = "ce777973-8920-4993-8b21-4a06dab23ba6";
 pub const LEGACY_MSA_CLIENT_IDS: &[&str] = &["00000000402b5328", "c36a9fb6-4f2a-41ff-90bd-ae7cc92031eb"];

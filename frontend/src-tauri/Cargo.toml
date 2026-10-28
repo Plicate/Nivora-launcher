@@ -1,6 +1,6 @@
 [package]
 name = "nivora-launcher"
-version = "2.0.0"
+version = "2.0.1"
 description = "Nivora Launcher desktop shell"
 authors = ["Nivora Launcher contributors"]
 edition = "2021"
@@ -46,7 +46,7 @@ png = "0.17"
 quick-xml = "0.42"
 getrandom = "0.3"
 # объявление Windows API в target-секции ломает передачу DEP_TAURI_DEV в build.rs
-windows-sys = { version = "0.59", features = ["Win32_Security_Credentials", "Win32_Foundation", "Win32_NetworkManagement_IpHelper", "Win32_System_Diagnostics_Debug", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Kernel", "Win32_System_SystemServices", "Win32_System_Threading", "Win32_System_IO", "Win32_System_ProcessStatus", "Win32_System_SystemInformation", "Win32_System_Com", "Win32_UI_Shell", "Win32_System_Time", "Win32_Storage_FileSystem", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi"] }
+windows-sys = { version = "0.59", features = ["Win32_Security", "Win32_Security_Authorization", "Win32_Security_Isolation", "Win32_Security_Credentials", "Win32_Foundation", "Win32_NetworkManagement_IpHelper", "Win32_System_Diagnostics_Debug", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Kernel", "Win32_System_SystemServices", "Win32_System_Threading", "Win32_System_JobObjects", "Win32_System_Console", "Win32_System_IO", "Win32_System_ProcessStatus", "Win32_System_SystemInformation", "Win32_System_Com", "Win32_UI_Shell", "Win32_System_Time", "Win32_Storage_FileSystem", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi"] }
 tauri = { version = "2", features = ["protocol-asset", "tray-icon"] }
 tauri-plugin-process = "2"
 tauri-plugin-updater = "2"

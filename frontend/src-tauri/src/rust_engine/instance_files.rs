@@ -11,6 +11,8 @@ use std::sync::Arc;
 use super::config::ConfigStore;
 use super::instances::{InstanceInfo, InstanceStore};
 use super::platform_support::process_exists;
+#[cfg(windows)]
+use super::platform_support::is_reparse_point;
 use super::process_guard::InstanceProcessLock;
 #[cfg(windows)]
 use super::portable_fs::{atomic_write, remove_tree, safe_path};

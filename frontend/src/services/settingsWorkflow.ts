@@ -3,7 +3,7 @@ import { bridge } from './bridge'
 import { confirmDialog } from './dialogs'
 import { launcherThemes } from './launcherExtensions'
 import { setExplorerMode } from './fileBrowser'
-import { normalizeHotkey } from './overlay'
+import { normalizeHotkey, normalizeOverlayHotkey } from './overlay'
 import { setLocale, type Locale } from '../i18n'
 import type {
   AppState,
@@ -589,7 +589,7 @@ export function createSettingsWorkflow(deps: SettingsWorkflowDependencies) {
         },
          overlay_settings: {
           ...settingsDraft.overlay_settings,
-          hotkey_overlay: normalizeHotkey(settingsDraft.overlay_settings.hotkey_overlay, 'Shift+Tab'),
+          hotkey_overlay: normalizeOverlayHotkey(settingsDraft.overlay_settings.hotkey_overlay),
           hotkey_recording: normalizeHotkey(settingsDraft.overlay_settings.hotkey_recording, 'F7'),
         },
          backup_schedule: { ...settingsDraft.backup_schedule },

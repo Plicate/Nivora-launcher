@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { normalizeHotkey, overlayWindowRequested, recordingFileName } from '../src/services/overlayHelpers.ts'
+import { DEFAULT_OVERLAY_HOTKEY, OVERLAY_MISSED_POLLS_BEFORE_DETACH, consumeOverlayCloseKey, normalizeHotkey, normalizeOverlayHotkey, overlayCloseHotkeyMatches, overlayWindowRequested, recordingFileName, shouldDetachOverlayAfterMisses } from '../src/services/overlayHelpers.ts'
 
 test('normalizeHotkey keeps printable combinations and rejects anything suspicious', () => {
   assert.equal(normalizeHotkey('Shift+Tab', 'Shift+Tab'), 'Shift+Tab')
@@ -44,11 +44,40 @@ test('hotkeyFromEvent assembles combinations from live key presses', async () =>
   assert.equal(hotkeyFromEvent({ key: 'F7' }), 'F7')
 })
 
+test('overlay hotkey migrates Tab combinations to a non-conflicting binding', () => {
+  assert.equal(DEFAULT_OVERLAY_HOTKEY, 'Ctrl+Shift+O')
+  assert.equal(normalizeOverlayHotkey('Shift+Tab'), DEFAULT_OVERLAY_HOTKEY)
+  assert.equal(normalizeOverlayHotkey('Ctrl+Tab'), DEFAULT_OVERLAY_HOTKEY)
+  assert.equal(normalizeOverlayHotkey('Alt+Shift+O'), 'Alt+Shift+O')
+  assert.equal(overlayCloseHotkeyMatches({ key: 'Tab', shiftKey: true }, 'Shift+Tab'), true)
+  assert.equal(overlayCloseHotkeyMatches({ key: 'Tab', shiftKey: true }, 'Ctrl+Shift+O'), true)
+  assert.equal(overlayCloseHotkeyMatches({ key: 'o', ctrlKey: true, shiftKey: true }, 'Ctrl+Shift+O'), true)
+  const prevented = []
+  const legacyEvent = {
+    key: 'Tab',
+    shiftKey: true,
+    preventDefault: () => prevented.push('default'),
+    stopPropagation: () => prevented.push('propagation'),
+    stopImmediatePropagation: () => prevented.push('immediate'),
+  }
+  assert.equal(consumeOverlayCloseKey(legacyEvent, 'Ctrl+Shift+O'), true)
+  assert.deepEqual(prevented, ['default', 'propagation', 'immediate'])
+  const unrelatedEvent = { ...legacyEvent, key: 'x', preventDefault: () => {}, stopPropagation: () => {}, stopImmediatePropagation: () => {} }
+  assert.equal(consumeOverlayCloseKey(unrelatedEvent, 'Ctrl+Shift+O'), false)
+})
+
 test('recordingFileName reports the last path segment on every platform style', () => {
   assert.equal(recordingFileName('/home/user/game/recordings/2026-10-11 demo.mp4'), '2026-10-11 demo.mp4')
   assert.equal(recordingFileName('C:\\Games\\recordings\\clip.mkv'), 'clip.mkv')
   assert.equal(recordingFileName('clip.mp4'), 'clip.mp4')
   assert.equal(recordingFileName(''), '')
+})
+
+test('overlay survives transient state misses during launch', () => {
+  assert.equal(OVERLAY_MISSED_POLLS_BEFORE_DETACH, 10)
+  assert.equal(shouldDetachOverlayAfterMisses(OVERLAY_MISSED_POLLS_BEFORE_DETACH, true), false)
+  assert.equal(shouldDetachOverlayAfterMisses(OVERLAY_MISSED_POLLS_BEFORE_DETACH - 1, false), false)
+  assert.equal(shouldDetachOverlayAfterMisses(OVERLAY_MISSED_POLLS_BEFORE_DETACH, false), true)
 })
 
 test('hidden overlay requests do not create a second window', async () => {
@@ -100,19 +129,27 @@ test('overlayWindowPlan: прозрачный полноэкранный пла�
   assert.equal(plan.url, 'index.html?window=overlay')
 })
 
-test('overlayWindowPlan: совместимый план для Wayland и аварийного режима', async () => {
+test('overlayWindowPlan: полноэкранный прозрачный план для Wayland и непрозрачный fallback', async () => {
   const { overlayWindowPlan } = await import('../src/services/overlayHelpers.ts')
-  for (const mode of ['wayland', 'fallback']) {
-    const plan = overlayWindowPlan(mode, { width: 1920, height: 1080, x: 10, y: 10 })
-    assert.equal(plan.transparent, false, mode)
-    assert.equal(plan.decorations, true, mode)
-    assert.equal(plan.alwaysOnTop, false, mode)
-    assert.equal(plan.center, true, mode)
-    assert.equal(plan.url, 'index.html?window=overlay&opaque=1', mode)
-    assert.equal(plan.x, undefined, mode)
-    assert.equal(plan.width, 980, mode)
-    assert.equal(plan.height, 640, mode)
-  }
+  const wayland = overlayWindowPlan('wayland', { width: 1920, height: 1080, x: 10, y: 10 })
+  assert.equal(wayland.transparent, true)
+  assert.equal(wayland.decorations, false)
+  assert.equal(wayland.alwaysOnTop, true)
+  assert.equal(wayland.skipTaskbar, true)
+  assert.equal(wayland.center, false)
+  assert.equal(wayland.url, 'index.html?window=overlay')
+  assert.equal(wayland.x, 10)
+  assert.equal(wayland.width, 1920)
+  assert.equal(wayland.height, 1080)
+
+  const fallback = overlayWindowPlan('fallback', { width: 1920, height: 1080, x: 10, y: 10 })
+  assert.equal(fallback.transparent, false)
+  assert.equal(fallback.decorations, false)
+  assert.equal(fallback.alwaysOnTop, true)
+  assert.equal(fallback.url, 'index.html?window=overlay&opaque=1')
+  assert.equal(fallback.width, 1920)
+  assert.equal(fallback.height, 1080)
+
   const tiny = overlayWindowPlan('wayland', { width: 100, height: 100, x: 0, y: 0 })
   assert.equal(tiny.width, 640)
   assert.equal(tiny.height, 480)

@@ -319,25 +319,26 @@ pub(crate) fn spawn_in_appcontainer(
     environment: Option<&BTreeMap<String, String>>,
 ) -> Result<i32, String> {
     use windows_sys::Win32::Foundation::{CloseHandle, LocalFree, HANDLE};
-    use windows_sys::Win32::Security::Authorization::FreeSid;
-    use windows_sys::Win32::Security::{
-        ConvertStringSidToSidW, GetTokenInformation, OpenProcessToken, TokenUser,
-        SID_AND_ATTRIBUTES,
-    };
-    use windows_sys::Win32::Security::AppContainer::{
+    use windows_sys::Win32::Security::Authorization::ConvertStringSidToSidW;
+    use windows_sys::Win32::Security::{FreeSid, SID_AND_ATTRIBUTES};
+    use windows_sys::Win32::Security::Isolation::{
         CreateAppContainerProfile, DeriveAppContainerSidFromAppContainerName,
     };
     use windows_sys::Win32::System::Console::GetStdHandle;
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_ACTIVE_PROCESS, JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
     use windows_sys::Win32::System::Threading::{
-        AssignProcessToJobObject, CreateJobObjectW, CreateProcessW, DeleteProcThreadAttributeList,
-        GetExitCodeProcess, InitializeProcThreadAttributeList, ResumeThread, SetInformationJobObject,
-        TerminateProcess, UpdateProcThreadAttribute, WaitForSingleObject,
+        CreateProcessW, DeleteProcThreadAttributeList, GetExitCodeProcess,
+        InitializeProcThreadAttributeList, ResumeThread, TerminateProcess,
+        UpdateProcThreadAttribute, WaitForSingleObject,
         CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, DETACHED_PROCESS,
-        EXTENDED_STARTUPINFO_PRESENT, INFINITE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-        JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-        JOB_OBJECT_LIMIT_ACTIVE_PROCESS, JobObjectExtendedLimitInformation,
+        EXTENDED_STARTUPINFO_PRESENT, INFINITE,
         PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
-        STARTUPINFOEXW, STARTF_USESTDHANDLES,
+        STARTUPINFOEXW, STARTUPINFOW, STARTF_USESTDHANDLES,
     };
 
     unsafe fn wide(value: &str) -> Vec<u16> {
@@ -400,7 +401,7 @@ pub(crate) fn spawn_in_appcontainer(
                 GetStdHandle(0xFFFF_FFF4u32 /* handle STD_ERROR_HANDLE */),
             ];
             let mut handles: Vec<HANDLE> = Vec::new();
-            for value in std_handles.into_iter().flatten() {
+            for value in std_handles.into_iter() {
                 let invalid = value as isize == -1 || value.is_null();
                 if invalid || handles.contains(&value) {
                     continue;
@@ -455,9 +456,9 @@ pub(crate) fn spawn_in_appcontainer(
                 let pick = |handle: HANDLE| -> HANDLE {
                     if handles.contains(&handle) { handle } else { std::ptr::null_mut() }
                 };
-                startup.StartupInfo.hStdInput = pick(std_handles[0].unwrap_or(std::ptr::null_mut()));
-                startup.StartupInfo.hStdOutput = pick(std_handles[1].unwrap_or(std::ptr::null_mut()));
-                startup.StartupInfo.hStdError = pick(std_handles[2].unwrap_or(std::ptr::null_mut()));
+                startup.StartupInfo.hStdInput = pick(std_handles[0]);
+                startup.StartupInfo.hStdOutput = pick(std_handles[1]);
+                startup.StartupInfo.hStdError = pick(std_handles[2]);
             }
 
             job = CreateJobObjectW(std::ptr::null_mut(), std::ptr::null());
@@ -478,7 +479,7 @@ pub(crate) fn spawn_in_appcontainer(
                 return Err("Не удалось ограничить Job Object".to_owned());
             }
 
-            let command_line = wide(&quote_command(command));
+            let mut command_line = wide(&quote_command(command));
             let block = environment_block(environment.unwrap_or(&host_environment()));
             let flags = EXTENDED_STARTUPINFO_PRESENT | CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | DETACHED_PROCESS;
             #[allow(clippy::missing_transmute_annotations)]
@@ -492,7 +493,7 @@ pub(crate) fn spawn_in_appcontainer(
                 flags,
                 block.as_ptr() as *const core::ffi::c_void,
                 std::ptr::null(),
-                &startup.StartupInfo as *const _ as *const STARTUPINFOEXW as *mut STARTUPINFOEXW,
+                &startup as *const STARTUPINFOEXW as *const STARTUPINFOW,
                 &mut process_info,
             ) == 0
             {
@@ -626,7 +627,7 @@ pub(crate) fn apply_acl(policy: &Value, sid: &str) -> Result<(), String> {
             }
         }
         if let Some(parent) = marker.parent() {
-            std::fs::create_dir_all(parent).map_err(|error| format("icacls: {error}"))?;
+            std::fs::create_dir_all(parent).map_err(|error| format!("icacls: {error}"))?;
         }
         std::fs::write(&marker, serde_json::to_string(&state).unwrap_or_default())
             .map_err(|error| format!("icacls: {error}"))?;
@@ -671,8 +672,9 @@ fn icacls(arguments: &[String]) -> Result<(), String> {
 
 #[cfg(windows)]
 pub(crate) fn current_user_sid() -> Result<String, String> {
-    use windows_sys::Win32::Foundation::{CloseHandle, GetCurrentProcess};
-    use windows_sys::Win32::Security::{GetTokenInformation, OpenProcessToken, TokenUser, TOKEN_QUERY, TOKEN_USER};
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::Security::{GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER};
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
     unsafe {
         let mut token = std::ptr::null_mut();
@@ -704,7 +706,7 @@ pub(crate) fn current_user_sid() -> Result<String, String> {
 #[cfg(windows)]
 pub(crate) fn sid_to_string(sid: *mut core::ffi::c_void) -> Result<String, String> {
     use windows_sys::Win32::Foundation::LocalFree;
-    use windows_sys::Win32::Security::ConvertSidToStringSidW;
+    use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
     unsafe {
         let mut buffer: *mut u16 = std::ptr::null_mut();
         if ConvertSidToStringSidW(sid, &mut buffer) == 0 {
@@ -722,10 +724,10 @@ pub(crate) fn sid_to_string(sid: *mut core::ffi::c_void) -> Result<String, Strin
 
 #[cfg(windows)]
 pub(crate) fn appcontainer_sid_string(profile_name: &str) -> Result<String, String> {
-    use windows_sys::Win32::Security::AppContainer::{
+    use windows_sys::Win32::Security::Isolation::{
         CreateAppContainerProfile, DeriveAppContainerSidFromAppContainerName,
     };
-    use windows_sys::Win32::Security::Authorization::FreeSid;
+    use windows_sys::Win32::Security::FreeSid;
     unsafe {
         let name: Vec<u16> = profile_name.encode_utf16().chain(std::iter::once(0)).collect();
         let mut sid: *mut core::ffi::c_void = std::ptr::null_mut();

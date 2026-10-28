@@ -92,7 +92,7 @@ fn default_animation_settings() -> Value {
 
 fn default_overlay_settings() -> Value {
     json!({
-        "enabled": true, "hotkey_overlay": "Shift+Tab", "hotkey_recording": "F7",
+        "enabled": true, "hotkey_overlay": "Ctrl+Shift+O", "hotkey_recording": "F7",
         "show_mods": true, "show_metrics": true, "recording_fps": 60, "recording_quality": 23,
         "recording_encoder": "auto", "recording_container": "mp4", "recording_audio": true,
         "position": "top-left", "scale": 100, "opacity": 96, "compact": false,
@@ -1199,6 +1199,9 @@ fn normalize_overlay_settings(value: &Value) -> Value {
             character.is_ascii_alphanumeric()
                 || matches!(character, '+' | '*' | ',' | '.' | '/' | ';' | '\'' | '[' | ']' | '\\' | '-' | '=' | '`')
         };
+        if key == "hotkey_overlay" && text.split('+').any(|part| part.eq_ignore_ascii_case("tab")) {
+            return fallback.to_owned();
+        }
         if !text.is_empty() && text.chars().all(allowed) {
             text
         } else {
@@ -1216,7 +1219,7 @@ fn normalize_overlay_settings(value: &Value) -> Value {
     };
     json!({
         "enabled": bool_field("enabled", true),
-        "hotkey_overlay": hotkey("hotkey_overlay", "Shift+Tab"),
+        "hotkey_overlay": hotkey("hotkey_overlay", "Ctrl+Shift+O"),
         "hotkey_recording": hotkey("hotkey_recording", "F7"),
         "show_mods": bool_field("show_mods", true),
         "show_metrics": bool_field("show_metrics", true),
@@ -1886,8 +1889,12 @@ mod tests {
             "hotkey_overlay"], json!("Ctrl+,"));
         assert_eq!(normalize_overlay_settings(&json!({ "hotkey_recording": "Alt+Shift+." }))[
             "hotkey_recording"], json!("Alt+Shift+."));
+        assert_eq!(normalize_overlay_settings(&json!({ "hotkey_overlay": "Shift+Tab" }))[
+            "hotkey_overlay"], json!("Ctrl+Shift+O"));
+        assert_eq!(normalize_overlay_settings(&json!({ "hotkey_overlay": "Ctrl+Tab" }))[
+            "hotkey_overlay"], json!("Ctrl+Shift+O"));
         assert_eq!(normalize_overlay_settings(&json!({ "hotkey_overlay": "Ctrl+?" }))[
-            "hotkey_overlay"], json!("Shift+Tab"));
+            "hotkey_overlay"], json!("Ctrl+Shift+O"));
     }
 
     #[test]

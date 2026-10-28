@@ -1,8 +1,10 @@
 export const OVERLAY_WINDOW_LABEL = 'nivora-overlay'
+export const DEFAULT_OVERLAY_HOTKEY = 'Ctrl+Shift+O'
+export const OVERLAY_MISSED_POLLS_BEFORE_DETACH = 10
 
 export const DEFAULT_OVERLAY_SETTINGS = {
   enabled: true,
-  hotkey_overlay: 'Shift+Tab',
+  hotkey_overlay: DEFAULT_OVERLAY_HOTKEY,
   hotkey_recording: 'F7',
   show_mods: true,
   show_metrics: true,
@@ -85,11 +87,16 @@ export function normalizeHotkey(value: string | undefined, fallback: string): st
     if (!key) return fallback
     if (!keys.includes(key)) keys.push(key)
   }
-  // требуется ровно одна клавиша помимо модификаторов
   if (keys.length !== 1) return fallback
   const order: Record<string, number> = { Ctrl: 0, Alt: 1, Shift: 2, Meta: 3 }
   modifiers.sort((a, b) => order[a] - order[b])
   return [...modifiers, keys[0]].join('+')
+}
+
+export function normalizeOverlayHotkey(value: string | undefined): string {
+  const hotkey = normalizeHotkey(value, DEFAULT_OVERLAY_HOTKEY)
+  const parts = hotkey.split('+')
+  return parts[parts.length - 1].toLowerCase() === 'tab' ? DEFAULT_OVERLAY_HOTKEY : hotkey
 }
 
 export function hotkeyModifiersFromEvent(event: { ctrlKey?: boolean; altKey?: boolean; shiftKey?: boolean; metaKey?: boolean; key: string }): string[] {
@@ -108,14 +115,45 @@ export function hotkeyFromEvent(event: { ctrlKey?: boolean; altKey?: boolean; sh
   return [...hotkeyModifiersFromEvent(event), key].join('+')
 }
 
+export function overlayCloseHotkeyMatches(
+  event: { ctrlKey?: boolean; altKey?: boolean; shiftKey?: boolean; metaKey?: boolean; key: string },
+  binding: string | undefined,
+): boolean {
+  const pressed = hotkeyFromEvent(event)
+  return pressed === 'Shift+Tab' || pressed === normalizeOverlayHotkey(binding)
+}
+
+export function consumeOverlayCloseKey(
+  event: {
+    ctrlKey?: boolean
+    altKey?: boolean
+    shiftKey?: boolean
+    metaKey?: boolean
+    key: string
+    preventDefault(): void
+    stopPropagation(): void
+    stopImmediatePropagation(): void
+  },
+  binding: string | undefined,
+): boolean {
+  if (event.key !== 'Escape' && !overlayCloseHotkeyMatches(event, binding)) return false
+  event.preventDefault()
+  event.stopPropagation()
+  event.stopImmediatePropagation()
+  return true
+}
+
 export function overlayWindowAction(visible: boolean, exists: boolean): 'create' | 'show' | 'hide' | 'noop' {
   if (visible) return exists ? 'show' : 'create'
   return exists ? 'hide' : 'noop'
 }
 
+export function shouldDetachOverlayAfterMisses(missedPolls: number, launchInProgress: boolean): boolean {
+  return !launchInProgress && missedPolls >= OVERLAY_MISSED_POLLS_BEFORE_DETACH
+}
+
 export function overlayWindowRequested(): boolean {
   if (typeof window === 'undefined') return false
-  // метка окна служит запасной проверкой, если URL потерялся при редиректе
   if (new URLSearchParams(window.location.search).get('window') === 'overlay') return true
   try {
     const internals = (window as Window & { __TAURI_INTERNALS__?: { metadata?: { currentWindow?: { label?: string } } } }).__TAURI_INTERNALS__
@@ -151,26 +189,25 @@ export function overlayWindowPlan(
   mode: OverlayWindowMode,
   geometry: { width: number; height: number; x: number; y: number },
 ): OverlayWindowPlan {
-  const compatible = mode !== 'x11'
-  if (compatible) {
+  if (mode === 'fallback') {
     return {
-      // флаг убирает прозрачную вёрстку в непрозрачном окне Wayland
       url: 'index.html?window=overlay&opaque=1',
       transparent: false,
-      decorations: true,
+      decorations: false,
       shadow: false,
-      alwaysOnTop: false,
-      skipTaskbar: false,
-      center: true,
-      width: Math.min(Math.max(geometry.width, 640), 980),
-      height: Math.min(Math.max(geometry.height, 480), 640),
+      alwaysOnTop: true,
+      skipTaskbar: true,
+      center: false,
+      width: Math.max(geometry.width, 640),
+      height: Math.max(geometry.height, 480),
+      x: geometry.x,
+      y: geometry.y,
     }
   }
   return {
     url: 'index.html?window=overlay',
     transparent: true,
     decorations: false,
-    // тень WebKitGTK может давать артефакты на прозрачном окне
     shadow: false,
     alwaysOnTop: true,
     skipTaskbar: true,

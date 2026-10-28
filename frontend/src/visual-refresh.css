@@ -96,6 +96,11 @@ body { font-family: var(--font-family); }
 }
 .launch-panel, .account-panel, .create-account-panel, .search-panel,
 .settings-card { padding: 20px; }
+.account-panel { display: grid; align-content: start; gap: 12px; }
+.account-panel > .panel-heading { margin-bottom: 0; }
+.create-offline-form { display: grid; gap: 12px; }
+.create-offline-form > .field { margin: 0; }
+.create-offline-form > .button { width: 100%; gap: 6px; font-size: 12px; white-space: nowrap; }
 .panel-heading { align-items: center; margin-bottom: 16px; }
 .panel-heading h2 { font-size: 15px; font-weight: 650; letter-spacing: -.01em; }
 

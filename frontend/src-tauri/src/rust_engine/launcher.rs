@@ -1338,7 +1338,7 @@ fn select_account(kind: &str, config: &ConfigStore, http: &HttpClient) -> Result
                 config.settings(),
                 http,
                 "",
-                false,
+                true,
             )?)),
             "ely" => Err("Укажите конкретный аккаунт ely.by или выберите его по умолчанию".to_owned()),
             other => Err(format!("Аккаунт не найден: {other}")),
@@ -1362,7 +1362,7 @@ fn select_account(kind: &str, config: &ConfigStore, http: &HttpClient) -> Result
             config.settings(),
             http,
             &rec_str(&microsoft, "account_id"),
-            false,
+            true,
         )?));
     }
     accounts::offline_debug_account(&config_home)
@@ -1375,7 +1375,7 @@ fn refresh_record(record: Map<String, Value>, config: &ConfigStore, http: &HttpC
             config.settings(),
             http,
             &rec_str(&record, "account_id"),
-            false,
+            true,
         )?)),
         // проверяем и при необходимости обновляем токен ely.by
         "ely" => accounts::get_valid_ely_account(&launcher_roots().config_home, http, &rec_str(&record, "account_id")),

@@ -33,20 +33,40 @@ function inDesktopTauri(): boolean {
   return typeof window !== 'undefined' && Boolean((window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__)
 }
 
-async function checkRemoteReleaseFallback(): Promise<boolean> {
-  try {
-    const release = await bridge.checkRemoteRelease()
-    if (!release.update_available) return false
+async function checkRemoteReleaseFallback(showToastOnNoUpdate = true): Promise<boolean> {
+  const release = await bridge.checkRemoteRelease()
+  if (!release.update_available) {
     pendingAppUpdate = null
-    updaterManualUrl.value = release.release_url
-    updaterVersion.value = release.latest_version
-    updaterNotes.value = release.notes || ''
-    updaterStatus.value = `Доступна версия ${release.latest_version}. Автообновление для неё недоступно — скачайте установщик со страницы релизов.`
-    showToast(`Найдена версия ${release.latest_version}`)
-    return true
-  } catch {
+    updaterVersion.value = ''
+    updaterNotes.value = ''
+    updaterManualUrl.value = ''
+    updaterStatus.value = `Установлена последняя доступная версия (${release.current_version}).`
+    if (showToastOnNoUpdate) showToast('Обновлений нет')
     return false
   }
+
+  const alreadyAnnounced = updaterVersion.value === release.latest_version
+  updaterVersion.value = release.latest_version
+  updaterNotes.value = release.notes || ''
+  updaterManualUrl.value = release.release_url
+  pendingAppUpdate = null
+  try {
+    const update = await checkForAppUpdate()
+    if (update) {
+      pendingAppUpdate = update
+      updaterManualUrl.value = ''
+      updaterVersion.value = String(update.version || release.latest_version)
+      updaterNotes.value = String(update.body || release.notes || '')
+      updaterStatus.value = `Доступна версия ${updaterVersion.value}.`
+    } else {
+      updaterStatus.value = `Доступна версия ${release.latest_version}. Для этой сборки нет подписанного пакета самообновления — установщик можно скачать со страницы релизов.`
+    }
+  } catch {
+    // GitHub Releases API remains the source of truth when a signed updater JSON is absent or invalid.
+    updaterStatus.value = `Доступна версия ${release.latest_version}. Для этой сборки нет подписанного пакета самообновления — установщик можно скачать со страницы релизов.`
+  }
+  if (!alreadyAnnounced) showToast(`Найдена версия ${release.latest_version}`)
+  return true
 }
 
 async function checkLauncherUpdates(showToastOnNoUpdate = true) {
@@ -54,40 +74,29 @@ async function checkLauncherUpdates(showToastOnNoUpdate = true) {
     if (showToastOnNoUpdate) showToast('Проверка обновлений доступна только в desktop launcher')
     return false
   }
+  if (updaterBusy.value) return false
   updaterBusy.value = true
   updaterProgressDownloaded.value = 0
   updaterProgressTotal.value = 0
   try {
-    const update = await checkForAppUpdate()
-    if (!update) {
-      pendingAppUpdate = null
-      updaterVersion.value = ''
-      updaterNotes.value = ''
-      if (await checkRemoteReleaseFallback()) return true
+    return await checkRemoteReleaseFallback(showToastOnNoUpdate)
+  } catch (releaseError) {
+    try {
+      const update = await checkForAppUpdate()
+      if (!update) throw new Error('Подписанный пакет обновления не найден')
+      pendingAppUpdate = update
       updaterManualUrl.value = ''
-      updaterStatus.value = 'Установлена последняя доступная версия.'
-      if (showToastOnNoUpdate) showToast('Обновлений нет')
+      updaterVersion.value = String(update.version || '')
+      updaterNotes.value = String(update.body || '')
+      updaterStatus.value = `Доступна версия ${updaterVersion.value || 'новее текущей'}.`
+      showToast(`Найдена версия ${updaterVersion.value || 'новее текущей'}`)
+      return true
+    } catch (updaterError) {
+      const message = `Не удалось проверить релиз: ${errorMessage(releaseError)}. Подписанное самообновление тоже недоступно: ${errorMessage(updaterError)}`
+      updaterStatus.value = message
+      if (showToastOnNoUpdate) showToast(message)
       return false
     }
-    pendingAppUpdate = update
-    updaterManualUrl.value = ''
-    updaterVersion.value = String(update.version || '')
-    updaterNotes.value = String(update.body || '')
-    updaterStatus.value = `Доступна версия ${updaterVersion.value || 'новее текущей'}.`
-    showToast(`Найдена версия ${updaterVersion.value || 'новее текущей'}`)
-    return true
-  } catch (error) {
-    // без сервера обновлений не показываем пользователю необработанную ошибку
-    const raw = errorMessage(error)
-    if (await checkRemoteReleaseFallback()) return true
-    if (/example\.invalid|dns|resolve|failed to fetch|endpoint/i.test(raw)) {
-      updaterStatus.value = 'Самообновление в этой сборке не настроено — свежие версии выходят на странице проекта.'
-      if (showToastOnNoUpdate) showToast('Самообновление недоступно в этой сборке')
-    } else {
-      updaterStatus.value = raw
-      if (showToastOnNoUpdate) showToast(raw)
-    }
-    return false
   } finally {
     updaterBusy.value = false
   }

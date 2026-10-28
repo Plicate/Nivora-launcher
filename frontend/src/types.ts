@@ -95,11 +95,11 @@ export interface OverlayModEntry {
 }
 
 export interface OverlayMetrics {
-  cpu_percent?: number
-  ram_bytes?: number
-  peak_cpu_percent?: number
-  peak_ram_bytes?: number
-  storage_bytes?: number
+  cpu_percent?: number | null
+  ram_bytes?: number | null
+  peak_cpu_percent?: number | null
+  peak_ram_bytes?: number | null
+  storage_bytes?: number | null
 }
 
 export interface OverlayState {

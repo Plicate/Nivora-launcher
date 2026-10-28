@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { proxyRefs, ref } from 'vue'
+import { onBeforeUnmount, onMounted, proxyRefs, ref } from 'vue'
 import CatalogBadge from './CatalogBadge.vue'
 import CloudStoragePanel from './CloudStoragePanel.vue'
 import CustomSelect from './CustomSelect.vue'
@@ -31,7 +31,7 @@ const updaterVersion = ref('')
 const updaterNotes = ref('')
 const updaterProgressDownloaded = ref(0)
 const updaterProgressTotal = ref(0)
-// без latest.json обновление открывается по ручной ссылке
+// ручная ссылка используется, если у релиза нет подписанного пакета обновления
 const updaterManualUrl = ref('')
 const { checkLauncherUpdates, installLauncherUpdate } = createLauncherUpdates({
   updaterBusy,
@@ -43,6 +43,15 @@ const { checkLauncherUpdates, installLauncherUpdate } = createLauncherUpdates({
   updaterManualUrl,
   showToast: (message, tone) => model.showToast(message, tone),
   errorMessage: (error) => model.errorMessage(error),
+})
+
+let automaticUpdateCheckTimer: number | undefined
+onMounted(() => {
+  void checkLauncherUpdates(false)
+  automaticUpdateCheckTimer = window.setInterval(() => void checkLauncherUpdates(false), 60 * 60 * 1000)
+})
+onBeforeUnmount(() => {
+  if (automaticUpdateCheckTimer !== undefined) window.clearInterval(automaticUpdateCheckTimer)
 })
 
 const fileExplorerOptions: SelectOption[] = [
@@ -348,13 +357,13 @@ async function runOverlaySelfTest() {
                    <div class="panel-heading"><div><h2>Игровой оверлей и запись</h2></div></div>
                    <div class="settings-form">
                      <div class="settings-toggle-grid">
-                       <label class="workspace-check"><input v-model="model.settingsDraft.overlay_settings.enabled" type="checkbox" /><span><strong>Оверлей в игре</strong><small>{{ model.settingsDraft.overlay_settings.hotkey_overlay }} открывает оверлей поверх Minecraft</small></span></label>
+                       <label class="workspace-check"><input v-model="model.settingsDraft.overlay_settings.enabled" type="checkbox" /><span><strong>Оверлей в игре</strong><small>{{ model.settingsDraft.overlay_settings.hotkey_overlay }} открывает панель; в Wayland глобальная клавиша работает только при фокусе лаунчера, а поверх Minecraft показ зависит от композитора</small></span></label>
                        <label class="workspace-check"><input v-model="model.settingsDraft.overlay_settings.show_mods" type="checkbox" :disabled="!model.settingsDraft.overlay_settings.enabled" /><span><strong>Виджет модов</strong><small>Список модов экземпляра в оверлее</small></span></label>
                        <label class="workspace-check"><input v-model="model.settingsDraft.overlay_settings.show_metrics" type="checkbox" :disabled="!model.settingsDraft.overlay_settings.enabled" /><span><strong>Виджет метрик</strong><small>CPU, RAM и диск игры</small></span></label>
                        <label class="workspace-check"><input v-model="model.settingsDraft.overlay_settings.recording_audio" type="checkbox" :disabled="!model.settingsDraft.overlay_settings.enabled" /><span><strong>Записывать звук</strong><small>Системный звук через PulseAudio</small></span></label>
                      </div>
                      <div class="hotkey-grid">
-                       <label class="field"><span>Клавиша оверлея</span><HotkeyInput v-model="model.settingsDraft.overlay_settings.hotkey_overlay" :disabled="!model.settingsDraft.overlay_settings.enabled" default-hint="по умолчанию Shift+Tab" /></label>
+                       <label class="field"><span>Клавиша оверлея</span><HotkeyInput v-model="model.settingsDraft.overlay_settings.hotkey_overlay" :disabled="!model.settingsDraft.overlay_settings.enabled" default-hint="по умолчанию Ctrl+Shift+O" /></label>
                        <label class="field"><span>Клавиша записи</span><HotkeyInput v-model="model.settingsDraft.overlay_settings.hotkey_recording" :disabled="!model.settingsDraft.overlay_settings.enabled" default-hint="по умолчанию F7" /></label>
                      </div>
                      <div class="field"><span>Кодировщик</span><CustomSelect v-model="model.settingsDraft.overlay_settings.recording_encoder" :options="recordingEncoderOptions" :disabled="!model.settingsDraft.overlay_settings.enabled" /></div>
@@ -365,7 +374,7 @@ async function runOverlaySelfTest() {
                        <button class="button button--small button--outline" type="button" :disabled="overlaySelfTestBusy || !model.settingsDraft.overlay_settings.enabled" @click="() => { void runOverlaySelfTest() }"><Icon name="info" :size="14" />{{ overlaySelfTestBusy ? 'Проверяю…' : 'Диагностика оверлея' }}</button>
                        <pre v-if="overlaySelfTestReport.length" class="selftest-report">{{ overlaySelfTestReport.map((step) => `${step.ok ? '✓' : '✗'} ${step.name} — ${step.detail}`).join('\n') }}</pre>
                      </div>
-                     <small class="field-help">Глобальные клавиши не работают в нативных Wayland-сессиях (в пакетной сборке лаунчер работает через XWayland — там клавиши работают) и в эксклюзивном полноэкранном режиме игры: там оверлей открывается кнопкой «Оверлей» в шапке и пунктом «Игровой оверлей» в меню значка Nivora в трее.</small>
+                     <small class="field-help">Нативный Wayland не разрешает глобальные горячие клавиши и не гарантирует окно поверх игры: там панель оверлея показывается в окне лаунчера. В эксклюзивном полноэкранном режиме используйте оконный/безрамочный режим Minecraft. На X11 и XWayland доступны кнопка «Оверлей» в шапке и пункт «Игровой оверлей» в меню значка Nivora в трее.</small>
                    </div>
                  </section>
 
@@ -383,7 +392,7 @@ async function runOverlaySelfTest() {
                        <label class="workspace-check"><input v-model="model.settingsDraft.overlay_settings.show_chat" type="checkbox" :disabled="!model.settingsDraft.overlay_settings.enabled" /><span><strong>Быстрый чат сервера</strong><small>Команды и хвост консоли</small></span></label>
                        <label class="workspace-check"><input v-model="model.settingsDraft.overlay_settings.compact" type="checkbox" :disabled="!model.settingsDraft.overlay_settings.enabled" /><span><strong>Компактный режим</strong><small>Меньше отступов</small></span></label>
                      </div>
-                     <div class="field"><span>Позиция оверлея</span><CustomSelect v-model="model.settingsDraft.overlay_settings.position" :options="overlayPositionOptions" :disabled="!model.settingsDraft.overlay_settings.enabled" /></div>
+                     <div class="field"><span>Угол панели системных метрик</span><CustomSelect v-model="model.settingsDraft.overlay_settings.position" :options="overlayPositionOptions" :disabled="!model.settingsDraft.overlay_settings.enabled" /></div>
                      <div class="field"><span>Метрики вне игры</span><CustomSelect v-model="model.settingsDraft.overlay_settings.system_metrics_display" :options="systemMetricsDisplayOptions" /></div>
                      <div class="field"><span>Масштаб, %</span><NumericStepper v-model="model.settingsDraft.overlay_settings.scale" :min="80" :max="130" :disabled="!model.settingsDraft.overlay_settings.enabled" aria-label="Масштаб оверлея" /></div>
                      <div class="field"><span>Непрозрачность, %</span><NumericStepper v-model="model.settingsDraft.overlay_settings.opacity" :min="60" :max="100" :disabled="!model.settingsDraft.overlay_settings.enabled" aria-label="Непрозрачность оверлея" /></div>

@@ -10,7 +10,7 @@ const SNAPSHOT_CACHE_SECONDS: f64 = 1.0;
 const GPU_CACHE_SECONDS: f64 = 3.0;
 
 static CPU_PREVIOUS: Mutex<Option<CpuSamples>> = Mutex::new(None);
-static SNAPSHOT_CACHE: Mutex<Option<(Instant, Value)>> = Mutex::new(None);
+static SNAPSHOT_CACHE: Mutex<Option<(Instant, String, Value)>> = Mutex::new(None);
 static GPU_CACHE: Mutex<Option<(Instant, Vec<GpuInfo>)>> = Mutex::new(None);
 
 pub fn system_metrics(request: &Value) -> Result<Value, String> {
@@ -24,7 +24,7 @@ pub fn system_metrics(request: &Value) -> Result<Value, String> {
         .unwrap_or("")
         .trim()
         .to_owned();
-    if let Some(cached) = snapshot_cache(fresh) {
+    if let Some(cached) = snapshot_cache(fresh, &game_root) {
         return Ok(cached);
     }
     let gpus = gpus_cached();
@@ -37,19 +37,20 @@ pub fn system_metrics(request: &Value) -> Result<Value, String> {
         "temperatures": temperatures_json(&gpus),
         "source": { "psutil": false, "nvidia_smi": !gpus.is_empty() },
     });
-    *SNAPSHOT_CACHE.lock().unwrap_or_else(|poison| poison.into_inner()) = Some((Instant::now(), data.clone()));
+    *SNAPSHOT_CACHE.lock().unwrap_or_else(|poison| poison.into_inner()) = Some((Instant::now(), game_root, data.clone()));
     Ok(data)
 }
 
-fn snapshot_cache(fresh: bool) -> Option<Value> {
-    if fresh {
-        return None;
-    }
+fn snapshot_cache(fresh: bool, game_root: &str) -> Option<Value> {
     let cache = SNAPSHOT_CACHE.lock().unwrap_or_else(|poison| poison.into_inner());
     match cache.as_ref() {
-        Some((at, value)) if at.elapsed().as_secs_f64() < SNAPSHOT_CACHE_SECONDS => Some(value.clone()),
+        Some((at, cached_root, value)) if snapshot_cache_usable(fresh, *at, cached_root, game_root) => Some(value.clone()),
         _ => None,
     }
+}
+
+fn snapshot_cache_usable(fresh: bool, cached_at: Instant, cached_root: &str, game_root: &str) -> bool {
+    !fresh && cached_root == game_root && cached_at.elapsed().as_secs_f64() < SNAPSHOT_CACHE_SECONDS
 }
 
 fn epoch_seconds() -> f64 {
@@ -111,7 +112,26 @@ fn cpu_snapshot() -> Value {
         *previous = Some(current);
         result.unwrap_or(json!({ "percent": null }))
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::FILETIME;
+        use windows_sys::Win32::System::Threading::GetSystemTimes;
+        let zero_filetime = || FILETIME {
+            dwLowDateTime: 0,
+            dwHighDateTime: 0,
+        };
+        let (mut idle, mut kernel, mut user) = (zero_filetime(), zero_filetime(), zero_filetime());
+        if unsafe { GetSystemTimes(&mut idle, &mut kernel, &mut user) } == 0 {
+            return json!({ "percent": null });
+        }
+        let ticks = |value: FILETIME| ((value.dwHighDateTime as u64) << 32) | value.dwLowDateTime as u64;
+        let current = CpuSamples { total: ticks(kernel) + ticks(user), idle: ticks(idle) };
+        let mut previous = CPU_PREVIOUS.lock().unwrap_or_else(|poison| poison.into_inner());
+        let result = previous.as_ref().and_then(|prev| cpu_percent(prev, &current)).map(|percent| json!({ "percent": percent }));
+        *previous = Some(current);
+        result.unwrap_or(json!({ "percent": null }))
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         json!({ "percent": null })
     }
@@ -165,7 +185,18 @@ fn memory_snapshot() -> Value {
             _ => null_memory(),
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+        let mut status: MEMORYSTATUSEX = unsafe { std::mem::zeroed() };
+        status.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
+        if unsafe { GlobalMemoryStatusEx(&mut status) } == 0 || status.ullTotalPhys == 0 {
+            return null_memory();
+        }
+        let used = status.ullTotalPhys.saturating_sub(status.ullAvailPhys);
+        json!({ "percent": round1(used as f64 / status.ullTotalPhys as f64 * 100.0) })
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         null_memory()
     }
@@ -278,11 +309,62 @@ fn disks_snapshot(game_root: &str) -> Value {
         }
         Value::Array(result)
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Storage::FileSystem::{GetDiskFreeSpaceExW, GetLogicalDrives};
+
+        let drive_mask = unsafe { GetLogicalDrives() };
+        let preferred = windows_drive_letter(game_root);
+        let mut drives: Vec<char> = (0..26)
+            .filter(|index| drive_mask & (1u32 << *index as u32) != 0)
+            .map(|index| (b'A' + index as u8) as char)
+            .collect();
+        if let Some(letter) = preferred {
+            if let Some(index) = drives.iter().position(|drive| *drive == letter) {
+                drives.remove(index);
+                drives.insert(0, letter);
+            }
+        }
+
+        let mut result = Vec::new();
+        for letter in drives {
+            let mount = format!("{letter}:\\");
+            let path: Vec<u16> = mount.encode_utf16().chain(std::iter::once(0)).collect();
+            let mut available = 0u64;
+            let mut total = 0u64;
+            let mut free = 0u64;
+            let success = unsafe {
+                GetDiskFreeSpaceExW(path.as_ptr(), &mut available, &mut total, &mut free)
+            };
+            if success == 0 || total == 0 {
+                continue;
+            }
+            let free = available.min(total);
+            result.push(json!({
+                "mount": mount,
+                "total_bytes": total,
+                "free_bytes": free,
+                "percent": round1((total - free) as f64 / total as f64 * 100.0),
+            }));
+            if result.len() >= 4 {
+                break;
+            }
+        }
+        Value::Array(result)
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = game_root;
         json!([])
     }
+}
+
+fn windows_drive_letter(path: &str) -> Option<char> {
+    let bytes = path.as_bytes();
+    if bytes.len() < 2 || bytes[1] != b':' || !bytes[0].is_ascii_alphabetic() {
+        return None;
+    }
+    Some((bytes[0] as char).to_ascii_uppercase())
 }
 
 #[cfg(unix)]
@@ -563,10 +645,8 @@ fn windows_process_sample(pid: i32) -> Option<(f64, u64)> {
                 let ticks = ((time.dwHighDateTime as u64) << 32) | time.dwLowDateTime as u64;
                 ticks as f64 / 10_000_000.0
             };
-            let mut counters = PROCESS_MEMORY_COUNTERS {
-                cb: std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
-                ..Default::default()
-            };
+            let mut counters: PROCESS_MEMORY_COUNTERS = std::mem::zeroed();
+            counters.cb = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
             let ram = if GetProcessMemoryInfo(handle, &mut counters, counters.cb) != 0 {
                 counters.WorkingSetSize as u64
             } else {
@@ -1241,6 +1321,14 @@ cpu0 150 0 0 75 0").unwrap();
     }
 
     #[test]
+    fn windows_drive_letter_uses_the_game_directory_when_available() {
+        assert_eq!(windows_drive_letter(r"C:\Games"), Some('C'));
+        assert_eq!(windows_drive_letter("d:/Games"), Some('D'));
+        assert_eq!(windows_drive_letter(r"\\server\share"), None);
+        assert_eq!(windows_drive_letter(""), None);
+    }
+
+    #[test]
     fn mounts_keep_real_block_devices_only() {
         let text = "/dev/nvme0n1p2 / ext4 rw,relatime 0 0\ntmpfs /run tmpfs rw 0 0\nproc /proc proc rw 0 0\n/dev/sda1 /data btrfs rw 0 0\n/dev/nvme0n1p2 /bindmount ext4 rw 0 0\n/dev/sdb1 /win ntfs3 rw 0 0\n";
         let mounts = parse_mounts(text);
@@ -1398,6 +1486,14 @@ cpu0 150 0 0 75 0").unwrap();
     }
 
     #[test]
+    fn snapshot_cache_does_not_cross_game_roots() {
+        let cached_at = Instant::now();
+        assert!(super::snapshot_cache_usable(false, cached_at, "/game/a", "/game/a"));
+        assert!(!super::snapshot_cache_usable(false, cached_at, "/game/a", "/game/b"));
+        assert!(!super::snapshot_cache_usable(true, cached_at, "/game/a", "/game/a"));
+    }
+
+    #[test]
     fn snapshot_shape_matches_frontend_contract() {
         // system_metrics возвращает данные без конверта; конверт
         // {"ok", "data"} надевает rust_engine::handle
@@ -1408,8 +1504,7 @@ cpu0 150 0 0 75 0").unwrap();
         assert_eq!(data["source"]["psutil"], serde_json::json!(false));
         assert!(data["cpu"]["percent"].is_null() || data["cpu"]["percent"].is_f64());
         assert!(data["memory"]["percent"].is_null() || data["memory"]["percent"].is_f64());
-        // горячий кеш: второй вызов без fresh возвращает тот же снимок
-        let cached = super::system_metrics(&serde_json::json!({})).expect("кеш");
-        assert_eq!(cached, data);
+        let cached = super::system_metrics(&serde_json::json!({ "game_root": "" })).expect("снимок для игрового пути");
+        assert_eq!(cached["cpu"].is_object(), true);
     }
 }

@@ -334,20 +334,25 @@ pub fn overlay_state_from(config_home: &Path, data_home: &Path, now: f64) -> Val
     let settings = read_bounded_json(&config_home.join("settings.json"), MAX_SETTINGS_JSON_BYTES)
         .unwrap_or_else(|| json!({}));
     let game_dir = settings_game_dir(config_home, data_home);
-    let overlay_settings = match settings.get("overlay_settings") {
-        Some(value) if value.is_object() => value.clone(),
-        _ => default_overlay_settings(),
-    };
+    let mut overlay_settings = default_overlay_settings();
+    if let (Some(defaults), Some(saved)) = (
+        overlay_settings.as_object_mut(),
+        settings.get("overlay_settings").and_then(Value::as_object),
+    ) {
+        for (key, value) in saved {
+            defaults.insert(key.clone(), value.clone());
+        }
+    }
     let recording = recording_status(&game_dir, now);
     let instances_root = game_dir.join("instances");
     let Some(running) = scan_running_instance(&instances_root, now) else {
-        // в пустом ответе поле `system_metrics` отсутствует
         return json!({
             "running": false,
             "instance": null,
             "session_seconds": 0,
             "played_seconds": 0,
             "metrics": {},
+            "system_metrics": metrics::system_metrics(&json!({ "game_root": game_dir.to_string_lossy() })).unwrap_or(json!({})),
             "mods": [],
             "recording": recording,
             "overlay": overlay_settings,
@@ -378,7 +383,7 @@ pub fn overlay_state_from(config_home: &Path, data_home: &Path, now: f64) -> Val
             "peak_ram_bytes": running.metrics["peak_ram_bytes"].clone(),
             "storage_bytes": running.metrics["storage_bytes"].clone(),
         },
-        "system_metrics": metrics::system_metrics(&json!({})).unwrap_or(json!({})),
+        "system_metrics": metrics::system_metrics(&json!({ "game_root": game_dir.to_string_lossy() })).unwrap_or(json!({})),
         "mods": mods,
         "recording": recording,
         "overlay": overlay_settings,
@@ -386,10 +391,10 @@ pub fn overlay_state_from(config_home: &Path, data_home: &Path, now: f64) -> Val
 }
 
 fn default_overlay_settings() -> Value {
-    // значения должны совпадать с фронтендом
     json!({
-        "enabled": true, "hotkey_overlay": "Shift+Tab", "hotkey_recording": "F7",
+        "enabled": true, "hotkey_overlay": "Ctrl+Shift+O", "hotkey_recording": "F7",
         "show_mods": true, "show_metrics": true, "recording_fps": 60, "recording_quality": 23,
+        "metrics_cpu": true, "metrics_ram": true,
         "recording_encoder": "auto", "recording_container": "mp4", "recording_audio": true,
         "position": "top-left", "scale": 100, "opacity": 96, "compact": false,
         "show_clock": true, "show_system_metrics": true,
@@ -418,6 +423,7 @@ fn scan_running_instance(instances_root: &Path, now: f64) -> Option<RunningInsta
         .filter(|path| path.is_dir() && !is_symlink(path))
         .collect();
     directories.sort_by_key(|path| path.file_name().map(|name| name.to_string_lossy().to_lowercase()).unwrap_or_default());
+    let mut latest: Option<(f64, RunningInstance)> = None;
     for path in directories {
         let live = read_bounded_json(&path.join(LIVE_STATE_FILE), MAX_INSTANCE_LIVE_STATE_JSON_BYTES)
             .filter(|value| value.is_object());
@@ -425,10 +431,9 @@ fn scan_running_instance(instances_root: &Path, now: f64) -> Option<RunningInsta
             .as_ref()
             .filter(|state| state.get("running").and_then(Value::as_bool).unwrap_or(false))
             .map(|state| state.get("pid").and_then(Value::as_i64).unwrap_or(0));
-        let running = pid.map(|pid| pid > 0 && process_exists(pid)).unwrap_or(false);
-        if !running {
+        let Some(pid) = pid.filter(|pid| *pid > 0 && process_exists(*pid)) else {
             continue;
-        }
+        };
         let metadata = read_bounded_json(&path.join(INSTANCE_METADATA_FILE), MAX_INSTANCE_PROFILE_JSON_BYTES)
             .unwrap_or_else(|| json!({}));
         let started_at = live
@@ -451,20 +456,23 @@ fn scan_running_instance(instances_root: &Path, now: f64) -> Option<RunningInsta
             .filter(|value| !value.is_empty())
             .map(|value| value.chars().take(80).collect::<String>())
             .unwrap_or_else(|| name.clone());
-        return Some(RunningInstance {
-            name,
+        let instance = RunningInstance {
+            name: name.clone(),
             display_name,
             kind,
             game_edition,
             minecraft_version,
             loader,
             played_seconds: metadata.get("played_seconds").and_then(Value::as_i64).unwrap_or(0).max(0)
-                + live_play_seconds(pid.is_some(), started_at, now),
-            metrics: instance_metrics(&path, pid.unwrap_or(0), started_at, now),
+                + live_play_seconds(true, started_at, now),
+            metrics: instance_metrics(&name, &path, pid, started_at),
             path,
-        });
+        };
+        if latest.as_ref().map(|(latest_started_at, _)| started_at > *latest_started_at).unwrap_or(true) {
+            latest = Some((started_at, instance));
+        }
     }
-    None
+    latest.map(|(_, instance)| instance)
 }
 
 fn live_play_seconds(running: bool, started_at: f64, now: f64) -> i64 {
@@ -617,24 +625,8 @@ fn loader_from_version(version_id: &str) -> String {
     "vanilla".to_owned()
 }
 
-fn instance_metrics(root: &Path, pid: i64, started_at: f64, now: f64) -> Value {
-    let sample = if pid > 0 { process_sample(pid) } else { None };
-    let ram_bytes = sample.as_ref().map(|(_, ram)| *ram).unwrap_or(0);
-    let uptime_seconds = if started_at > 0.0 { (now - started_at).max(0.0) as i64 } else { 0 };
-    json!({
-        "timestamp": now,
-        "pid": if sample.is_some() { pid } else { 0 },
-        "running": sample.is_some(),
-        "uptime_seconds": uptime_seconds,
-        "peak_ram_bytes": ram_bytes,
-        "peak_cpu_percent": 0.0,
-        "ram_bytes": ram_bytes,
-        "cpu_percent": 0.0,
-        "storage_bytes": cached_directory_size(root, now),
-        "players": 0,
-        "max_players": 0,
-        "tps": 0.0,
-    })
+fn instance_metrics(name: &str, root: &Path, pid: i64, started_at: f64) -> Value {
+    metrics::instance_metrics(name, pid as i32, started_at, true, root, None)
 }
 
 fn directory_size(root: &Path) -> u64 {
@@ -698,124 +690,13 @@ fn cached_directory_size(root: &Path, now: f64) -> u64 {
 }
 
 fn process_exists(pid: i64) -> bool {
-    if pid <= 0 {
-        return false;
-    }
-    #[cfg(unix)]
-    {
-        Path::new(&format!("/proc/{pid}")).exists()
-    }
-    #[cfg(windows)]
-    {
-        // на Windows нет `/proc`; проверяем процесс через `OpenProcess`
-        use windows_sys::Win32::Foundation::CloseHandle;
-        use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
-        unsafe {
-            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid as u32);
-            if handle.is_null() {
-                return false;
-            }
-            CloseHandle(handle);
-            true
-        }
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        false
-    }
+    i32::try_from(pid)
+        .ok()
+        .is_some_and(super::platform_support::process_exists)
 }
 
-#[cfg(unix)]
-fn process_sample(pid: i64) -> Option<(f64, u64)> {    let proc_root = Path::new("/proc");
-    let ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) } as f64;
-    if ticks <= 0.0 {
-        return None;
-    }
-    let mut pending = vec![pid];
-    let mut visited: u32 = 0;
-    let mut cpu_seconds_total = 0.0;
-    let mut ram_bytes_total: u64 = 0;
-    let mut root_found = false;
-    while let Some(current) = pending.pop() {
-        visited += 1;
-        if visited > 4096 {
-            break;
-        }
-        let proc = proc_root.join(current.to_string());
-        let sample = single_process_sample(&proc, ticks);
-        if current == pid {
-            if sample.is_none() {
-                return None;
-            }
-            root_found = true;
-        }
-        if let Some((cpu, ram)) = sample {
-            cpu_seconds_total += cpu;
-            ram_bytes_total += ram;
-        }
-        let children_path = proc.join("task").join(current.to_string()).join("children");
-        if let Ok(text) = fs::read_to_string(&children_path) {
-            for value in text.split_whitespace() {
-                if let Ok(child) = value.parse::<i64>() {
-                    pending.push(child);
-                }
-            }
-        }
-    }
-    if root_found {
-        Some((cpu_seconds_total, ram_bytes_total))
-    } else {
-        None
-    }
-}
-
-#[cfg(unix)]
-fn single_process_sample(proc: &Path, ticks: f64) -> Option<(f64, u64)> {
-    let stat_line = fs::read_to_string(proc.join("stat")).ok()?;
-    // `comm` может содержать скобки, поэтому берём поля после последней `)`
-    let closing = stat_line.rfind(')')?;
-    let fields: Vec<&str> = stat_line[closing + 2..].split_whitespace().collect();
-    if fields.len() < 13 {
-        return None;
-    }
-    let utime: f64 = fields[11].parse().ok()?;
-    let stime: f64 = fields[12].parse().ok()?;
-    let cpu_seconds = (utime + stime) / ticks.max(1.0);
-    let status = fs::read_to_string(proc.join("status")).unwrap_or_default();
-    let mut rss_kib: u64 = 0;
-    for line in status.lines() {
-        if let Some(rest) = line.strip_prefix("VmRSS:") {
-            rss_kib = rest.split_whitespace().next().and_then(|value| value.parse().ok()).unwrap_or(0);
-            break;
-        }
-    }
-    Some((cpu_seconds, rss_kib.saturating_mul(1024)))
-}
-
-#[cfg(windows)]
 fn process_sample(pid: i64) -> Option<(f64, u64)> {
-    use windows_sys::Win32::Foundation::CloseHandle;
-    use windows_sys::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
-    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
-
-    unsafe {
-        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid as u32);
-        if handle.is_null() {
-            return None;
-        }
-        let mut counters: PROCESS_MEMORY_COUNTERS = std::mem::zeroed();
-        let ok = GetProcessMemoryInfo(handle, &mut counters, std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32);
-        CloseHandle(handle);
-        if ok == 0 {
-            return None;
-        }
-        Some((0.0, counters.WorkingSetSize as u64))
-    }
-}
-
-#[cfg(not(any(unix, windows)))]
-fn process_sample(_pid: i64) -> Option<(f64, u64)> {
-    None
+    metrics::process_sample(i32::try_from(pid).ok()?)
 }
 
 fn overlay_mods_cached(name: &str, instance_root: &Path, now: f64) -> Value {
@@ -1164,8 +1045,11 @@ mod tests {
         assert_eq!(response["running"], serde_json::json!(false));
         assert_eq!(response["instance"], serde_json::json!(null));
         assert_eq!(response["metrics"], serde_json::json!({}));
-        assert!(response.get("system_metrics").is_none());
-        assert_eq!(response["overlay"]["hotkey_overlay"], serde_json::json!("Shift+Tab"));
+        assert!(response["system_metrics"].is_object());
+        assert!(response["system_metrics"].get("cpu").is_some());
+        assert_eq!(response["overlay"]["hotkey_overlay"], serde_json::json!("Ctrl+Shift+O"));
+        assert_eq!(response["overlay"]["metrics_cpu"], serde_json::json!(true));
+        assert_eq!(response["overlay"]["metrics_ram"], serde_json::json!(true));
         assert_eq!(response["recording"]["active"], serde_json::json!(false));
     }
 
@@ -1210,6 +1094,8 @@ mod tests {
         assert!(response["metrics"]["storage_bytes"].as_u64().unwrap_or(0) > 0);
         assert_eq!(response["overlay"]["hotkey_overlay"], serde_json::json!("Ctrl+O"));
         assert_eq!(response["overlay"]["enabled"], serde_json::json!(false));
+        assert_eq!(response["overlay"]["metrics_cpu"], serde_json::json!(true));
+        assert_eq!(response["overlay"]["metrics_ram"], serde_json::json!(true));
         assert_eq!(response["mods"].as_array().map(Vec::len), Some(2));
         let jei = &response["mods"][0];
         assert_eq!(jei["name"], serde_json::json!("jei.disabled"));
@@ -1219,6 +1105,26 @@ mod tests {
         assert_eq!(sodium["name"], serde_json::json!("sodium-1.20.4.jar"));
         assert_eq!(sodium["enabled"], serde_json::json!(true));
         assert_eq!(sodium["display_name"], serde_json::json!("sodium"));
+    }
+
+    #[test]
+    fn newest_running_instance_is_used_for_overlay_state() {
+        let root = fixture_root("multiple-running");
+        let config = root.join("config");
+        let game = root.join("game");
+        fs::create_dir_all(&config).unwrap();
+        write_json(&config.join("settings.json"), json!({ "game_dir": game.to_string_lossy() }));
+        for (name, started_at) in [("Alpha", 10.0), ("Zulu", 20.0)] {
+            let instance = game.join("instances").join(name);
+            fs::create_dir_all(&instance).unwrap();
+            write_json(
+                &instance.join(LIVE_STATE_FILE),
+                json!({ "running": true, "pid": std::process::id(), "started_at": started_at }),
+            );
+        }
+
+        let response = overlay_state_from(&config, &root.join("data"), 100.0);
+        assert_eq!(response["instance"]["name"], serde_json::json!("Zulu"));
     }
 
     #[test]

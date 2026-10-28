@@ -415,7 +415,7 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 fn setup_tray(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let show = MenuItem::with_id(app, "show", "Показать Nivora Launcher", true, None::<&str>)?;
     // меню трея позволяет открыть оверлей на Wayland
-    let overlay = MenuItem::with_id(app, "overlay", "Игровой оверлей (Shift+Tab)", true, None::<&str>)?;
+    let overlay = MenuItem::with_id(app, "overlay", "Игровой оверлей (Ctrl+Shift+O)", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Выйти", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&show, &overlay, &quit])?;
     startup_trace("setup: меню готово");

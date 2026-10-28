@@ -1,11 +1,12 @@
 <script setup lang="ts">
-// игровой оверлей Nivora (как оверлей Steam); открывается глобальной
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { emit } from '@tauri-apps/api/event'
 import { bridge } from '../services/bridge'
 import { toggleRecording, recordingFileName } from '../services/overlay'
+import { consumeOverlayCloseKey } from '../services/overlayHelpers'
 import type { OverlayState } from '../types'
 
+const props = defineProps<{ inApp?: boolean }>()
 const snapshot = ref<OverlayState | null>(null)
 const loadError = ref('')
 const actionMessage = ref('')
@@ -24,6 +25,11 @@ let clockTimer: number | undefined
 let titleBeforeOverlay = ''
 
 const instanceName = computed(() => snapshot.value?.instance?.display_name || snapshot.value?.instance?.name || '')
+const opaqueOverlay = new URLSearchParams(window.location.search).get('opaque') === '1'
+const systemMetricsAvailable = computed(() => {
+  const value = snapshot.value?.system_metrics
+  return Boolean(value?.cpu && value.memory && Array.isArray(value.disks) && Array.isArray(value.gpus) && value.temperatures)
+})
 
 const clockLabel = computed(() => clockNow.value.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }))
 
@@ -69,12 +75,15 @@ const overlayPosition = computed(() => overlaySettings.value?.position || 'top-l
 
 const rootClasses = computed(() => [
   `overlay-root--pos-${overlayPosition.value}`,
-  { 'overlay-root--compact': overlaySettings.value?.compact === true },
+  {
+    'overlay-root--compact': overlaySettings.value?.compact === true,
+    'overlay-root--in-app': props.inApp === true,
+  },
 ])
 
 const rootStyle = computed(() => ({
   zoom: String((overlaySettings.value?.scale || 100) / 100),
-  '--overlay-tint': String(0.72 * ((overlaySettings.value?.opacity ?? 96) / 100)),
+  '--overlay-panel-opacity': String((overlaySettings.value?.opacity ?? 96) / 100),
 }))
 
 function formatDuration(totalSeconds: number): string {
@@ -96,8 +105,17 @@ function formatBytes(bytes: number | undefined): string {
   return `${value} Б`
 }
 
-function cpuPercent(): number {
-  return Math.round(Number(metrics.value.cpu_percent) || 0)
+function cpuPercent(): number | null {
+  const value = metrics.value.cpu_percent
+  return typeof value === 'number' && Number.isFinite(value) ? Math.round(value) : null
+}
+
+function metricPercent(value: number | null | undefined): string {
+  return typeof value === 'number' && Number.isFinite(value) ? `${Math.round(value)}%` : '—'
+}
+
+function metricBytes(value: number | null | undefined): string {
+  return typeof value === 'number' && Number.isFinite(value) ? formatBytes(value) : '—'
 }
 
 async function refreshState() {
@@ -110,7 +128,6 @@ async function refreshState() {
   if (chatVisible.value) void pollChat()
 }
 
-// хвост консоли сервера: те же операции, что и в панели серверов
 async function pollChat() {
   const name = serverName.value
   if (!name || !isServerInstance.value) return
@@ -120,7 +137,6 @@ async function pollChat() {
     if (result.lines.length) chatLines.value = [...chatLines.value, ...result.lines].slice(-40)
     if (typeof result.cursor === 'number') chatCursor.value = result.cursor
   } catch {
-    // сервер мог остановиться; повторяем опрос на следующем тике
   }
 }
 
@@ -165,10 +181,7 @@ async function handleRecordingClick() {
 }
 
 function handleKeydown(event: KeyboardEvent) {
-  if (event.key === 'Escape') {
-    event.preventDefault()
-    closeOverlay()
-  }
+  if (consumeOverlayCloseKey(event, overlaySettings.value?.hotkey_overlay)) closeOverlay()
 }
 
 function startTimers() {
@@ -197,8 +210,6 @@ function handleVisibility() {
 }
 
 function closeOverlay() {
-  // состояние видимости оверлея живёт в главном окне (там же глобальные
-  // клавиши), поэтому просим его скрыть нас через событие
   emit('nivora-overlay-close').catch(() => undefined)
 }
 
@@ -206,15 +217,15 @@ onMounted(() => {
   titleBeforeOverlay = document.title
   document.title = 'Nivora Overlay'
   document.body.classList.add('overlay-mode')
-  window.addEventListener('keydown', handleKeydown)
+  if (opaqueOverlay) document.body.classList.add('overlay-mode--opaque')
+  window.addEventListener('keydown', handleKeydown, true)
   document.addEventListener('visibilitychange', handleVisibility)
   startTimers()
   void refreshState()
 })
 
 onBeforeUnmount(() => {
-  // возврат того, что заняли: класс и заголовок; иначе после внутриоконного
-  window.removeEventListener('keydown', handleKeydown)
+  window.removeEventListener('keydown', handleKeydown, true)
   document.removeEventListener('visibilitychange', handleVisibility)
   stopTimers()
   document.body.classList.remove('overlay-mode', 'overlay-mode--opaque')
@@ -245,8 +256,10 @@ onBeforeUnmount(() => {
     >
       <div class="overlay-system__head">
         <strong>Система</strong>
-        <span class="overlay-system__meta">{{ overlayPosition }}</span>
+        <span class="overlay-system__meta">{{ systemMetricsAvailable ? overlayPosition : 'нет данных' }}</span>
       </div>
+      <div v-if="!systemMetricsAvailable" class="overlay-system__unavailable">Системные метрики сейчас недоступны</div>
+      <template v-else>
       <div v-if="overlaySettings.metrics_cpu" class="overlay-system__row">
         <span class="overlay-system__label">CPU</span>
         <span class="overlay-system__value">{{ systemMetrics.cpu.percent !== null ? `${systemMetrics.cpu.percent.toFixed(0)}%` : '—' }}</span>
@@ -276,6 +289,7 @@ onBeforeUnmount(() => {
           <small v-if="systemMetrics.temperatures.motherboard_c !== null">· плата {{ temperatureLabel(systemMetrics.temperatures.motherboard_c) }}</small>
         </span>
       </div>
+      </template>
     </section>
 
     <aside v-if="overlaySettings?.show_mods !== false" class="overlay-panel overlay-panel--mods">
@@ -299,7 +313,7 @@ onBeforeUnmount(() => {
     </aside>
 
     <aside class="overlay-side">
-      <section v-if="overlaySettings?.show_metrics !== false" class="overlay-panel overlay-panel--metrics">
+      <section v-if="snapshot?.running && overlaySettings?.show_metrics !== false" class="overlay-panel overlay-panel--metrics">
         <div class="overlay-panel__head">
           <strong>Производительность</strong>
           <span class="overlay-panel__meta">{{ instanceName }}</span>
@@ -307,23 +321,23 @@ onBeforeUnmount(() => {
         <div class="overlay-metrics">
           <div class="overlay-metric">
             <span class="overlay-metric__label">CPU</span>
-            <div class="overlay-metric__bar" aria-hidden="true"><i :style="{ width: `${Math.min(100, cpuPercent())}%` }" /></div>
-            <span class="overlay-metric__value">{{ cpuPercent() }}%</span>
+            <div class="overlay-metric__bar" aria-hidden="true"><i :style="{ width: `${Math.min(100, cpuPercent() ?? 0)}%` }" /></div>
+            <span class="overlay-metric__value">{{ metricPercent(metrics.cpu_percent) }}</span>
           </div>
           <div class="overlay-metric">
             <span class="overlay-metric__label">RAM</span>
             <div class="overlay-metric__bar" aria-hidden="true"><i class="overlay-metric__bar-fill--ram" :style="{ width: ramBarWidth }" /></div>
-            <span class="overlay-metric__value">{{ formatBytes(metrics.ram_bytes) }}</span>
+            <span class="overlay-metric__value">{{ metricBytes(metrics.ram_bytes) }}</span>
           </div>
           <div class="overlay-metric">
             <span class="overlay-metric__label">Диск</span>
             <div class="overlay-metric__bar" aria-hidden="true"><i :style="{ width: diskBarWidth }" /></div>
-            <span class="overlay-metric__value">{{ formatBytes(metrics.storage_bytes) }}</span>
+            <span class="overlay-metric__value">{{ metricBytes(metrics.storage_bytes) }}</span>
           </div>
         </div>
         <dl class="overlay-peaks">
-          <div><dt>Пик CPU</dt><dd>{{ Math.round(Number(metrics.peak_cpu_percent) || 0) }}%</dd></div>
-          <div><dt>Пик RAM</dt><dd>{{ formatBytes(metrics.peak_ram_bytes) }}</dd></div>
+          <div><dt>Пик CPU</dt><dd>{{ metricPercent(metrics.peak_cpu_percent) }}</dd></div>
+          <div><dt>Пик RAM</dt><dd>{{ metricBytes(metrics.peak_ram_bytes) }}</dd></div>
         </dl>
       </section>
 
@@ -364,7 +378,8 @@ onBeforeUnmount(() => {
     <button v-else-if="isServerInstance && overlaySettings?.show_chat !== false" class="overlay-chat__open" type="button" @click="chatOpen = true; void pollChat()">Чат сервера</button>
 
     <footer class="overlay-hint">
-      <kbd>{{ overlaySettings?.hotkey_overlay || 'Shift+Tab' }}</kbd> — закрыть оверлей
+      <span v-if="props.inApp">В этом Wayland-режиме оверлей открыт в окне лаунчера, а не поверх игры. <i aria-hidden="true">·</i></span>
+      <kbd>{{ overlaySettings?.hotkey_overlay || 'Ctrl+Shift+O' }}</kbd> — закрыть оверлей
       <i aria-hidden="true">·</i>
       <kbd>{{ overlaySettings?.hotkey_recording || 'F7' }}</kbd> — запись
       <i aria-hidden="true">·</i>
@@ -376,6 +391,7 @@ onBeforeUnmount(() => {
 <style scoped>
 .overlay-root {
   position: fixed;
+  z-index: 1000;
   inset: 0;
   display: grid;
   grid-template-columns: minmax(0, 1fr) max-content minmax(0, 1fr);
@@ -385,12 +401,14 @@ onBeforeUnmount(() => {
   padding: 22px 26px 18px;
   color: var(--text);
   font-family: var(--font-family);
-  /* backdrop-filter не размывает чужое окно и снижает FPS */
-  /* непрозрачная подложка нужна, если X11 или XWayland не отрисует прозрачность */
-  background:
-    linear-gradient(rgba(12, 13, 11, var(--overlay-tint, 0.72)), rgba(12, 13, 11, var(--overlay-tint, 0.72))),
-    linear-gradient(#0c0d0b, #0c0d0b);
+  background: transparent;
+  pointer-events: none;
 }
+
+.overlay-root--in-app { background: var(--bg, #0f1115); pointer-events: auto; }
+.overlay-clock, .overlay-system, .overlay-panel, .overlay-side, .overlay-chat, .overlay-chat__open { pointer-events: auto; }
+
+.overlay-root, .overlay-root * { animation: none !important; transition: none !important; }
 
 .overlay-root--compact { gap: 8px; padding: 14px 16px 12px; font-size: 13px; }
 .overlay-root--compact .overlay-clock { padding: 6px 18px 8px; }
@@ -408,7 +426,7 @@ onBeforeUnmount(() => {
   padding: 10px 12px;
   border: 1px solid var(--line);
   border-radius: var(--radius-card, 10px);
-  background: rgba(25, 26, 23, 0.85);
+  background: rgba(25, 26, 23, var(--overlay-panel-opacity, 0.96));
   box-shadow: 0 12px 36px rgba(0, 0, 0, 0.4);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
@@ -418,6 +436,8 @@ onBeforeUnmount(() => {
 .overlay-root--pos-top-right .overlay-system { grid-row: 1; grid-column: 3; justify-self: end; }
 .overlay-root--pos-bottom-left .overlay-system { grid-row: 3; grid-column: 1; align-self: end; justify-self: start; }
 .overlay-root--pos-bottom-right .overlay-system { grid-row: 3; grid-column: 3; align-self: end; justify-self: end; }
+
+.overlay-system__unavailable { color: var(--muted); font-size: 11px; }
 
 .overlay-system__head {
   display: flex;
@@ -455,7 +475,7 @@ onBeforeUnmount(() => {
   max-height: 40vh;
   border: 1px solid var(--line);
   border-radius: var(--radius-card, 10px);
-  background: rgba(25, 26, 23, 0.88);
+  background: rgba(25, 26, 23, var(--overlay-panel-opacity, 0.96));
   box-shadow: 0 12px 36px rgba(0, 0, 0, 0.4);
   overflow: hidden;
 }
@@ -471,7 +491,6 @@ onBeforeUnmount(() => {
 .overlay-chat__head strong { font-size: 12.5px; }
 
 .overlay-chat__toggle { border: none; background: none; color: var(--muted); font-size: 11px; cursor: pointer; }
-/* hover-перекраска может заморозить оверлей WebKitGTK на NVIDIA */
 
 .overlay-chat__log {
   flex: 1 1 auto;
@@ -497,7 +516,7 @@ onBeforeUnmount(() => {
   padding: 6px 10px;
   border: 1px solid var(--line-strong);
   border-radius: 7px;
-  background: rgba(12, 13, 11, 0.8);
+  background: rgba(12, 13, 11, var(--overlay-panel-opacity, 0.96));
   color: var(--text);
   font-size: 12px;
 }
@@ -522,7 +541,7 @@ onBeforeUnmount(() => {
   padding: 8px 14px;
   border: 1px solid var(--line);
   border-radius: 999px;
-  background: rgba(25, 26, 23, 0.85);
+  background: rgba(25, 26, 23, var(--overlay-panel-opacity, 0.96));
   color: var(--text);
   font-size: 12px;
   cursor: pointer;
@@ -539,7 +558,7 @@ onBeforeUnmount(() => {
   padding: 18px 30px;
   border: 1px solid var(--line);
   border-radius: var(--radius-card, 10px);
-  background: rgba(25, 26, 23, 0.86);
+  background: rgba(25, 26, 23, var(--overlay-panel-opacity, 0.96));
   box-shadow: 0 10px 34px rgba(0, 0, 0, 0.45);
   text-align: center;
   pointer-events: none;
@@ -560,7 +579,7 @@ onBeforeUnmount(() => {
   padding: 10px 26px 12px;
   border: 1px solid var(--line);
   border-radius: var(--radius-card, 10px);
-  background: rgba(25, 26, 23, 0.78);
+  background: rgba(25, 26, 23, var(--overlay-panel-opacity, 0.96));
   box-shadow: 0 10px 34px rgba(0, 0, 0, 0.45);
   user-select: none;
   pointer-events: none;
@@ -598,9 +617,7 @@ onBeforeUnmount(() => {
   min-width: 0;
   border: 1px solid var(--line);
   border-radius: var(--radius-card, 10px);
-  background:
-    linear-gradient(rgba(25, 26, 23, 0.82), rgba(25, 26, 23, 0.82)),
-    linear-gradient(#0b1220, #0b1220);
+  background: rgba(25, 26, 23, var(--overlay-panel-opacity, 0.96));
   box-shadow: 0 12px 36px rgba(0, 0, 0, 0.4);
   overflow: hidden;
 }
@@ -742,7 +759,6 @@ onBeforeUnmount(() => {
   height: 100%;
   border-radius: 999px;
   background: linear-gradient(90deg, var(--green), var(--blue-bright));
-  /* css-анимации могут остановить перерисовку слоёв оверлея WebKitGTK */
 }
 
 .overlay-metric__bar-fill--ram {
@@ -821,7 +837,6 @@ onBeforeUnmount(() => {
   font-size: 12.5px;
   cursor: pointer;
   background: var(--panel-soft);
-  /* transition кнопок может заморозить перерисовку оверлея WebKitGTK */
 }
 
 .overlay-button:active:not(:disabled) {

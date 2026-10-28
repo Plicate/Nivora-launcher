@@ -171,7 +171,7 @@ const fallbackSettings: SettingsInfo = {
   } as AnimationSettings,
   overlay_settings: {
     enabled: true,
-    hotkey_overlay: 'Shift+Tab',
+    hotkey_overlay: 'Ctrl+Shift+O',
     hotkey_recording: 'F7',
     show_mods: true,
     show_metrics: true,
@@ -821,21 +821,29 @@ async function mockRequest<T>(operation: string, payload: Record<string, unknown
   if (operation === 'settings_profiles_list') return { profiles: [] } as T
   if (operation === 'create_offline_account') {
     const username = String(payload.username || 'Player').trim().replace(/[^\p{L}\p{N}_-]/gu, '').slice(0, 16)
-    if (!username) throw new Error('Имя debug-аккаунта пустое')
-    const previous = fallbackState.accounts.find((account) => account.account_id === 'offline-debug')
+    if (!username) throw new Error('Имя offline-аккаунта пустое')
+    const previous = fallbackState.accounts.find((account) => account.kind === 'offline' && account.username.toLowerCase() === username.toLowerCase())
+    const accountId = previous?.account_id || (fallbackState.accounts.length === 0 ? 'offline-debug' : `offline-${username.toLowerCase()}`)
     const account: AccountInfo = {
-      account_id: 'offline-debug',
+      account_id: accountId,
       kind: 'offline',
       username,
-      alias: '',
+      alias: previous?.alias || '',
       display_name: username,
       expires_at: 0,
-      limit_seconds: 0,
-      used_seconds: 0,
+      limit_seconds: previous?.limit_seconds || 0,
+      used_seconds: previous?.used_seconds || 0,
       is_default: previous?.is_default ?? fallbackState.accounts.length === 0,
     }
     fallbackState.accounts = [...fallbackState.accounts.filter((value) => value.account_id !== account.account_id), account]
     return { account } as T
+  }
+  if (operation === 'set_default_account') {
+    const accountId = String(payload.account_id || '')
+    const account = fallbackState.accounts.find((value) => value.account_id === accountId)
+    if (!account) throw new Error(`Аккаунт не найден: ${accountId}`)
+    fallbackState.accounts = fallbackState.accounts.map((value) => ({ ...value, is_default: value.account_id === accountId }))
+    return { account: fallbackState.accounts.find((value) => value.account_id === accountId), accounts: structuredClone(fallbackState.accounts) } as T
   }
   if (operation === 'plugin_install' || operation === 'plugin_set_enabled' || operation === 'plugin_uninstall') {
     throw new Error('Управление плагинами доступно только в desktop launcher')

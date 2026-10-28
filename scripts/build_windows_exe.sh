@@ -243,7 +243,11 @@ raw_exe="$RELEASE_DIR/nivora-launcher.exe"
 [ -f "$raw_exe" ] || die "Автономный exe не найден: $raw_exe"
 # проверяем GUI-подсистему PE: поле WORD находится по смещению PE+0x5C
 if command -v objdump >/dev/null 2>&1; then
-  objdump -p "$raw_exe" 2>/dev/null | grep -q "Subsystem[[:space:]]*00000002[[:space:]]*(Windows GUI)" \
+  # Не используем grep -q в конвейере под pipefail: ранний выход grep может
+  # завершить objdump с SIGPIPE и дать ложный отказ для корректного GUI-exe.
+  pe_headers="$(objdump -p "$raw_exe" 2>/dev/null)" \
+    || die "Не удалось прочитать PE-заголовок nivora-launcher.exe."
+  [[ "$pe_headers" =~ Subsystem[[:space:]]*00000002[[:space:]]*\(Windows\ GUI\) ]] \
     || die "nivora-launcher.exe собран с консольной подсистемой — в production консоли быть не должно."
 fi
 
@@ -277,7 +281,7 @@ fi
 APP_VERSION_TAURI="$(grep -m1 '"version"' frontend/src-tauri/tauri.conf.json | cut -d'"' -f4)"
 [ -n "$APP_VERSION_TAURI" ] || die "Не удалось прочитать версию из tauri.conf.json"
 RELEASE_TAG="${RELEASE_TAG:-$APP_VERSION_TAURI}"
-GITHUB_RELEASE_REPO="${GITHUB_RELEASE_REPO:-vedrooou0/Nivora-launcher}"
+GITHUB_RELEASE_REPO="${GITHUB_RELEASE_REPO:-Plicate/Nivora-launcher}"
 setup_name="$(basename "$setup_exe")"
 # пробелы в именах release assets заменяются точками при загрузке в GitHub
 update_asset="${setup_name// /.}"
@@ -290,22 +294,13 @@ if [ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
   ( cd frontend && npm run tauri -- signer sign "$OUTPUT_DIR/$update_asset" >/dev/null ) \
     || die "Не удалось подписать установщик ключом апдейтера (проверьте TAURI_SIGNING_PRIVATE_KEY и TAURI_SIGNING_PRIVATE_KEY_PASSWORD)."
   [ -f "$OUTPUT_DIR/$update_asset.sig" ] || die "tauri signer не создал $update_asset.sig"
-  # кодируем пробелы и проценты в URL тега и asset
-  github_encode() { printf '%s' "$1" | sed -e 's/%/%25/g' -e 's/ /%20/g'; }
   signature="$(tr -d '\r\n' < "$OUTPUT_DIR/$update_asset.sig")"
-  update_url="https://github.com/$(github_encode "$GITHUB_RELEASE_REPO")/releases/download/$(github_encode "$RELEASE_TAG")/$(github_encode "$update_asset")"
   pub_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  {
-    printf '{\n'
-    printf '  "version": "%s",\n' "$APP_VERSION_TAURI"
-    printf '  "notes": "Nivora Launcher %s",\n' "$APP_VERSION_TAURI"
-    printf '  "pub_date": "%s",\n' "$pub_date"
-    printf '  "platforms": {\n'
-    printf '    "windows-x86_64": { "signature": "%s", "url": "%s" },\n' "$signature" "$update_url"
-    printf '    "windows-x86_64-nsis": { "signature": "%s", "url": "%s" }\n' "$signature" "$update_url"
-    printf '  }\n'
-    printf '}\n'
-  } > "$OUTPUT_DIR/latest.json"
+  rm -f "$OUTPUT_DIR/latest.json"
+  node "$SCRIPT_DIR/write_updater_manifest.mjs" \
+    "$OUTPUT_DIR/latest.json" "$APP_VERSION_TAURI" "$GITHUB_RELEASE_REPO" "$RELEASE_TAG" \
+    "$update_asset" "$signature" "$pub_date" \
+    || die "Не удалось создать валидный latest.json для Tauri updater."
   log "latest.json: $OUTPUT_DIR/latest.json — загрузите его в релиз $RELEASE_TAG вместе с $update_asset"
   log "Например: gh release create $RELEASE_TAG \"$OUTPUT_DIR/$update_asset\" \"$OUTPUT_DIR/latest.json\" --title \"Nivora Launcher $APP_VERSION_TAURI\""
 else
