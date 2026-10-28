@@ -384,9 +384,15 @@ fn expand_arguments(items: &Value, placeholders: &BTreeMap<String, String>, feat
         }
         match object.get("value").unwrap_or(&Value::String(String::new())) {
             Value::Array(values) => {
-                expanded.extend(values.iter().map(|value| replace_placeholders(&value.to_string(), placeholders)));
+                expanded.extend(values.iter().map(|value| {
+                    let argument = value.as_str().map(str::to_owned).unwrap_or_else(|| value.to_string());
+                    replace_placeholders(&argument, placeholders)
+                }));
             }
-            other => expanded.push(replace_placeholders(&other.to_string(), placeholders)),
+            other => {
+                let argument = other.as_str().map(str::to_owned).unwrap_or_else(|| other.to_string());
+                expanded.push(replace_placeholders(&argument, placeholders));
+            },
         }
     }
     expanded
@@ -1903,6 +1909,27 @@ mod tests {
             { "action": "disallow", "os": { "arch": "not-an-arch" } },
         ]);
         assert!(argument_allowed(Some(&disallow), &features));
+    }
+
+    #[test]
+    fn object_arguments_expand_string_values_without_json_quotes() {
+        let arguments = json!([
+            {
+                "rules": [{ "action": "allow", "os": { "name": mojang_os_name() } }],
+                "value": ["-XX:HeapDumpPath=MojangTricksIntelDriversForPerformance_javaw.exe_minecraft.exe.heapdump"]
+            },
+            {
+                "rules": [{ "action": "allow", "os": { "name": mojang_os_name() } }],
+                "value": "-Dsample=value with spaces"
+            }
+        ]);
+        assert_eq!(
+            expand_arguments(&arguments, &BTreeMap::new(), &BTreeMap::new()),
+            vec![
+                "-XX:HeapDumpPath=MojangTricksIntelDriversForPerformance_javaw.exe_minecraft.exe.heapdump",
+                "-Dsample=value with spaces"
+            ]
+        );
     }
 
     #[test]

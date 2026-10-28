@@ -196,21 +196,6 @@ impl GameLauncher {
         if !profile_game_args.is_empty() {
             game_args.extend(profile_game_args);
         }
-        // пресет JVM: сначала снять чужие GC/экспериментальные флаги
-        let preset_id = launch_settings
-            .get("jvm_preset")
-            .and_then(Value::as_str)
-            .unwrap_or("none")
-            .trim();
-        let preset_id = if preset_id.is_empty() { "none" } else { preset_id };
-        let preset_flags = optimization::preset_flags(preset_id);
-        if !preset_flags.is_empty() {
-            const GC_PREFIXES: [&str; 4] = ["-XX:", "-Dusing.aikars", "-Daikars", "-Dfml.earlyprogresswindow"];
-            jvm_args.retain(|argument| !GC_PREFIXES.iter().any(|prefix| argument.starts_with(prefix)));
-            let mut merged: Vec<String> = preset_flags.into_iter().map(str::to_owned).collect();
-            merged.extend(jvm_args);
-            jvm_args = merged;
-        }
         let graphics_mode = self.resolved_graphics_mode(Some(launch_settings));
         if is_legacy_version(&install.version_id) {
             let mut compatibility_args = vec![

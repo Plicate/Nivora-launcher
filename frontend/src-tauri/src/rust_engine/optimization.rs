@@ -82,11 +82,6 @@ fn preset_by_id(id: &str) -> Option<&'static Preset> {
     PRESETS.iter().find(|preset| preset.id == id)
 }
 
-/// возвращает флаги JVM для команды запуска; неизвестный пресет даёт пустой список
-pub(crate) fn preset_flags(id: &str) -> Vec<&'static str> {
-    preset_by_id(id).map(|preset| preset.flags.to_vec()).unwrap_or_default()
-}
-
 struct OptimizerMod {
     name: &'static str,
     mod_id: &'static str,
