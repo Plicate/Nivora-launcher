@@ -1,3 +1,5 @@
+import type { ButtonCustomization, ButtonCustomizationTarget } from './services/buttonCustomization'
+
 export type ViewName = 'instances' | 'instance-settings' | 'accounts' | 'mods' | 'modpacks' | 'plugins' | 'themes' | 'settings'
 export type LoaderId = 'vanilla' | 'fabric' | 'forge' | 'neoforge' | 'quilt'
 export type ProjectType = 'mod' | 'resourcepack' | 'shader' | 'datapack' | 'plugin' | 'modpack'
@@ -368,6 +370,7 @@ export interface AppearanceSettings {
   page_layouts: Record<ViewName, PageLayout>
   widget_visibility: Record<string, boolean>
   color_tokens: Record<string, string>
+  button_customization: ButtonCustomization
 }
 
 /** формат списка экземпляров: обычные строки или плотные плитки */
@@ -459,6 +462,7 @@ export interface SettingsInfo {
   page_layouts: Record<ViewName, PageLayout>
   widget_visibility: Record<string, boolean>
   color_tokens: Record<string, string>
+  button_customization: ButtonCustomization
   instance_groups: string[]
   pinned_instance_groups: string[]
   login_source: 'microsoft' | 'disabled' | string
@@ -1478,9 +1482,17 @@ export type PluginUiFragment =
   | { kind: 'form'; id: string; title?: string; children: PluginUiFragment[] }
   | { kind: 'list'; id: string; items: string[] }
 
+export type ThemeButtonCustomizationOverride = Partial<Pick<ButtonCustomization,
+  'width' | 'height' | 'fill' | 'border' | 'font_family' | 'font_size' | 'texture_fit' | 'crop_enabled' | 'crop'
+>> & { outline?: Partial<ButtonCustomization['outline']>; label?: string }
+
+export type ThemeButtonCustomization = Pick<ButtonCustomization,
+  'width' | 'height' | 'fill' | 'border' | 'font_family' | 'font_size' | 'outline' | 'texture_fit' | 'crop_enabled' | 'crop' | 'labels'
+> & { overrides?: Partial<Record<ButtonCustomizationTarget, ThemeButtonCustomizationOverride>> }
+
 export interface LauncherThemePreset {
   id: string
-  schema_version: 1
+  schema_version: 1 | 2
   name: string
   author: string
   source: ThemeSource
@@ -1497,6 +1509,11 @@ export interface LauncherThemePreset {
   version?: string
   creators?: string[]
   source_url?: string
+  locale?: 'ru' | 'en'
+  button_customization?: ThemeButtonCustomization
+  resources?: Record<string, string>
+  resource_data?: Record<string, string>
+  plugin?: { id: string; name: string; version: string; api_version: '3'; entrypoint: string; sources?: string[] }
 }
 
 export type MemoryUnit = 'KiB' | 'MiB' | 'GiB'

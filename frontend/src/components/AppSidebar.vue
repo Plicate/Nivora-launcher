@@ -22,7 +22,8 @@ const props = withDefaults(defineProps<{
   accountId: string
   accountInitial: string
   accountOptions: SelectOption[]
-}>(), { pinnedGroups: () => [] })
+  buttonLabels?: Record<string, string>
+}>(), { pinnedGroups: () => [], buttonLabels: () => ({}) })
 
 const emit = defineEmits<{
   navigate: [view: ViewName]
@@ -45,6 +46,11 @@ const toolItems: Array<{ view: ViewName; label: string; icon: string }> = [
   { view: 'plugins', label: 'Плагины', icon: 'plug' },
   { view: 'themes', label: 'Студия тем', icon: 'palette' },
 ]
+
+function buttonLabel(view: string, fallback: string): string {
+  const custom = Array.from(String(props.buttonLabels?.[view] || '').trim()).slice(0, 16).join('')
+  return custom || fallback
+}
 
 const groupNames = computed(() => Array.from(new Set([
   ...props.groups.filter((group) => group.trim()),
@@ -83,11 +89,11 @@ const groupFilters = computed(() => [
         :class="{ 'nav-item--active': current === item.view }"
         :data-tour="item.view"
         type="button"
-        v-tooltip="item.label"
+        v-tooltip="buttonLabel(item.view, item.label)"
         @click="emit('navigate', item.view)"
       >
         <Icon class="nav-item-icon" :name="item.icon" :size="17" />
-        <span>{{ item.label }}</span>
+        <span>{{ buttonLabel(item.view, item.label) }}</span>
       </button>
       <span class="nav-section-label nav-section-label--tools">Инструменты</span>
       <button
@@ -97,11 +103,11 @@ const groupFilters = computed(() => [
         :class="{ 'nav-item--active': current === item.view && !(item.view === 'plugins' && activePluginTabId) }"
         :data-tour="item.view"
         type="button"
-        v-tooltip="item.label"
+        v-tooltip="buttonLabel(item.view, item.label)"
         @click="emit('navigate', item.view)"
       >
         <Icon class="nav-item-icon" :name="item.icon" :size="17" />
-        <span>{{ item.label }}</span>
+        <span>{{ buttonLabel(item.view, item.label) }}</span>
       </button>
       <span v-if="pluginTabs.length" class="nav-section-label nav-section-label--tools">Вкладки плагинов</span>
       <button
@@ -121,11 +127,11 @@ const groupFilters = computed(() => [
         data-tour="settings"
         :class="{ 'nav-item--active': current === 'settings' }"
         type="button"
-        v-tooltip="'Настройки'"
+        v-tooltip="buttonLabel('settings', 'Настройки')"
         @click="emit('navigate', 'settings')"
       >
         <Icon class="nav-item-icon" name="settings" :size="17" />
-        <span>Настройки</span>
+        <span>{{ buttonLabel('settings', 'Настройки') }}</span>
       </button>
     </nav>
 

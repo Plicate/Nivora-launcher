@@ -1,4 +1,5 @@
 import { convertFileSrc, invoke } from '@tauri-apps/api/core'
+import { DEFAULT_BUTTON_CUSTOMIZATION } from './buttonCustomization'
 import type { FileBrowserListing } from './fileBrowser'
 import { demoModpacksForCatalog, searchDemoModpacks } from './modpackMockCatalog'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
@@ -206,6 +207,7 @@ const fallbackSettings: SettingsInfo = {
     accent: '#2f7ff6', accent_strong: '#6aa5ff', background: '#121417', panel: '#1a1d22', panel_raised: '#21252c', panel_soft: '#262b33',
     text: '#f0f3f7', muted: '#8a919e', quiet: '#b9c0cd', border: '#5f6b7d', danger: '#e5484d', success: '#46a758', warning: '#e0a63c', banner_shade: '#121417',
   },
+  button_customization: { ...DEFAULT_BUTTON_CUSTOMIZATION, outline: { ...DEFAULT_BUTTON_CUSTOMIZATION.outline }, crop: { ...DEFAULT_BUTTON_CUSTOMIZATION.crop }, labels: { ...DEFAULT_BUTTON_CUSTOMIZATION.labels } },
   instance_groups: ['Ванилла', 'С друзьями', 'Модпаки', 'Серверы'],
   pinned_instance_groups: [],
   login_source: 'microsoft',
@@ -1448,8 +1450,9 @@ export const bridge = {
   themeSave: (
     theme: Omit<LauncherThemePreset, 'source' | 'version' | 'creators' | 'source_url'>,
     metadata: ThemeArchiveMetadata,
+    resourceData: Record<string, string> = {},
     replace = false,
-  ) => request<{ theme: LauncherThemePreset; themes: LauncherThemePreset[] }>('theme_save', { theme, metadata, replace }),
+  ) => request<{ theme: LauncherThemePreset; themes: LauncherThemePreset[] }>('theme_save', { theme, metadata, resource_data: resourceData, replace }),
   themeImport: (data: string, replace = false) => request<{ theme: LauncherThemePreset; themes: LauncherThemePreset[] }>('theme_import', { data, replace }),
   themeDelete: (themeId: string) => request<{ removed: boolean; themes: LauncherThemePreset[] }>('theme_delete', { theme_id: themeId }),
   themeExport: (themeId: string) => request<{ file_name: string; data: string }>('theme_export', { theme_id: themeId }),
