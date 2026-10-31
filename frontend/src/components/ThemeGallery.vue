@@ -200,7 +200,7 @@ function formatDate(value: string): string {
     </section>
 
     <section class="github-theme-panel panel">
-      <div class="theme-section-heading"><div><h3>Каталог GitHub</h3><p>Ищите темы в публичных репозиториях, отмеченных темой <code>nivora-launcher-theme</code>.</p></div><span class="theme-count"><Icon name="globe" :size="15" /></span></div>
+      <div class="theme-section-heading"><div><h3>Каталог GitHub</h3><p>Ищите темы в публичных репозиториях с GitHub topic <code>trial-launcher-theme</code>.</p></div><span class="theme-count"><Icon name="globe" :size="15" /></span></div>
       <div class="theme-github-search"><Icon name="search" :size="17" /><input v-model="githubQuery" maxlength="120" placeholder="Название или описание темы" @keyup.enter="searchGithub()" /><button class="button button--small button--accent" type="button" :disabled="githubBusy" @click="searchGithub()">{{ githubBusy ? 'Ищу…' : 'Найти' }}</button></div>
       <p v-if="githubError" class="inline-error">{{ githubError }}</p>
       <div v-if="githubResults.length" class="github-theme-grid">

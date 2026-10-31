@@ -1,24 +1,28 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import Icon from './Icon.vue'
-import type { AppearanceSettings } from '../types'
+import { buttonCustomizationTarget, buttonFontStack, cropBackgroundPosition, cropBackgroundSize, resolveButtonCustomization, resolveButtonLabel, truncateButtonLabel } from '../services/buttonCustomization'
+import type { ButtonCustomizationTarget } from '../services/buttonCustomization'
+import type { AppearanceSettings, InstanceInfo } from '../types'
 import { LAUNCHER_VERSION_LABEL } from '../version'
 
 const props = withDefaults(defineProps<{
   appearance: AppearanceSettings
+  instances?: InstanceInfo[]
   tokens: Record<string, string>
   defaultTokens?: Record<string, string>
   lightTokens?: Record<string, string>
   theme: string
   fontFamily: string
+  language?: string
   wallpaperUrl: string
   interactive?: boolean
   selected?: string
   hovered?: string
-}>(), { interactive: false, selected: '', hovered: '', defaultTokens: undefined, lightTokens: undefined })
+}>(), { interactive: false, language: 'ru', selected: '', hovered: '', defaultTokens: undefined, lightTokens: undefined })
 
 const emit = defineEmits<{
-  select: [target: string]
+  select: [target: string, label?: string]
   hover: [target: string | null]
   replay: []
 }>()
@@ -30,13 +34,21 @@ const navItems = [
   { id: 'modpacks', label: 'Модпаки', icon: 'archive' },
   { id: 'themes', label: 'Студия тем', icon: 'palette' },
 ] as const
-
-const pageHeaders: Record<string, { eyebrow: string; title: string; action: string }> = {
-  instances: { eyebrow: 'Библиотека', title: 'Экземпляры', action: 'Новый экземпляр' },
-  accounts: { eyebrow: 'Аккаунты', title: 'Аккаунты Minecraft', action: 'Добавить' },
-  mods: { eyebrow: 'Каталог ресурсов', title: 'Моды и ресурсы', action: 'Обновить' },
-  modpacks: { eyebrow: 'Модпаки', title: 'Готовые сборки', action: 'Импорт' },
-  themes: { eyebrow: 'Студия оформления', title: 'Центр настройки тем', action: 'Сохранить' },
+const pageHeaders: Record<'ru' | 'en', Record<string, { eyebrow: string; title: string; action: string }>> = {
+  ru: {
+    instances: { eyebrow: 'Библиотека', title: 'Экземпляры', action: 'Новый экземпляр' },
+    accounts: { eyebrow: 'Аккаунты', title: 'Аккаунты Minecraft', action: 'Добавить' },
+    mods: { eyebrow: 'Каталог ресурсов', title: 'Моды и ресурсы', action: 'Обновить' },
+    modpacks: { eyebrow: 'Модпаки', title: 'Готовые сборки', action: 'Импорт' },
+    themes: { eyebrow: 'Студия оформления', title: 'Центр настройки тем', action: 'Сохранить' },
+  },
+  en: {
+    instances: { eyebrow: 'Library', title: 'Instances', action: 'New instance' },
+    accounts: { eyebrow: 'Accounts', title: 'Minecraft accounts', action: 'Add account' },
+    mods: { eyebrow: 'Resource catalog', title: 'Mods and resources', action: 'Refresh' },
+    modpacks: { eyebrow: 'Modpacks', title: 'Ready-to-play packs', action: 'Import' },
+    themes: { eyebrow: 'Appearance studio', title: 'Theme editor', action: 'Save' },
+  },
 }
 
 const tabs = [
@@ -44,13 +56,6 @@ const tabs = [
   { id: 'survival', label: 'Survival' },
   { id: 'servers', label: 'Серверы' },
 ] as const
-
-const clientRows = [
-  { title: 'Survival', meta: 'Fabric · 1.20.1 · 12 ч 42 мин' },
-  { title: 'Creative+', meta: 'Quilt · 1.20.4 · 3 ч 05 мин' },
-]
-const serverRow = { title: 'SMP Server', meta: 'Paper · 1.21 · онлайн' }
-
 const modRows = [
   { title: 'Sodium', meta: 'Мод · 1.20.1 · Fabric · 4.6M' },
   { title: 'Complementary Shaders', meta: 'Шейдер · 1.20+ · 1.1M' },
@@ -70,12 +75,31 @@ const activeNav = ref('instances')
 const activeTab = ref<'all' | 'survival' | 'servers'>('all')
 const replayKey = ref(0)
 
-const header = computed(() => pageHeaders[activeNav.value] || pageHeaders.instances)
+const header = computed(() => pageHeaders[props.language === 'en' ? 'en' : 'ru'][activeNav.value] || pageHeaders[props.language === 'en' ? 'en' : 'ru'].instances)
 
 const visibleRows = computed(() => {
-  if (activeTab.value === 'servers') return [serverRow]
-  if (activeTab.value === 'survival') return clientRows
-  return [...clientRows, serverRow]
+  const instances = (props.instances || []).map((instance) => {
+    const core = instance.kind === 'server' ? (instance.server_core || 'Сервер') : (instance.loader || 'Vanilla')
+    const version = instance.kind === 'server'
+      ? (instance.server_core_version || instance.minecraft_version || instance.version_id || '')
+      : (instance.minecraft_version || instance.version_id || '')
+    return {
+      name: instance.name,
+      title: instance.display_name || instance.name,
+      meta: version ? `${core} · ${version}` : core,
+      kind: instance.kind === 'server' ? 'server' : 'client',
+    }
+  })
+  const filtered = activeTab.value === 'servers'
+    ? instances.filter((instance) => instance.kind === 'server')
+    : activeTab.value === 'survival'
+      ? instances.filter((instance) => instance.kind !== 'server')
+      : instances
+  return filtered.map((instance) => ({
+    ...instance,
+    playTarget: buttonCustomizationTarget('hero-play', instance.name),
+    cardTarget: buttonCustomizationTarget('card-button', `${instance.name}:settings`),
+  }))
 })
 
 const pageTheme = computed(() => {
@@ -97,6 +121,12 @@ const activeTokens = computed<Record<string, string>>(() => {
 })
 
 const token = (key: string) => activeTokens.value[key] || props.tokens[key] || '#ffffff'
+
+function buttonLabel(id: string, fallback: string): string {
+  const custom = props.appearance.button_customization.labels[id as keyof typeof props.appearance.button_customization.labels]
+  const english: Record<string, string> = { instances: 'Instances', accounts: 'Accounts', mods: 'Catalog', modpacks: 'Modpacks', themes: 'Themes' }
+  return truncateButtonLabel(custom || (props.language === 'en' ? english[id] || fallback : fallback))
+}
 
 const pageLayout = computed(() => props.appearance.page_layouts[activeNav.value as keyof typeof props.appearance.page_layouts] || 'balanced')
 
@@ -188,6 +218,35 @@ const rootStyle = computed(() => ({
   '--preview-scale': String(Math.max(0.8, Math.min(1.25, props.appearance.ui_scale / 100))),
 }))
 
+function buttonStyle(target: ButtonCustomizationTarget) {
+  const settings = resolveButtonCustomization(props.appearance.button_customization, target)
+  return {
+    '--studio-button-width': `${settings.width}px`,
+    '--studio-button-height': `${settings.height}px`,
+    '--studio-button-font': buttonFontStack(settings.font_family),
+    '--studio-button-font-size': `${settings.font_size}px`,
+    '--studio-button-outline': settings.outline.enabled ? `${settings.outline.width}px ${settings.outline.color}` : '0 transparent',
+    '--studio-button-texture': settings.texture_data ? `url("${settings.texture_data}")` : 'none',
+    '--studio-button-texture-size': cropBackgroundSize(settings.crop_enabled ? settings.crop : { x: 0, y: 0, width: 100, height: 100 }, settings.texture_fit),
+    '--studio-button-texture-position': settings.crop_enabled ? cropBackgroundPosition(settings.crop) : '50% 50%',
+    '--studio-button-icon': settings.icon_data ? `url("${settings.icon_data}")` : 'none',
+  }
+}
+
+function buttonAttributes(target: ButtonCustomizationTarget) {
+  const settings = resolveButtonCustomization(props.appearance.button_customization, target)
+  return {
+    'data-button-target': target,
+    'data-button-icon': String(Boolean(settings.icon_data)),
+    'data-button-fill': String(settings.fill),
+    'data-button-border': String(settings.border),
+  }
+}
+
+function heroPlayLabel(target: ButtonCustomizationTarget, kind: string) {
+  return truncateButtonLabel(resolveButtonLabel(props.appearance.button_customization, target, kind === 'server' ? 'Запустить' : 'Играть'))
+}
+
 const sidebarStyle = computed(() => {
   const base: Record<string, string> = {
     background: `color-mix(in srgb, ${panelColor('panel', 72)} 92%, ${token('background')})`,
@@ -221,15 +280,18 @@ function targetClass(id: string) {
   }
 }
 
-function pick(id: string) {
+function pick(id: string, label?: string) {
   if (!props.interactive) return
-  emit('select', props.selected === id ? '' : id)
+  emit('select', props.selected === id ? '' : id, label)
 }
 
 function pickNav(id: string) {
   if (!props.interactive) return
+  const item = navItems.find((entry) => entry.id === id)
+  const target = buttonCustomizationTarget('nav-item', id)
+  const alreadySelected = props.selected === target
   activeNav.value = id
-  emit('select', props.selected === 'nav-item' ? '' : 'nav-item')
+  emit('select', alreadySelected ? '' : target, item ? buttonLabel(id, item.label) : undefined)
 }
 
 function pickBackground() {
@@ -293,15 +355,16 @@ function replay() {
             :key="item.id"
             type="button"
             class="studio-preview-nav"
-            :class="[targetClass('nav-item'), { 'studio-preview-nav--active': activeNav === item.id }]"
-            v-tooltip="item.label"
-            :style="{ borderRadius: radius.button }"
+            :class="[targetClass(buttonCustomizationTarget('nav-item', item.id)), { 'studio-preview-nav--active': activeNav === item.id }]"
+            v-bind="buttonAttributes(buttonCustomizationTarget('nav-item', item.id))"
+            v-tooltip="appearance.button_customization.labels[item.id] || item.label"
+            :style="[buttonStyle(buttonCustomizationTarget('nav-item', item.id)), { borderRadius: radius.button }]"
             @click.stop="pickNav(item.id)"
-            @pointerenter="hover('nav-item')"
+            @pointerenter="hover(buttonCustomizationTarget('nav-item', item.id))"
             @pointerleave="hover(null)"
           >
             <Icon :name="item.icon" :size="13" :stroke-width="1.7" />
-            <span v-if="!compactSidebar">{{ item.label }}</span>
+            <span v-if="!compactSidebar">{{ buttonLabel(item.id, item.label) }}</span>
           </button>
           <div class="studio-preview-spacer" />
           <div
@@ -332,18 +395,20 @@ function replay() {
               <div class="studio-preview-header-actions">
                 <span
                   class="studio-preview-button studio-preview-button--quiet"
-                  :class="targetClass('card-button')"
-                  :style="{ borderRadius: radius.button }"
-                  @click.stop="pick('card-button')"
-                  @pointerenter="hover('card-button')"
+                  :class="targetClass(buttonCustomizationTarget('card-button', 'header-import'))"
+                  v-bind="buttonAttributes(buttonCustomizationTarget('card-button', 'header-import'))"
+                  :style="[buttonStyle(buttonCustomizationTarget('card-button', 'header-import')), { borderRadius: radius.button }]"
+                  @click.stop="pick(buttonCustomizationTarget('card-button', 'header-import'), 'Импорт')"
+                  @pointerenter="hover(buttonCustomizationTarget('card-button', 'header-import'))"
                   @pointerleave="hover(null)"
                 ><Icon name="upload" :size="11" />Импорт</span>
                 <span
                   class="studio-preview-button studio-preview-button--accent"
-                  :class="targetClass('topbar-button')"
-                  :style="{ borderRadius: radius.button, background: token('accent'), color: accentForeground(token('accent')) }"
-                  @click.stop="pick('topbar-button')"
-                  @pointerenter="hover('topbar-button')"
+                  :class="targetClass(buttonCustomizationTarget('topbar-button', 'header-action'))"
+                  v-bind="buttonAttributes(buttonCustomizationTarget('topbar-button', 'header-action'))"
+                  :style="[buttonStyle(buttonCustomizationTarget('topbar-button', 'header-action')), { borderRadius: radius.button, background: token('accent'), color: accentForeground(token('accent')) }]"
+                  @click.stop="pick(buttonCustomizationTarget('topbar-button', 'header-action'), header.action)"
+                  @pointerenter="hover(buttonCustomizationTarget('topbar-button', 'header-action'))"
                   @pointerleave="hover(null)"
                 ><Icon name="plus" :size="11" />{{ header.action }}</span>
               </div>
@@ -361,10 +426,18 @@ function replay() {
                   @click.stop="activeTab = tab.id"
                 >{{ tab.label }}</button>
               </div>
-              <div class="studio-preview-rows">
+              <div
+                class="studio-preview-rows"
+                role="region"
+                aria-label="Кнопки в предпросмотре"
+                tabindex="0"
+              >
+                <p v-if="visibleRows.length === 0" class="studio-preview-empty">
+                  {{ language === 'en' ? 'No instances to preview' : 'Нет экземпляров для предпросмотра' }}
+                </p>
                 <article
                   v-for="(row, index) in visibleRows"
-                  :key="row.title"
+                  :key="row.name"
                   class="studio-preview-row"
                   :class="targetClass(index === 0 ? 'hero-card' : 'grid-card')"
                   :style="{ borderRadius: radius.card, padding: 'var(--preview-row-pad)', background: index === 0 ? panelColor('panel', 68) : panelColor('panel_raised', 80), border: `1px solid ${borderColor(index === 0 ? 24 : 18)}` }"
@@ -386,21 +459,23 @@ function replay() {
                   </span>
                   <span class="studio-preview-row-actions">
                     <span
-                      class="studio-preview-button studio-preview-button--quiet"
-                      :class="targetClass('card-button')"
-                      :style="{ borderRadius: radius.button }"
-                      @click.stop="pick('card-button')"
-                      @pointerenter="hover('card-button')"
+                      class="studio-preview-button studio-preview-button--quiet studio-preview-button--icon"
+                      :class="targetClass(row.cardTarget)"
+                      v-bind="buttonAttributes(row.cardTarget)"
+                      :style="[buttonStyle(row.cardTarget), { borderRadius: radius.button }]"
+                      @click.stop="pick(row.cardTarget)"
+                      @pointerenter="hover(row.cardTarget)"
                       @pointerleave="hover(null)"
                     ><Icon name="settings" :size="11" /></span>
                     <span
                       class="studio-preview-button studio-preview-button--accent"
-                      :class="targetClass('hero-play')"
-                      :style="{ borderRadius: radius.button, background: token('accent'), color: accentForeground(token('accent')) }"
-                      @click.stop="pick('hero-play')"
-                      @pointerenter="hover('hero-play')"
+                      :class="targetClass(row.playTarget)"
+                      v-bind="buttonAttributes(row.playTarget)"
+                      :style="[buttonStyle(row.playTarget), { borderRadius: radius.button, background: token('accent'), color: accentForeground(token('accent')) }]"
+                      @click.stop="pick(row.playTarget, heroPlayLabel(row.playTarget, row.kind))"
+                      @pointerenter="hover(row.playTarget)"
                       @pointerleave="hover(null)"
-                    ><Icon name="play" :size="11" />Играть</span>
+                    ><Icon name="play" :size="11" />{{ heroPlayLabel(row.playTarget, row.kind) }}</span>
                   </span>
                 </article>
               </div>
@@ -449,10 +524,11 @@ function replay() {
                   <span class="studio-preview-row-copy"><strong>{{ entry.title }}</strong><small>{{ entry.meta }}</small></span>
                   <span
                     class="studio-preview-button studio-preview-button--accent"
-                    :class="targetClass('card-button')"
-                    :style="{ borderRadius: radius.button }"
-                    @click.stop="pick('card-button')"
-                    @pointerenter="hover('card-button')"
+                    :class="targetClass(buttonCustomizationTarget('card-button', `mod-${entry.title}-install`))"
+                    v-bind="buttonAttributes(buttonCustomizationTarget('card-button', `mod-${entry.title}-install`))"
+                    :style="[buttonStyle(buttonCustomizationTarget('card-button', `mod-${entry.title}-install`)), { borderRadius: radius.button }]"
+                    @click.stop="pick(buttonCustomizationTarget('card-button', `mod-${entry.title}-install`), 'Установить')"
+                    @pointerenter="hover(buttonCustomizationTarget('card-button', `mod-${entry.title}-install`))"
                     @pointerleave="hover(null)"
                   ><Icon name="download" :size="11" />Установить</span>
                 </article>
@@ -475,10 +551,11 @@ function replay() {
                   <span class="studio-preview-row-copy"><strong>{{ pack.title }}</strong><small>{{ pack.meta }}</small></span>
                   <span
                     class="studio-preview-button studio-preview-button--accent"
-                    :class="targetClass('card-button')"
-                    :style="{ borderRadius: radius.button, background: token('accent'), color: accentForeground(token('accent')) }"
-                    @click.stop="pick('card-button')"
-                    @pointerenter="hover('card-button')"
+                    :class="targetClass(buttonCustomizationTarget('card-button', `modpack-${pack.title}-install`))"
+                    v-bind="buttonAttributes(buttonCustomizationTarget('card-button', `modpack-${pack.title}-install`))"
+                    :style="[buttonStyle(buttonCustomizationTarget('card-button', `modpack-${pack.title}-install`)), { borderRadius: radius.button, background: token('accent'), color: accentForeground(token('accent')) }]"
+                    @click.stop="pick(buttonCustomizationTarget('card-button', `modpack-${pack.title}-install`), 'Установить')"
+                    @pointerenter="hover(buttonCustomizationTarget('card-button', `modpack-${pack.title}-install`))"
                     @pointerleave="hover(null)"
                   ><Icon name="download" :size="11" />Установить</span>
                 </article>
@@ -527,11 +604,11 @@ function replay() {
 </template>
 
 <style scoped>
-.studio-preview { display: grid; gap: 9px; }
+.studio-preview { display: grid; min-width: 0; width: 100%; grid-template-columns: minmax(0, 1fr); gap: 9px; }
 .studio-preview-caption { display: flex; align-items: center; gap: 8px; padding: 0 2px 8px; color: var(--muted); font-size: 11px; }
 .studio-preview-caption strong { color: var(--text); font-size: 11.5px; letter-spacing: .02em; }
 .studio-preview-caption small { margin-left: auto; font-size: 10px; opacity: .85; }
-.studio-preview-frame { position: relative; overflow: hidden; border: 1px solid var(--line-strong); border-radius: max(calc(var(--radius-card, 7px) * 2), 12px); aspect-ratio: 16 / 11; background: var(--panel-soft); }
+.studio-preview-frame { position: relative; width: 100%; min-width: 0; box-sizing: border-box; container-type: inline-size; overflow: hidden; border: 1px solid var(--line-strong); border-radius: max(calc(var(--radius-card, 7px) * 2), 12px); aspect-ratio: 16 / 11; background: var(--panel-soft); }
 .studio-preview-chrome { position: absolute; inset: 0 0 auto 0; z-index: 5; display: flex; align-items: center; gap: 6px; height: 22px; padding: 0 10px; border-bottom: 1px solid color-mix(in srgb, var(--line) 80%, transparent); background: color-mix(in srgb, var(--panel) 92%, transparent); font-size: 9px; font-weight: 600; letter-spacing: .06em; color: var(--muted); text-transform: uppercase; pointer-events: none; }
 .studio-preview-chrome i { width: 7px; height: 7px; border-radius: 50%; background: color-mix(in srgb, var(--muted) 45%, transparent); }
 .studio-preview-chrome span { margin-left: 4px; }
@@ -553,7 +630,13 @@ function replay() {
 .studio-preview-brand-copy { display: grid; line-height: 1.15; }
 .studio-preview-brand-copy strong { font-size: 12px; letter-spacing: -.02em; color: var(--preview-text); }
 .studio-preview-brand-copy small { font-size: 9px; color: var(--preview-muted); }
-.studio-preview-nav { display: flex; align-items: center; gap: 8px; width: 100%; padding: 6px 8px; border: 0; color: var(--preview-quiet); background: transparent; font: inherit; font-size: 10.5px; text-align: left; cursor: pointer; }
+.studio-preview-nav { display: flex; min-width: 0; align-items: center; gap: 8px; width: 100%; padding: 6px 8px; border: 0; color: var(--preview-quiet); background: transparent; font: inherit; font-size: 10.5px; text-align: left; cursor: pointer; }
+.studio-preview-nav[data-button-target] { width: min(var(--studio-button-width, 180px), 100%); min-height: var(--studio-button-height); border: 1px solid var(--preview-border); background-image: var(--studio-button-texture, none) !important; background-position: var(--studio-button-texture-position, 50% 50%) !important; background-size: var(--studio-button-texture-size, cover) !important; background-repeat: no-repeat !important; font-family: var(--studio-button-font, inherit); font-size: var(--studio-button-font-size, 12px); -webkit-text-stroke: var(--studio-button-outline, 0 transparent); }
+.studio-preview-nav[data-button-fill='false'] { background-color: transparent !important; }
+.studio-preview-nav[data-button-border='false'] { border-color: transparent; }
+.studio-preview-nav[data-button-icon='true'] > svg { display: none; }
+.studio-preview-nav[data-button-icon='true']::before { content: ''; display: block; width: 16px; height: 16px; flex: 0 0 16px; background: var(--studio-button-icon) center / contain no-repeat; }
+.studio-preview-nav > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .studio-preview-nav:hover { color: var(--preview-text); background: color-mix(in srgb, var(--preview-text) 7%, transparent); }
 .studio-preview-nav--active { color: var(--preview-text); background: color-mix(in srgb, var(--preview-text) 9%, transparent); }
 .studio-preview-sidebar--compact .studio-preview-nav { justify-content: center; padding: 7px 0; }
@@ -568,26 +651,34 @@ function replay() {
 .studio-preview-account-copy small { font-size: 8.5px; color: var(--preview-muted); }
 .studio-preview-main { display: flex; z-index: 1; min-width: 0; flex: 1; flex-direction: column; padding: var(--preview-page-pad, 12px 14px); overflow: hidden; }
 .studio-preview-page { display: flex; min-height: 0; flex: 1; flex-direction: column; gap: var(--preview-gap); }
-.studio-preview-header { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.studio-preview-header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
 .studio-preview-header-copy { display: grid; min-width: 0; gap: 2px; }
 .studio-preview-eyebrow { color: var(--preview-muted); font-size: 9px; font-weight: 600; }
 .studio-preview-header-copy strong { font-size: 13px; letter-spacing: -.02em; color: var(--preview-text); }
-.studio-preview-header-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 6px; }
+.studio-preview-header-actions { display: flex; flex: 0 1 auto; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 6px; min-width: 0; max-width: 100%; }
 .studio-preview-tabs { display: flex; gap: 5px; }
 .studio-preview-tab { padding: 4px 11px; border: 1px solid var(--preview-border); color: var(--preview-muted); background: transparent; font: inherit; font-size: 9.5px; font-weight: 600; cursor: pointer; }
 .studio-preview-tab:hover { color: var(--preview-text); background: color-mix(in srgb, var(--preview-text) 6%, transparent); }
 .studio-preview-tab--active { color: var(--preview-text); border-color: transparent; background: color-mix(in srgb, var(--preview-text) 10%, transparent); }
-.studio-preview-rows { display: grid; min-height: 0; flex: 1; align-content: start; gap: calc(var(--preview-gap, 8px) * .8); overflow: hidden; }
+.studio-preview-rows { display: grid; min-height: 0; flex: 1; align-content: start; gap: calc(var(--preview-gap, 8px) * .8); overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
+.studio-preview-rows:focus-visible { outline: 2px solid var(--accent, var(--blue)); outline-offset: 2px; }
+.studio-preview-empty { margin: 0; padding: 6px 2px; color: var(--preview-muted); font-size: 9px; }
 .studio-preview-row { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .studio-preview-mark { display: grid; width: 30px; height: 30px; flex: 0 0 30px; place-items: center; color: #fff; }
 .studio-preview-mark--soft { color: var(--preview-text); }
 .studio-preview-row-copy { display: grid; min-width: 0; flex: 1; gap: 2px; }
 .studio-preview-row-copy strong { overflow: hidden; font-size: 11px; letter-spacing: -.01em; color: var(--preview-text); text-overflow: ellipsis; white-space: nowrap; }
 .studio-preview-row-copy small { overflow: hidden; color: var(--preview-muted); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
-.studio-preview-row-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 5px; }
-.studio-preview-button { display: inline-flex; align-items: center; gap: 4px; padding: 5px 9px; font-size: 9.5px; font-weight: 600; }
+.studio-preview-row-actions { display: flex; flex: 0 0 auto; flex-wrap: nowrap; align-items: center; justify-content: flex-end; gap: 5px; min-width: 0; max-width: 100%; }
+.studio-preview-button { display: inline-flex; box-sizing: border-box; width: auto; min-width: 0; max-width: 100%; min-height: var(--studio-button-height); flex: 0 1 auto; align-items: center; justify-content: center; gap: 6px; overflow: hidden; padding: 5px 10px; border: 1px solid color-mix(in srgb, var(--preview-border) 75%, transparent); color: var(--preview-text); background-color: var(--preview-panel-soft); background-image: var(--studio-button-texture, none) !important; background-position: var(--studio-button-texture-position, 50% 50%) !important; background-size: var(--studio-button-texture-size, cover) !important; background-repeat: no-repeat !important; font-family: var(--studio-button-font, inherit); font-size: var(--studio-button-font-size, 12px); font-weight: 600; -webkit-text-stroke: var(--studio-button-outline, 0 transparent); }
+.studio-preview-button[data-button-target]:not(.studio-preview-button--icon) { width: var(--studio-button-width, 180px); white-space: nowrap; }
+.studio-preview-button--icon { width: 30px; min-width: 30px; max-width: 30px; flex: 0 0 30px; padding: 4px; }
 .studio-preview-button--accent { color: var(--preview-accent-foreground, #fff); }
-.studio-preview-button--quiet { border: 1px solid var(--preview-border); color: var(--preview-quiet); background: color-mix(in srgb, var(--preview-text) 4%, transparent); }
+.studio-preview-button--quiet { border: 1px solid var(--preview-border); color: var(--preview-quiet); background-color: color-mix(in srgb, var(--preview-text) 4%, transparent); }
+.studio-preview-button[data-button-fill="false"] { background-color: transparent !important; }
+.studio-preview-button[data-button-border="false"] { border-color: transparent !important; }
+.studio-preview-button[data-button-icon="true"] > svg { display: none; }
+.studio-preview-button[data-button-icon="true"]::before { content: ''; display: block; width: 16px; height: 16px; flex: 0 0 16px; background: var(--studio-button-icon) center / contain no-repeat; }
 .studio-preview-badge { padding: 3px 8px; border: 1px solid var(--preview-border); color: var(--preview-muted); font-size: 8.5px; }
 .studio-preview-search { display: flex; align-items: center; gap: 7px; padding: 6px 10px; border: 1px solid var(--preview-border); color: var(--preview-muted); font-size: 9.5px; background: color-mix(in srgb, var(--preview-panel-raised) 70%, transparent); }
 .studio-preview-cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); min-height: 0; flex: 1; align-content: start; gap: 8px; overflow: hidden; }
@@ -617,4 +708,10 @@ function replay() {
 .preview-target--hovered { outline: 1.5px dashed color-mix(in srgb, var(--accent, var(--blue)) 72%, transparent); outline-offset: 2px; }
 .preview-target--selected { outline: 2px solid var(--accent, var(--blue)); outline-offset: 2px; }
 .preview-target--selected.preview-target--hovered { outline: 2px solid var(--accent-strong, var(--blue-bright, var(--accent, var(--blue)))); }
+
+@container (max-width: 320px) {
+  .studio-preview-row-actions { flex: 0 1 auto; }
+  .studio-preview-row-actions .studio-preview-button--icon { display: none; }
+  .studio-preview-row-actions .studio-preview-button[data-button-target]:not(.studio-preview-button--icon) { width: fit-content; max-width: 100%; }
+}
 </style>

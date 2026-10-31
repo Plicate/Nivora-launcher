@@ -1,4 +1,6 @@
 import { ref, type Ref } from 'vue'
+import { locale } from '../i18n'
+import { buildPluginThemeContext, safeThemeColor, safeThemeKey, safeThemeToken } from './pluginThemeContext'
 import { bridge } from './bridge'
 import { createPluginHostCall } from './pluginHost'
 import { pluginRuntime } from './pluginRuntime'
@@ -31,7 +33,7 @@ export type ActivePluginShortcut = { pluginId: string; pluginName: string; defin
 
 type PluginControllerDeps = {
   plugins: Ref<PluginManifest[]>
-  settingsDraft: () => Pick<SettingsInfo, 'developer_mode' | 'show_toasts'>
+  settingsDraft: () => Pick<SettingsInfo, 'developer_mode' | 'show_toasts' | 'font_family'>
   appearanceDraft: () => AppearanceSettings
   systemDark: () => boolean
   selectedInstance: () => InstanceInfo | undefined
@@ -255,24 +257,38 @@ export function createPluginController(deps: PluginControllerDeps) {
             manifest,
             selectedInstance: () => pluginInstanceRef(),
             theme: (): PluginThemeContext => {
-              const currentMode = deps.appearanceDraft().theme === 'system'
+              const appearance = deps.appearanceDraft()
+              const currentMode = appearance.theme === 'system'
                 ? (deps.systemDark() ? 'dark' : 'light')
-                : deps.appearanceDraft().theme
+                : appearance.theme
               const mode = currentMode === 'glass' ? 'glass' : currentMode === 'light' ? 'light' : 'dark'
-              const tokens: Record<string, string | number> = { ...deps.appearanceDraft().color_tokens }
+              const base = buildPluginThemeContext(appearance, mode, locale.value, deps.settingsDraft().font_family)
+              const tokens: Record<string, string | number> = { ...base.tokens }
+              const colors: Record<string, string> = { ...base.colors }
               const contributions = pluginThemeContributions.get(plugin.id)
               if (contributions) {
                 for (const [registrationId, contribution] of contributions) {
-                  if (contribution.name) tokens[`plugin.${plugin.id}.${registrationId}.name`] = contribution.name
+                  const prefix = `plugin.${plugin.id}.${registrationId}`
+                  if (contribution.name) {
+                    const key = `${prefix}.name`
+                    if (safeThemeKey(key)) tokens[key] = contribution.name.slice(0, 80)
+                  }
                   for (const [key, value] of Object.entries(contribution.colors || {})) {
-                    tokens[`plugin.${plugin.id}.${registrationId}.color.${key}`] = value
+                    const tokenKey = `${prefix}.color.${key}`
+                    const color = safeThemeColor(value)
+                    if (safeThemeKey(tokenKey) && color) {
+                      tokens[tokenKey] = color
+                      colors[tokenKey] = color
+                    }
                   }
                   for (const [key, value] of Object.entries(contribution.tokens || {})) {
-                    tokens[`plugin.${plugin.id}.${registrationId}.token.${key}`] = value
+                    const tokenKey = `${prefix}.token.${key}`
+                    const safeValue = safeThemeToken(value)
+                    if (safeThemeKey(tokenKey) && safeValue !== undefined) tokens[tokenKey] = safeValue
                   }
                 }
               }
-              return { mode, accent: deps.appearanceDraft().accent_color, tokens }
+              return Object.freeze({ ...base, tokens: Object.freeze(tokens), colors: Object.freeze(colors) })
             },
             removeView: (viewId) => removePluginView(plugin.id, viewId),
             subscribe: (event, listenerId) => subscribePluginEvent(plugin.id, listenerId, event),

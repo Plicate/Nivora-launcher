@@ -440,14 +440,49 @@ export interface PluginI18nApi {
   availableLocales(): readonly string[];
 }
 
+export type PluginThemeFont = "system" | "inter" | "manrope" | "mono";
+export type PluginButtonLabelKey = "instances" | "accounts" | "mods" | "modpacks" | "themes" | "settings";
+
+export interface PluginThemeButtonStyle {
+  readonly width: number;
+  readonly height: number;
+  readonly fill: boolean;
+  readonly border: boolean;
+  readonly font_family: PluginThemeFont;
+  readonly font_size: number;
+  readonly outline: Readonly<{ enabled: boolean; width: number; color: string }>;
+  readonly texture_fit: "cover" | "contain";
+  readonly crop_enabled: boolean;
+  readonly crop: Readonly<{ x: number; y: number; width: number; height: number }>;
+}
+
+export interface PluginThemeFonts {
+  readonly ui: PluginThemeFont;
+  readonly button: PluginThemeFont;
+  readonly available: readonly PluginThemeFont[];
+}
+
 export interface PluginThemeContext {
   readonly mode: "light" | "dark" | "glass";
   readonly accent: string;
   readonly tokens: Readonly<Record<string, string | number>>;
+  readonly colors: Readonly<Record<string, string>>;
+  readonly locale: string;
+  readonly buttonStyle: PluginThemeButtonStyle;
+  readonly buttonLabels: Readonly<Record<PluginButtonLabelKey, string>>;
+  readonly fonts: PluginThemeFonts;
 }
 
 export interface PluginThemeApi {
   get(): Promise<PluginThemeContext>;
+  getColor(name: string): Promise<string | undefined>;
+  getToken(name: string): Promise<string | number | undefined>;
+  getButtonStyle(): Promise<PluginThemeButtonStyle>;
+  getButtonLabels(): Promise<Readonly<Record<PluginButtonLabelKey, string>>>;
+  getLocale(): Promise<string>;
+  getFonts(): Promise<PluginThemeFonts>;
+  normalizeColor(value: string, fallback?: string): string;
+  contrastRatio(foreground: string, background: string): number;
   register(definition: PluginThemeDefinition): PluginUnsubscribe;
 }
 

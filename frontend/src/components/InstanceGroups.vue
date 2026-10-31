@@ -5,6 +5,8 @@ import CoreBadge from './CoreBadge.vue'
 import CustomSelect from './CustomSelect.vue'
 import Icon from './Icon.vue'
 import LoaderBadge from './LoaderBadge.vue'
+import { DEFAULT_BUTTON_CUSTOMIZATION, buttonCustomizationTarget, buttonFontStack, cropBackgroundPosition, cropBackgroundSize, resolveButtonCustomization, resolveButtonLabel } from '../services/buttonCustomization'
+import type { ButtonCustomization } from '../services/buttonCustomization'
 import type { InstanceInfo, SelectOption } from '../types'
 
 const props = withDefaults(defineProps<{
@@ -16,7 +18,8 @@ const props = withDefaults(defineProps<{
   activeFilter: string
   searchShortcut?: string
   layout?: string
-}>(), { pinnedGroups: () => [], busy: false, groupBusy: false, searchShortcut: 'Ctrl+K', layout: 'default' })
+  buttonCustomization?: ButtonCustomization
+}>(), { pinnedGroups: () => [], busy: false, groupBusy: false, searchShortcut: 'Ctrl+K', layout: 'default', buttonCustomization: () => DEFAULT_BUTTON_CUSTOMIZATION })
 
 const emit = defineEmits<{
   'update:activeFilter': [filter: string]
@@ -151,12 +154,50 @@ function instanceMeta(instance: InstanceInfo): string {
   return version ? `${core} · ${version}` : core
 }
 
+function launchButtonTarget(instance: InstanceInfo) {
+  return buttonCustomizationTarget('hero-play', instance.name)
+}
+
+function launchButtonLabel(instance: InstanceInfo): string {
+  if (instance.running) return 'Остановить'
+  return resolveButtonLabel(props.buttonCustomization, launchButtonTarget(instance), instance.kind === 'server' ? 'Запустить' : 'Играть')
+}
+
+function launchButtonSettings(instance: InstanceInfo) {
+  return resolveButtonCustomization(props.buttonCustomization, launchButtonTarget(instance))
+}
+
+function launchButtonStyle(instance: InstanceInfo) {
+  const settings = launchButtonSettings(instance)
+  return {
+    '--button-width': `${settings.width}px`,
+    '--button-height': `${settings.height}px`,
+    '--button-font-family': buttonFontStack(settings.font_family),
+    '--button-font-size': `${settings.font_size}px`,
+    '--button-text-stroke': settings.outline.enabled ? `${settings.outline.width}px ${settings.outline.color}` : '0 transparent',
+    '--button-texture-image': settings.texture_data ? `url("${settings.texture_data}")` : 'none',
+    '--button-icon-image': settings.icon_data ? `url("${settings.icon_data}")` : 'none',
+    '--button-texture-size': cropBackgroundSize(settings.crop_enabled ? settings.crop : { x: 0, y: 0, width: 100, height: 100 }, settings.texture_fit),
+    '--button-texture-position': settings.crop_enabled ? cropBackgroundPosition(settings.crop) : '50% 50%',
+  }
+}
+
+function launchButtonAttributes(instance: InstanceInfo) {
+  const settings = launchButtonSettings(instance)
+  return {
+    'data-button-target': launchButtonTarget(instance),
+    'data-button-icon': String(Boolean(settings.icon_data)),
+    'data-button-fill': String(settings.fill),
+    'data-button-border': String(settings.border),
+  }
+}
+
 function instanceMenu(event: MouseEvent, instance: InstanceInfo) {
   const title = instance.display_name || instance.name
   const items: ContextMenuItem[] = [
     {
       id: 'play',
-      label: instance.running ? 'Остановить' : instance.kind === 'server' ? 'Запустить сервер' : 'Играть',
+      label: instance.running ? 'Остановить' : instance.kind === 'server' ? 'Запустить сервер' : launchButtonLabel(instance),
       icon: instance.running ? 'stop' : 'play',
       action: () => toggleInstance(instance),
     },
@@ -314,8 +355,10 @@ function formatPlayedTime(value: number): string {
                 :class="instance.running ? 'button--outline' : 'button--accent'"
                 type="button"
                 :disabled="busy"
-                :aria-label="`${instance.running ? 'Остановить' : (instance.kind === 'server' ? 'Запустить' : 'Играть')}: ${instance.display_name || instance.name}`"
-                v-tooltip="instance.running ? 'Остановить' : (instance.kind === 'server' ? 'Запустить' : 'Играть')"
+                :aria-label="`${launchButtonLabel(instance)}: ${instance.display_name || instance.name}`"
+                v-tooltip="launchButtonLabel(instance)"
+                v-bind="launchButtonAttributes(instance)"
+                :style="launchButtonStyle(instance)"
                 @click="toggleInstance(instance)"
               ><Icon :name="instance.running ? 'stop' : 'play'" :size="15" /></button>
               <button class="icon-button" type="button" :aria-label="`Настройки экземпляра ${instance.display_name || instance.name}`" v-tooltip="'Настройки'" @click="emit('settings', instance)"><Icon name="settings" :size="15" /></button>
@@ -397,8 +440,8 @@ function formatPlayedTime(value: number): string {
                 />
               </div>
               <div class="instance-row-actions">
-                <button class="button button--small" :class="instance.running ? 'button--outline' : 'button--accent'" type="button" :disabled="busy" @click="toggleInstance(instance)">
-                  <Icon :name="instance.running ? 'stop' : 'play'" :size="14" />{{ instance.running ? 'Остановить' : (instance.kind === 'server' ? 'Запустить' : 'Играть') }}
+                <button class="button button--small" :class="instance.running ? 'button--outline' : 'button--accent'" type="button" :disabled="busy" v-bind="launchButtonAttributes(instance)" :style="launchButtonStyle(instance)" @click="toggleInstance(instance)">
+                  <Icon :name="instance.running ? 'stop' : 'play'" :size="14" />{{ launchButtonLabel(instance) }}
                 </button>
                 <button class="icon-button" type="button" :aria-label="`Настройки экземпляра ${instance.display_name || instance.name}`" v-tooltip="'Настройки'" @click="emit('settings', instance)"><Icon name="settings" :size="15" /></button>
                 <button v-if="instance.game_edition !== 'bedrock' && instance.kind !== 'server' && javaClientCount > 1" class="icon-button" type="button" :aria-label="`Сравнить ${instance.display_name || instance.name} с другой сборкой`" v-tooltip="'Сравнить с другой сборкой'" @click="emit('compare', instance)"><Icon name="eye" :size="15" /></button>
