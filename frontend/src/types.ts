@@ -347,6 +347,7 @@ export interface AccountInfo {
 }
 
 export interface AppearanceSettings {
+  sidebar_texture_data: string
   theme: ThemeMode
   active_theme_id: string
   wallpaper_path: string
@@ -394,6 +395,7 @@ export interface SkinExportResult {
 }
 
 export interface SettingsInfo {
+  sidebar_texture_data: string
   game_dir: string
   java_path: string
   security_profile: 'manual' | 'strict' | 'off' | string
@@ -1511,6 +1513,7 @@ export interface LauncherThemePreset {
   source_url?: string
   locale?: 'ru' | 'en'
   button_customization?: ThemeButtonCustomization
+  radius_tokens?: Record<string, number>
   resources?: Record<string, string>
   resource_data?: Record<string, string>
   plugin?: { id: string; name: string; version: string; api_version: '3'; entrypoint: string; sources?: string[] }

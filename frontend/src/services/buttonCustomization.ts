@@ -201,12 +201,19 @@ export function resolveButtonLabel(value: unknown, target: ButtonCustomizationTa
 
 export function safeDataUrl(value: unknown, kind: 'image' | 'audio'): string {
   if (typeof value !== 'string') return ''
-  const limit = kind === 'image' ? 720_000 : 1_400_000
-  if (value.length > limit) return ''
+  const maxLength = 128 + Math.ceil((15 * 1024 * 1024) / 3) * 4
+  if (value.length > maxLength) return ''
   const accepted = kind === 'image'
     ? /^data:image\/(?:png|jpeg|webp);base64,[a-z\d+/]+=*$/i
     : /^data:audio\/(?:mpeg|ogg|wav|webm);base64,[a-z\d+/]+=*$/i
-  return accepted.test(value) ? value : ''
+  if (!accepted.test(value)) return ''
+  const payload = value.slice(value.indexOf(',') + 1)
+  const padding = payload.endsWith('==') ? 2 : payload.endsWith('=') ? 1 : 0
+  const base64 = padding ? payload.slice(0, -padding) : payload
+  if (!base64 || !/^[a-z\d+/]+$/i.test(base64)) return ''
+  if (padding ? base64.length % 4 !== 4 - padding : payload.length % 4 !== 0) return ''
+  const decodedBytes = Math.floor(payload.length * 3 / 4) - padding
+  return decodedBytes > 0 && decodedBytes <= 15 * 1024 * 1024 ? value : ''
 }
 
 export function truncateButtonLabel(value: string, limit = 16): string {

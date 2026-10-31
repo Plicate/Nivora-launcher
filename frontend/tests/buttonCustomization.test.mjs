@@ -104,7 +104,20 @@ test('asset data URLs allow only bounded raster images and audio formats', () =>
   assert.equal(safeDataUrl('data:image/svg+xml;base64,PHN2Zz4=', 'image'), '')
   assert.equal(safeDataUrl('data:audio/ogg;base64,b2dn', 'audio'), 'data:audio/ogg;base64,b2dn')
   assert.equal(safeDataUrl('data:audio/html;base64,PHNjcmlwdD4=', 'audio'), '')
-  assert.equal(safeDataUrl(`data:image/png;base64,${'a'.repeat(800_000)}`, 'image'), '')
+  assert.equal(safeDataUrl(`data:image/png;base64,${'a'.repeat(20_971_524)}`, 'image'), '')
+})
+
+test('asset data URLs allow images above the legacy cap up to 15 MiB', () => {
+  const overLegacyLimit = `data:image/png;base64,${'A'.repeat(1_000_000)}`
+  assert.equal(safeDataUrl(overLegacyLimit, 'image'), overLegacyLimit)
+  assert.equal(normalizeButtonCustomization({ texture_data: overLegacyLimit }).texture_data, overLegacyLimit)
+  const longerSound = `data:audio/ogg;base64,${'A'.repeat(1_500_000)}`
+  assert.equal(safeDataUrl(longerSound, 'audio'), longerSound)
+  assert.equal(normalizeButtonCustomization({ sound_data: longerSound }).sound_data, longerSound)
+
+  const maximum = `data:image/png;base64,${'A'.repeat(20_971_520)}`
+  assert.equal(safeDataUrl(maximum, 'image'), maximum)
+  assert.equal(safeDataUrl(`data:image/png;base64,${'A'.repeat(20_971_524)}`, 'image'), '')
 })
 
 test('texture crop expands the image and supports a custom position', () => {

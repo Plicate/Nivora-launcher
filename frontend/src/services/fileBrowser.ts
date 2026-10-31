@@ -69,6 +69,8 @@ export interface FileBrowserRequest {
   reveal?: string
   /** разрешить выбрать несколько файлов сразу */
   multiple?: boolean
+  /** maximum bytes read when opening a file */
+  maxSize?: number
 }
 
 export interface PickedFile {
@@ -115,9 +117,12 @@ export async function readFileBase64(path: string, onProgress?: (loaded: number,
   let offset = 0
   let total = 0
   let data = ''
+  const maxSize = fileBrowserRequest.value?.mode === 'open' ? fileBrowserRequest.value.maxSize : undefined
   for (;;) {
     const chunk = await bridge.fsReadFile(path, offset)
     total = chunk.size
+    if (maxSize !== undefined && total > maxSize) throw new Error(`Файл превышает лимит ${Math.floor(maxSize / (1024 * 1024))} MiB.`)
+    if (maxSize !== undefined && offset + chunk.length > maxSize) throw new Error(`Файл превышает лимит ${Math.floor(maxSize / (1024 * 1024))} MiB.`)
     data += chunk.data
     offset += chunk.length
     onProgress?.(offset, total)
@@ -126,7 +131,7 @@ export async function readFileBase64(path: string, onProgress?: (loaded: number,
   return { data, size: total }
 }
 
-function browserFallbackPick(accept: string): Promise<PickedFile | null> {
+function browserFallbackPick(accept: string, maxSize?: number): Promise<PickedFile | null> {
   return new Promise((resolve) => {
     const input = document.createElement('input')
     input.type = 'file'
@@ -145,6 +150,10 @@ function browserFallbackPick(accept: string): Promise<PickedFile | null> {
         finish(null)
         return
       }
+      if (maxSize !== undefined && file.size > maxSize) {
+        finish({ fileName: file.name, data: '', size: file.size })
+        return
+      }
       const reader = new FileReader()
       reader.onload = () => {
         const raw = String(reader.result || '')
@@ -160,9 +169,9 @@ function browserFallbackPick(accept: string): Promise<PickedFile | null> {
   })
 }
 
-/** в приложении открывает встроенный диалог, в браузере использует input */
-export function pickFile(options: { accept?: string; title?: string; startPath?: string } = {}): Promise<PickedFile | null> {
-  if (!isDesktopShell()) return browserFallbackPick(options.accept || '')
+/** открывает picker по сохранённому режиму проводника, в браузере использует input */
+export function pickFile(options: { accept?: string; title?: string; startPath?: string; maxSize?: number } = {}): Promise<PickedFile | null> {
+  if (!isDesktopShell() || explorerMode.value === 'system') return browserFallbackPick(options.accept || '', options.maxSize)
   if (fileBrowserRequest.value) return Promise.resolve(null)
   return new Promise((resolve) => {
     fileBrowserResolve = resolve

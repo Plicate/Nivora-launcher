@@ -152,6 +152,7 @@ const defaultRadiusTokens: Record<string, number> = {
   card: 12,
   button: 8,
   control: 8,
+  sidebar: 0,
 }
 
 // старые палитры распознаются при миграции настроек
@@ -275,6 +276,7 @@ const initialState: AppState = {
     wallpaper_data: '',
     wallpaper_blur: 12,
     wallpaper_opacity: 34,
+    sidebar_texture_data: '',
       accent_color: defaultColorTokens.accent,
     sidebar_position: 'left',
     sidebar_mode: 'adaptive',
@@ -293,7 +295,7 @@ const initialState: AppState = {
       density: 'comfortable',
       instance_layout: 'default',
      ui_scale: 100,
-     radius_tokens: { card: 7, button: 8, control: 10 },
+     radius_tokens: { card: 7, button: 8, control: 10, sidebar: 0 },
       page_themes: { instances: 'inherit', 'instance-settings': 'inherit', accounts: 'inherit', mods: 'inherit', modpacks: 'inherit', plugins: 'inherit', themes: 'inherit', settings: 'inherit' },
       page_layouts: { instances: 'balanced', 'instance-settings': 'balanced', accounts: 'balanced', mods: 'wide', modpacks: 'wide', plugins: 'wide', themes: 'wide', settings: 'balanced' },
     widget_visibility: { 'instances.workspace': true, 'accounts.status': true, 'mods.context': true },
@@ -650,6 +652,7 @@ const appearanceDraft = reactive<AppearanceSettings>({
   wallpaper_data: '',
   wallpaper_blur: 12,
   wallpaper_opacity: 34,
+  sidebar_texture_data: '',
     accent_color: defaultColorTokens.accent,
   sidebar_position: 'left',
   sidebar_mode: 'adaptive',
@@ -1871,6 +1874,7 @@ function applyState(next: AppState, preserveAppearance = false) {
        wallpaper_data: next.settings.wallpaper_data || '',
        wallpaper_blur: next.settings.wallpaper_blur,
        wallpaper_opacity: next.settings.wallpaper_opacity,
+       sidebar_texture_data: next.settings.sidebar_texture_data || '',
         accent_color: legacyDefaultColorTokenValues.accent.includes((next.settings.accent_color || '').toLowerCase())
           ? defaultColorTokens.accent
           : next.settings.accent_color || defaultColorTokens.accent,
@@ -1896,7 +1900,7 @@ function applyState(next: AppState, preserveAppearance = false) {
         density: next.settings.density || 'comfortable',
        instance_layout: next.settings.instance_layout === 'compact' ? 'compact' : 'default',
        ui_scale: next.settings.ui_scale || 100,
-       radius_tokens: { ...defaultRadiusTokens, ...(next.settings.radius_tokens || {}) },
+       radius_tokens: { ...defaultRadiusTokens, sidebar: 0, ...(next.settings.radius_tokens || {}) },
        page_themes: { ...appearanceDraft.page_themes, ...next.settings.page_themes },
        page_layouts: { ...appearanceDraft.page_layouts, ...next.settings.page_layouts },
        widget_visibility: { ...appearanceDraft.widget_visibility, ...next.settings.widget_visibility },

@@ -32,7 +32,11 @@ body { font-family: var(--font-family); }
 
 .sidebar {
   padding: 22px 15px 16px;
-  background: var(--sidebar-bg, var(--panel));
+  background-color: var(--sidebar-bg, var(--panel));
+  background-image: var(--sidebar-texture-image, none);
+  background-position: center;
+  background-size: cover;
+  background-repeat: no-repeat;
 }
 
 .brand-lockup { gap: 10px; padding: 2px 10px 24px; }
@@ -414,14 +418,14 @@ input[type='checkbox']:checked, input[type='radio']:checked { box-shadow: none; 
 .app-shell[data-sidebar-floating='true'][data-sidebar-position='right'] > .sidebar,
 .app-shell[data-sidebar-floating='true'][data-sidebar-position='top'] > .sidebar,
 .app-shell[data-sidebar-floating='true'][data-sidebar-position='bottom'] > .sidebar {
-  border-radius: var(--radius-card, 7px);
+  border-radius: var(--radius-sidebar, 0px);
   box-shadow: 0 8px 24px rgba(0, 0, 0, .16);
 }
 .app-shell[data-sidebar-visibility='hover'] > .sidebar:hover,
 .app-shell[data-sidebar-visibility='hover'] > .sidebar:focus-within,
 .app-shell[data-sidebar-visibility='hover'] > .sidebar.sidebar--open { box-shadow: 0 8px 24px rgba(0, 0, 0, .18); }
 .app-shell[data-sidebar-position='top'] > .sidebar,
-.app-shell[data-sidebar-position='bottom'] > .sidebar { background: var(--panel); }
+.app-shell[data-sidebar-position='bottom'] > .sidebar { background-color: var(--panel); background-image: var(--sidebar-texture-image, none); }
 
 @media (max-width: 760px) {
   .page-content { padding: 22px 16px 32px; }

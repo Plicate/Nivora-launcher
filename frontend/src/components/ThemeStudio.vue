@@ -6,7 +6,8 @@ import Icon from './Icon.vue'
 import NumericStepper from './NumericStepper.vue'
 import ThemeStudioPreview from './ThemeStudioPreview.vue'
 import ThemeButtonSettingsEditor from './ThemeButtonSettingsEditor.vue'
-import { buttonCustomizationRole, normalizeButtonCustomization, resolveButtonCustomization, resolveButtonLabel, type ButtonCustomizationTarget, type ButtonLabelKey } from '../services/buttonCustomization'
+import { buttonCustomizationRole, normalizeButtonCustomization, resolveButtonCustomization, resolveButtonLabel, safeDataUrl, type ButtonCustomizationTarget, type ButtonLabelKey } from '../services/buttonCustomization'
+import { pickFile } from '../services/fileBrowser'
 import type { ButtonCustomization } from '../services/buttonCustomization'
 import type { AppearanceSettings, InstanceInfo, SelectOption, ViewName } from '../types'
 
@@ -134,10 +135,10 @@ const perPageAnimationStyleOptions: SelectOption[] = [
   ...animationStyleOptions,
 ]
 const radiusPresets: Array<{ label: string; hint: string; value: Record<string, number> }> = [
-  { label: 'Острые', hint: 'Строгие прямые углы', value: { card: 0, button: 0, control: 0 } },
-  { label: 'Стандарт', hint: 'Значения Nivora по умолчанию', value: { card: 7, button: 8, control: 10 } },
-  { label: 'Скруглённые', hint: 'Мягкий современный вид', value: { card: 12, button: 12, control: 12 } },
-  { label: 'Мягкие', hint: 'Максимально плавные формы', value: { card: 18, button: 20, control: 22 } },
+  { label: 'Острые', hint: 'Строгие прямые углы', value: { card: 0, button: 0, control: 0, sidebar: 0 } },
+  { label: 'Стандарт', hint: 'Значения Nivora по умолчанию', value: { card: 7, button: 8, control: 10, sidebar: 0 } },
+  { label: 'Скруглённые', hint: 'Мягкий современный вид', value: { card: 12, button: 12, control: 12, sidebar: 8 } },
+  { label: 'Мягкие', hint: 'Максимально плавные формы', value: { card: 18, button: 20, control: 22, sidebar: 16 } },
 ]
 
 type RailSection = 'general' | 'buttons' | 'colors' | 'shape' | 'wallpaper' | 'navigation' | 'motion' | 'pages'
@@ -202,7 +203,7 @@ type TargetEditor = {
   description: string
   tokens: string[]
   buttonId?: ButtonCustomizationTarget
-  radius?: { key: 'card' | 'button' | 'control'; label: string }
+  radius?: { key: 'card' | 'button' | 'control' | 'sidebar'; label: string }
   extras?: 'wallpaper' | 'sidebar' | 'text'
   note?: string
 }
@@ -218,7 +219,7 @@ const targetRegistry: Record<string, TargetEditor> = {
     label: 'Сайдбар',
     description: 'Навигационная панель с брендом и меню.',
     tokens: ['panel'],
-    radius: { key: 'card', label: 'Закруглённость панели' },
+    radius: { key: 'sidebar', label: 'Закруглённость сайдбара' },
     extras: 'sidebar',
   },
   'nav-item': {
@@ -311,8 +312,8 @@ const activeButtonOverride = computed(() => {
 const hasButtonOverride = computed(() => Boolean(activeButtonOverride.value && Object.keys(activeButtonOverride.value).length))
 const selectedButtonLabel = computed(() => {
   const target = selectedButtonId.value
-  if (!target || buttonScope.value !== 'specific' || buttonCustomizationRole(target) !== 'hero-play') return undefined
-  return resolveButtonLabel(props.appearance.button_customization, target, selectedButtonLabelFallback.value || 'Играть')
+  if (!target || buttonScope.value !== 'specific' || !selectedButtonLabelFallback.value) return undefined
+  return resolveButtonLabel(props.appearance.button_customization, target, selectedButtonLabelFallback.value)
 })
 
 function updateButtonSettings(patch: Partial<ButtonCustomization>) {
@@ -329,7 +330,7 @@ function updateButtonSettings(patch: Partial<ButtonCustomization>) {
 
 function updateButtonLabel(value: string) {
   const target = selectedButtonId.value
-  if (!target || buttonCustomizationRole(target) !== 'hero-play' || buttonScope.value !== 'specific') return
+  if (!target || buttonScope.value !== 'specific' || !selectedButtonLabelFallback.value) return
   pushHistory()
   const current = normalizeButtonCustomization(props.appearance.button_customization)
   const overrides = { ...current.overrides }
@@ -361,7 +362,7 @@ const statusHint = computed(() => {
 
 const themeLabel = computed(() => themeOptions.find((option) => option.value === props.appearance.theme)?.label || props.appearance.theme)
 const fontLabel = computed(() => fontFamilyOptions.find((option) => option.value === props.fontFamily)?.label || props.fontFamily)
-const radiusSummary = computed(() => `${props.appearance.radius_tokens.card}/${props.appearance.radius_tokens.button}/${props.appearance.radius_tokens.control}`)
+const radiusSummary = computed(() => `${props.appearance.radius_tokens.card}/${props.appearance.radius_tokens.button}/${props.appearance.radius_tokens.control}/${props.appearance.radius_tokens.sidebar ?? 0}`)
 
 function setAccentColor(value: string) {
   const normalized = value.trim().toLowerCase()
@@ -434,7 +435,7 @@ function resetRadiusTokens() {
   props.appearance.radius_tokens = { ...props.defaultRadiusTokens }
 }
 
-type StudioSnapshot = { accent: string; tokens: Record<string, string>; radius: Record<string, number>; buttons: ButtonCustomization }
+type StudioSnapshot = { accent: string; tokens: Record<string, string>; radius: Record<string, number>; sidebarTexture: string; buttons: ButtonCustomization }
 const undoStack = ref<StudioSnapshot[]>([])
 const redoStack = ref<StudioSnapshot[]>([])
 
@@ -443,6 +444,7 @@ function snapshotAppearance(): StudioSnapshot {
     accent: props.appearance.accent_color,
     tokens: { ...props.appearance.color_tokens },
     radius: { ...props.appearance.radius_tokens },
+    sidebarTexture: props.appearance.sidebar_texture_data,
     buttons: JSON.parse(JSON.stringify(normalizeButtonCustomization(props.appearance.button_customization))) as ButtonCustomization,
   }
 }
@@ -458,6 +460,7 @@ function restoreSnapshot(snapshot: StudioSnapshot) {
   props.appearance.accent_color = snapshot.accent
   props.appearance.color_tokens = { ...snapshot.tokens }
   props.appearance.radius_tokens = { ...snapshot.radius }
+  props.appearance.sidebar_texture_data = snapshot.sidebarTexture
   props.appearance.button_customization = normalizeButtonCustomization(snapshot.buttons)
 }
 
@@ -612,10 +615,11 @@ const previewWidthOptions: Array<{ id: PreviewWidth; label: string; hint: string
 ]
 const previewDesignWidth = computed(() => ({ compact: 560, standard: 860, wide: 1180 }[previewWidth.value]))
 
-const radiusKeys: Array<{ key: 'card' | 'button' | 'control'; label: string; hint: string }> = [
+const radiusKeys: Array<{ key: 'card' | 'button' | 'control' | 'sidebar'; label: string; hint: string }> = [
   { key: 'card', label: 'Панели и карточки', hint: 'Карточки, модальные окна, секции' },
   { key: 'button', label: 'Кнопки и навигация', hint: 'Кнопки, пункты меню, чипы действий' },
   { key: 'control', label: 'Поля ввода', hint: 'Поиск, поля, мелкие элементы' },
+  { key: 'sidebar', label: 'Сайдбар', hint: 'Только навигационная панель' },
 ]
 
 const sidebarWidthDisabled = computed(() =>
@@ -626,6 +630,34 @@ const sidebarWidthDisabled = computed(() =>
 
 function chooseWallpaper() {
   emit('importWallpaperFile')
+}
+
+const sidebarTextureError = ref('')
+const SIDEBAR_TEXTURE_LIMIT = 15 * 1024 * 1024
+
+async function chooseSidebarTexture() {
+  const file = await pickFile({ accept: '.png,.jpg,.jpeg,.webp', title: 'Текстура сайдбара' })
+  if (!file) return
+  if (file.size > SIDEBAR_TEXTURE_LIMIT) {
+    sidebarTextureError.value = 'Изображение должно быть не больше 15 МБ.'
+    return
+  }
+  const extension = file.fileName.split('.').pop()?.toLowerCase()
+  const mime = extension === 'png' ? 'image/png' : extension === 'jpg' || extension === 'jpeg' ? 'image/jpeg' : extension === 'webp' ? 'image/webp' : ''
+  const data = mime ? `data:${mime};base64,${file.data}` : ''
+  if (!safeDataUrl(data, 'image')) {
+    sidebarTextureError.value = 'Выберите PNG, JPEG или WebP не больше 15 МБ.'
+    return
+  }
+  pushHistory()
+  props.appearance.sidebar_texture_data = data
+  sidebarTextureError.value = ''
+}
+
+function clearSidebarTexture() {
+  pushHistory()
+  props.appearance.sidebar_texture_data = ''
+  sidebarTextureError.value = ''
 }
 
 const fontFamilyValue = computed({
@@ -768,6 +800,9 @@ const saveLabel = computed(() => {
               <h4>Поведение сайдбара</h4>
               <div class="field"><span>Положение</span><CustomSelect v-model="appearance.sidebar_position" :options="sidebarPositionOptions" /></div>
               <div class="field"><span>Режим содержимого</span><CustomSelect v-model="appearance.sidebar_mode" :options="sidebarModeOptions" /></div>
+              <div class="button-asset-row"><span><strong>Текстура фона</strong><small>{{ appearance.sidebar_texture_data ? 'Изображение выбрано' : 'Не выбрана' }}</small></span><button class="button button--small button--outline" type="button" @click="chooseSidebarTexture">{{ appearance.sidebar_texture_data ? 'Заменить' : 'Выбрать' }}</button><button v-if="appearance.sidebar_texture_data" class="icon-button" type="button" aria-label="Убрать текстуру сайдбара" @click="clearSidebarTexture"><Icon name="close" :size="14" /></button></div>
+              <p v-if="sidebarTextureError" class="studio-inspector-note studio-inspector-note--error" role="alert">{{ sidebarTextureError }}</p>
+              <small class="studio-inspector-note">PNG, JPEG или WebP · до 15 МБ</small>
               <label class="workspace-check"><input v-model="appearance.sidebar_floating" type="checkbox" /><span><strong>Плавающий режим</strong><small>Сайдбар не приклеен к краю окна</small></span></label>
               <button class="text-button" type="button" @click="selectRailSection('navigation')"><Icon name="monitor" :size="13" />Все настройки навигации</button>
             </div>
@@ -891,6 +926,13 @@ const saveLabel = computed(() => {
             <div class="studio-inspector-field"><div class="field"><span>Ширина</span><CustomSelect v-model="appearance.sidebar_width_mode" :options="sidebarWidthModeOptions" /></div></div>
             <div class="studio-inspector-field"><div class="field"><span>Видимость</span><CustomSelect v-model="appearance.sidebar_visibility" :options="sidebarVisibilityOptions" /></div></div>
             <label class="field" :class="{ 'field--disabled': sidebarWidthDisabled }"><span>Размер rail <strong>{{ sidebarWidthDisabled ? 'фиксированный' : `${appearance.sidebar_width} px` }}</strong></span><input v-model.number="appearance.sidebar_width" type="range" min="168" max="360" :disabled="sidebarWidthDisabled" /><small>{{ appearance.sidebar_position === 'top' || appearance.sidebar_position === 'bottom' ? 'Для верхней и нижней панели ширина задаётся окном.' : appearance.sidebar_width_mode === 'manual' ? 'Перетащите ползунок или растяните rail за край.' : 'Ползунок недоступен: выберите режим «Вручную», чтобы менять ширину.' }}</small></label>
+            <div class="studio-inspector-group">
+              <h4>Внешний вид сайдбара</h4>
+              <label class="field"><span>Закруглённость <strong>{{ appearance.radius_tokens.sidebar ?? 0 }} px</strong></span><input v-model.number="appearance.radius_tokens.sidebar" type="range" min="0" max="24" /></label>
+              <div class="button-asset-row"><span><strong>Текстура фона</strong><small>{{ appearance.sidebar_texture_data ? 'Изображение выбрано' : 'Не выбрана' }}</small></span><button class="button button--small button--outline" type="button" @click="chooseSidebarTexture">{{ appearance.sidebar_texture_data ? 'Заменить' : 'Выбрать' }}</button><button v-if="appearance.sidebar_texture_data" class="icon-button" type="button" aria-label="Убрать текстуру сайдбара" @click="clearSidebarTexture"><Icon name="close" :size="14" /></button></div>
+              <p v-if="sidebarTextureError" class="studio-inspector-note studio-inspector-note--error" role="alert">{{ sidebarTextureError }}</p>
+              <small class="studio-inspector-note">PNG, JPEG или WebP · до 15 МБ</small>
+            </div>
             <label class="workspace-check"><input v-model="appearance.sidebar_floating" type="checkbox" /><span><strong>Плавающий режим</strong><small>Сайдбар не приклеен к краю окна</small></span></label>
           </template>
 

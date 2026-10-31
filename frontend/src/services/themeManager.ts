@@ -12,6 +12,16 @@ function stableResourceHash(value: string): string {
   return hash.toString(16).padStart(16, '0')
 }
 
+function themeResourceUrl(theme: LauncherThemePreset, key: string, fallbackPath = ''): string {
+  const raw = theme.resource_data?.[key] || ''
+  if (!raw) return ''
+  if (raw.startsWith('data:')) return raw
+  const path = theme.resources?.[key] || fallbackPath
+  const extension = path.split('.').pop()?.toLowerCase() || ''
+  const mime = extension === 'png' ? 'image/png' : extension === 'jpg' || extension === 'jpeg' ? 'image/jpeg' : extension === 'webp' ? 'image/webp' : extension === 'ogg' ? 'audio/ogg' : extension === 'wav' ? 'audio/wav' : extension === 'webm' ? 'audio/webm' : extension === 'mp3' ? 'audio/mpeg' : ''
+  return mime ? `data:${mime};base64,${raw}` : ''
+}
+
 type ThemeManagerDependencies = {
   state: AppState
   appearanceDraft: AppearanceSettings
@@ -65,6 +75,8 @@ export function createThemeManager(deps: ThemeManagerDependencies) {
     appearanceDraft.theme = theme.mode
     appearanceDraft.accent_color = theme.accent
     appearanceDraft.sidebar_mode = theme.sidebar_mode
+    appearanceDraft.sidebar_texture_data = themeResourceUrl(theme, 'sidebar', theme.resources?.sidebar)
+    appearanceDraft.radius_tokens = { ...defaultRadiusTokens, ...(theme.radius_tokens || {}) }
     appearanceDraft.density = theme.density
     // дополняем цвета пресета базовой палитрой, чтобы не сохранять цвета старой темы
     const base = theme.mode === 'light' ? lightColorTokens : defaultColorTokens
@@ -80,13 +92,7 @@ export function createThemeManager(deps: ThemeManagerDependencies) {
     if (theme.button_customization) {
       const button = normalizeButtonCustomization(theme.button_customization)
       const resourceUrl = (key: string, fallbackPath = '') => {
-        const raw = theme.resource_data?.[key] || ''
-        if (!raw) return ''
-        if (raw.startsWith('data:')) return raw
-        const path = theme.resources?.[key] || fallbackPath
-        const extension = path.split('.').pop()?.toLowerCase() || ''
-        const mime = extension === 'png' ? 'image/png' : extension === 'jpg' || extension === 'jpeg' ? 'image/jpeg' : extension === 'webp' ? 'image/webp' : extension === 'ogg' ? 'audio/ogg' : extension === 'wav' ? 'audio/wav' : extension === 'webm' ? 'audio/webm' : extension === 'mp3' ? 'audio/mpeg' : ''
-        return mime ? `data:${mime};base64,${raw}` : ''
+        return themeResourceUrl(theme, key, fallbackPath)
       }
       for (const kind of ['texture', 'icon', 'sound'] as const) {
         const path = theme.resources?.[kind] || button[kind] || ''
@@ -148,6 +154,7 @@ export function createThemeManager(deps: ThemeManagerDependencies) {
     appearanceDraft.ui_scale = 100
     appearanceDraft.wallpaper_blur = 12
     appearanceDraft.wallpaper_opacity = 34
+    appearanceDraft.sidebar_texture_data = ''
     wallpaperRenderBlur.value = 12
     appearanceDraft.page_themes = { instances: 'inherit', 'instance-settings': 'inherit', accounts: 'inherit', mods: 'inherit', modpacks: 'inherit', plugins: 'inherit', themes: 'inherit', settings: 'inherit' }
     appearanceDraft.page_layouts = { instances: 'balanced', 'instance-settings': 'balanced', accounts: 'balanced', mods: 'wide', modpacks: 'wide', plugins: 'wide', themes: 'wide', settings: 'balanced' }
@@ -201,6 +208,7 @@ export function createThemeManager(deps: ThemeManagerDependencies) {
       resources[key] = `resources/${safePrefix}.${extension}`
       resourceData[key] = dataUrl.slice(separator + 1)
     }
+    registerResource('sidebar', appearanceDraft.sidebar_texture_data || '', 'sidebar')
     for (const key of ['texture', 'icon', 'sound'] as const) registerResource(key, button[`${key}_data`])
     for (const [target, override] of Object.entries(button.overrides)) {
       if (!override || !buttonCustomizationRole(target)) continue
@@ -244,6 +252,7 @@ export function createThemeManager(deps: ThemeManagerDependencies) {
       panel_soft: String(tokens.panel_soft || defaultColorTokens.panel_soft),
       density: appearanceDraft.density,
       sidebar_mode: appearanceDraft.sidebar_mode,
+      radius_tokens: { ...appearanceDraft.radius_tokens },
       locale: settingsDraft.language === 'en' ? 'en' as const : 'ru' as const,
       button_customization: {
         width: button.width,

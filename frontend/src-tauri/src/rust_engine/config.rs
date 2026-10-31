@@ -33,7 +33,7 @@ pub const DEFAULT_COLOR_TOKENS: &[(&str, &str)] = &[
 ];
 
 // скругления углов основных групп элементов интерфейса, в пикселях
-pub const DEFAULT_RADIUS_TOKENS: &[(&str, i64)] = &[("card", 7), ("button", 8), ("control", 10)];
+pub const DEFAULT_RADIUS_TOKENS: &[(&str, i64)] = &[("card", 7), ("button", 8), ("control", 10), ("sidebar", 0)];
 
 const PAGES: &[&str] = &[
     "instances",
@@ -180,6 +180,7 @@ pub fn default_settings_object() -> Value {
         "wallpaper_path": "",
         "wallpaper_blur": 12,
         "wallpaper_opacity": 34,
+        "sidebar_texture_data": "",
         "accent_color": "#8b653f",
         "sidebar_position": "left",
         "sidebar_mode": "adaptive",
@@ -195,6 +196,7 @@ pub fn default_settings_object() -> Value {
         "instance_layout": "default",
         "ui_scale": 100,
         "radius_tokens": radius,
+        "button_customization": {},
         "page_themes": page_themes,
         "page_layouts": page_layouts,
         "widget_visibility": { "instances.workspace": true, "accounts.status": true, "mods.context": true },
@@ -782,6 +784,7 @@ impl ConfigStore {
             "wallpaper_data": wallpaper_data_url(&self.paths.data_home, &str_field("wallpaper_path")),
             "wallpaper_blur": int_field("wallpaper_blur"),
             "wallpaper_opacity": int_field("wallpaper_opacity"),
+            "sidebar_texture_data": raw_field("sidebar_texture_data"),
             "accent_color": str_field("accent_color"),
             "sidebar_position": str_field("sidebar_position"),
             "sidebar_mode": str_field("sidebar_mode"),
@@ -797,6 +800,7 @@ impl ConfigStore {
             "instance_layout": str_field("instance_layout"),
             "ui_scale": int_field("ui_scale"),
             "radius_tokens": raw_field("radius_tokens"),
+            "button_customization": raw_field("button_customization"),
             "page_themes": raw_field("page_themes"),
             "page_layouts": raw_field("page_layouts"),
             "widget_visibility": raw_field("widget_visibility"),
@@ -864,17 +868,17 @@ pub fn save_settings(request: &Value) -> Result<Value, String> {
         "telemetry", "telemetry_endpoint", "keyboard_shortcuts", "graphics_mode",
         "launcher_profiles", "active_launcher_profile_id", "http_proxy", "download_source",
         "client_id", "developer_mode", "theme", "active_theme_id", "wallpaper_path",
-        "wallpaper_blur", "wallpaper_opacity", "accent_color", "sidebar_position", "sidebar_mode",
+        "wallpaper_blur", "wallpaper_opacity", "sidebar_texture_data", "accent_color", "sidebar_position", "sidebar_mode",
         "sidebar_width_mode", "sidebar_width", "sidebar_floating", "sidebar_visibility",
         "animations", "animation_settings", "overlay_settings", "backup_schedule", "density",
-        "instance_layout", "ui_scale", "radius_tokens", "page_themes", "page_layouts",
+        "instance_layout", "ui_scale", "radius_tokens", "button_customization", "page_themes", "page_layouts",
         "widget_visibility", "color_tokens", "instance_groups", "pinned_instance_groups",
         "resource_catalogs", "active_catalog_id", "plugin_catalogs", "active_plugin_catalog_id",
         "login_source", "login_api_url", "catalog_source", "catalog_api_url", "data_source",
         "data_api_url", "cloud_url", "cloud_username", "cloud_remote_path", "cloud_include_accounts",
     ];
     let structured: &[&str] = &[
-        "page_themes", "page_layouts", "widget_visibility", "color_tokens", "radius_tokens",
+        "page_themes", "page_layouts", "widget_visibility", "color_tokens", "radius_tokens", "button_customization",
         "instance_groups", "pinned_instance_groups", "resource_catalogs", "plugin_catalogs",
         "keyboard_shortcuts", "launcher_profiles", "animation_settings", "overlay_settings",
         "backup_schedule", "auto_repair_muted",
@@ -1021,9 +1025,9 @@ fn behavior_values(settings: &Value) -> Map<String, Value> {
 
 fn appearance_values(settings: &Value) -> Map<String, Value> {
     let keys = [
-        "theme", "active_theme_id", "wallpaper_path", "wallpaper_blur", "wallpaper_opacity", "accent_color",
+        "theme", "active_theme_id", "wallpaper_path", "wallpaper_blur", "wallpaper_opacity", "sidebar_texture_data", "accent_color",
         "sidebar_position", "sidebar_mode", "sidebar_width_mode", "sidebar_width", "sidebar_floating",
-        "sidebar_visibility", "animations", "animation_settings", "density", "instance_layout", "ui_scale", "radius_tokens",
+        "sidebar_visibility", "animations", "animation_settings", "density", "instance_layout", "ui_scale", "radius_tokens", "button_customization",
         "page_themes", "page_layouts", "widget_visibility", "color_tokens",
     ];
     keys.iter()
@@ -1158,6 +1162,7 @@ fn normalize_appearance(settings: &Value) -> Map<String, Value> {
     result.insert("wallpaper_path".into(), json!(settings["wallpaper_path"].as_str().unwrap_or("").chars().take(2048).collect::<String>()));
     result.insert("wallpaper_blur".into(), json!(bounded_int(&settings["wallpaper_blur"], 0, 32, 12)));
     result.insert("wallpaper_opacity".into(), json!(bounded_int(&settings["wallpaper_opacity"], 0, 80, 34)));
+    result.insert("sidebar_texture_data".into(), normalize_sidebar_texture_data(&settings["sidebar_texture_data"]));
     result.insert("accent_color".into(), json!(accent));
     result.insert("sidebar_position".into(), json!(member(settings["sidebar_position"].as_str().unwrap_or(""), &["left", "right", "top", "bottom"], "left")));
     result.insert("sidebar_mode".into(), json!(member(settings["sidebar_mode"].as_str().unwrap_or(""), &["expanded", "adaptive", "compact"], "adaptive")));
@@ -1171,6 +1176,7 @@ fn normalize_appearance(settings: &Value) -> Map<String, Value> {
     result.insert("instance_layout".into(), json!(if settings["instance_layout"].as_str().unwrap_or("").trim().eq_ignore_ascii_case("compact") { "compact" } else { "default" }));
     result.insert("ui_scale".into(), json!(bounded_int(&settings["ui_scale"], 80, 125, 100)));
     result.insert("radius_tokens".into(), normalize_radius_tokens(&settings["radius_tokens"]));
+    result.insert("button_customization".into(), settings.get("button_customization").filter(|value| value.is_object()).cloned().unwrap_or_else(|| json!({})));
     result.insert("page_themes".into(), page_themes(&valid_page_themes, "inherit"));
     result.insert("page_layouts".into(), page_themes(&valid_page_layouts, "balanced"));
     let raw_visibility = settings["widget_visibility"].as_object().cloned().unwrap_or_default();
@@ -1463,6 +1469,27 @@ pub fn normalize_radius_tokens(value: &Value) -> Value {
         result.insert(key.to_string(), json!(number.map(|value| value.clamp(0, 24)).unwrap_or(*fallback)));
     }
     Value::Object(result)
+}
+
+fn normalize_sidebar_texture_data(value: &Value) -> Value {
+    let Some(raw) = value.as_str() else { return json!(""); };
+    if raw.len() > 21_000_000 { return json!(""); }
+    let Some((header, encoded)) = raw.split_once(',') else { return json!(""); };
+    let mime = match header {
+        "data:image/png;base64" => "image/png",
+        "data:image/jpeg;base64" => "image/jpeg",
+        "data:image/webp;base64" => "image/webp",
+        _ => return json!(""),
+    };
+    let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(encoded) else { return json!(""); };
+    if bytes.is_empty() || bytes.len() > 15 * 1024 * 1024 { return json!(""); }
+    let valid = match mime {
+        "image/png" => bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
+        "image/jpeg" => bytes.starts_with(&[0xff, 0xd8, 0xff]),
+        "image/webp" => bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP",
+        _ => false,
+    };
+    if valid { json!(raw) } else { json!("") }
 }
 
 pub fn normalize_groups(value: &Value) -> Value {
@@ -1812,10 +1839,10 @@ pub fn set_value_on(settings: &mut Value, key: &str, value: &Value) -> Result<()
         settings["accent_color"] = settings["color_tokens"]["accent"].clone();
     }
     let appearance_keys = [
-        "theme", "wallpaper_path", "wallpaper_blur", "wallpaper_opacity", "accent_color",
+        "theme", "wallpaper_path", "wallpaper_blur", "wallpaper_opacity", "sidebar_texture_data", "accent_color",
         "sidebar_position", "sidebar_mode", "sidebar_width_mode", "sidebar_width", "sidebar_floating",
         "sidebar_visibility", "animations", "animation_settings", "density", "instance_layout", "ui_scale",
-        "radius_tokens", "page_themes", "page_layouts", "widget_visibility", "color_tokens",
+        "radius_tokens", "button_customization", "page_themes", "page_layouts", "widget_visibility", "color_tokens",
     ];
     if appearance_keys.contains(&key) {
         let normalized = normalize_appearance(settings);
@@ -1957,6 +1984,20 @@ mod tests {
             store.settings()["color_tokens"]["accent"],
             json!("#abcdef")
         );
+    }
+
+    #[test]
+    fn theme_studio_appearance_round_trips_sidebar_and_button_settings() {
+        let mut settings = default_settings_object();
+        let texture = "data:image/png;base64,iVBORw0KGgo=";
+        let buttons = json!({"overrides": {"card-button:import": {"label": "Загрузить"}}});
+        set_value_on(&mut settings, "sidebar_texture_data", &json!(texture)).unwrap();
+        set_value_on(&mut settings, "radius_tokens", &json!({"card": 4, "sidebar": 18})).unwrap();
+        set_value_on(&mut settings, "button_customization", &buttons).unwrap();
+        assert_eq!(settings["sidebar_texture_data"], json!(texture));
+        assert_eq!(settings["radius_tokens"]["sidebar"], json!(18));
+        assert_eq!(settings["button_customization"], buttons);
+        assert_eq!(normalize_sidebar_texture_data(&json!("data:image/png;base64,ZmFrZQ==")), json!(""));
     }
 
     #[test]

@@ -122,10 +122,18 @@ const activeTokens = computed<Record<string, string>>(() => {
 
 const token = (key: string) => activeTokens.value[key] || props.tokens[key] || '#ffffff'
 
-function buttonLabel(id: string, fallback: string): string {
+function defaultNavLabel(id: string, fallback: string): string {
   const custom = props.appearance.button_customization.labels[id as keyof typeof props.appearance.button_customization.labels]
   const english: Record<string, string> = { instances: 'Instances', accounts: 'Accounts', mods: 'Catalog', modpacks: 'Modpacks', themes: 'Themes' }
-  return truncateButtonLabel(custom || (props.language === 'en' ? english[id] || fallback : fallback))
+  return custom || (props.language === 'en' ? english[id] || fallback : fallback)
+}
+
+function buttonText(target: ButtonCustomizationTarget, fallback: string): string {
+  return truncateButtonLabel(resolveButtonLabel(props.appearance.button_customization, target, fallback))
+}
+
+function buttonLabel(id: string, fallback: string): string {
+  return buttonText(buttonCustomizationTarget('nav-item', id), defaultNavLabel(id, fallback))
 }
 
 const pageLayout = computed(() => props.appearance.page_layouts[activeNav.value as keyof typeof props.appearance.page_layouts] || 'balanced')
@@ -185,6 +193,7 @@ const radius = computed(() => ({
   card: `${props.appearance.radius_tokens.card}px`,
   button: `${props.appearance.radius_tokens.button}px`,
   control: `${props.appearance.radius_tokens.control}px`,
+  sidebar: `${props.appearance.radius_tokens.sidebar ?? 0}px`,
 }))
 
 const borderColor = (strength = 24) => `color-mix(in srgb, ${token('border')} ${strength}%, transparent)`
@@ -243,18 +252,26 @@ function buttonAttributes(target: ButtonCustomizationTarget) {
   }
 }
 
+function heroPlayFallback(kind: string) {
+  return kind === 'server' ? 'Запустить' : 'Играть'
+}
+
 function heroPlayLabel(target: ButtonCustomizationTarget, kind: string) {
-  return truncateButtonLabel(resolveButtonLabel(props.appearance.button_customization, target, kind === 'server' ? 'Запустить' : 'Играть'))
+  return buttonText(target, heroPlayFallback(kind))
 }
 
 const sidebarStyle = computed(() => {
   const base: Record<string, string> = {
     background: `color-mix(in srgb, ${panelColor('panel', 72)} 92%, ${token('background')})`,
+    backgroundImage: props.appearance.sidebar_texture_data ? `url("${props.appearance.sidebar_texture_data}")` : 'none',
+    backgroundSize: 'cover',
+    backgroundPosition: 'center',
+    backgroundRepeat: 'no-repeat',
     border: `1px solid ${borderColor(24)}`,
+    borderRadius: radius.value.sidebar,
   }
   if (sidebarWidthCss.value) base.width = sidebarWidthCss.value
   if (props.appearance.sidebar_floating) {
-    base.borderRadius = radius.value.card
     if (props.appearance.sidebar_position === 'bottom') base.margin = '0 10px 10px'
     else if (horizontalSidebar.value) base.margin = '10px 10px 0'
     else base.margin = '10px'
@@ -291,7 +308,7 @@ function pickNav(id: string) {
   const target = buttonCustomizationTarget('nav-item', id)
   const alreadySelected = props.selected === target
   activeNav.value = id
-  emit('select', alreadySelected ? '' : target, item ? buttonLabel(id, item.label) : undefined)
+  emit('select', alreadySelected ? '' : target, item ? defaultNavLabel(id, item.label) : undefined)
 }
 
 function pickBackground() {
@@ -401,7 +418,7 @@ function replay() {
                   @click.stop="pick(buttonCustomizationTarget('card-button', 'header-import'), 'Импорт')"
                   @pointerenter="hover(buttonCustomizationTarget('card-button', 'header-import'))"
                   @pointerleave="hover(null)"
-                ><Icon name="upload" :size="11" />Импорт</span>
+                ><Icon name="upload" :size="11" />{{ buttonText(buttonCustomizationTarget('card-button', 'header-import'), 'Импорт') }}</span>
                 <span
                   class="studio-preview-button studio-preview-button--accent"
                   :class="targetClass(buttonCustomizationTarget('topbar-button', 'header-action'))"
@@ -410,7 +427,7 @@ function replay() {
                   @click.stop="pick(buttonCustomizationTarget('topbar-button', 'header-action'), header.action)"
                   @pointerenter="hover(buttonCustomizationTarget('topbar-button', 'header-action'))"
                   @pointerleave="hover(null)"
-                ><Icon name="plus" :size="11" />{{ header.action }}</span>
+                ><Icon name="plus" :size="11" />{{ buttonText(buttonCustomizationTarget('topbar-button', 'header-action'), header.action) }}</span>
               </div>
             </header>
 
@@ -472,7 +489,7 @@ function replay() {
                       :class="targetClass(row.playTarget)"
                       v-bind="buttonAttributes(row.playTarget)"
                       :style="[buttonStyle(row.playTarget), { borderRadius: radius.button, background: token('accent'), color: accentForeground(token('accent')) }]"
-                      @click.stop="pick(row.playTarget, heroPlayLabel(row.playTarget, row.kind))"
+                      @click.stop="pick(row.playTarget, heroPlayFallback(row.kind))"
                       @pointerenter="hover(row.playTarget)"
                       @pointerleave="hover(null)"
                     ><Icon name="play" :size="11" />{{ heroPlayLabel(row.playTarget, row.kind) }}</span>
@@ -530,7 +547,7 @@ function replay() {
                     @click.stop="pick(buttonCustomizationTarget('card-button', `mod-${entry.title}-install`), 'Установить')"
                     @pointerenter="hover(buttonCustomizationTarget('card-button', `mod-${entry.title}-install`))"
                     @pointerleave="hover(null)"
-                  ><Icon name="download" :size="11" />Установить</span>
+                  ><Icon name="download" :size="11" />{{ buttonText(buttonCustomizationTarget('card-button', `mod-${entry.title}-install`), 'Установить') }}</span>
                 </article>
               </div>
             </template>
@@ -557,7 +574,7 @@ function replay() {
                     @click.stop="pick(buttonCustomizationTarget('card-button', `modpack-${pack.title}-install`), 'Установить')"
                     @pointerenter="hover(buttonCustomizationTarget('card-button', `modpack-${pack.title}-install`))"
                     @pointerleave="hover(null)"
-                  ><Icon name="download" :size="11" />Установить</span>
+                  ><Icon name="download" :size="11" />{{ buttonText(buttonCustomizationTarget('card-button', `modpack-${pack.title}-install`), 'Установить') }}</span>
                 </article>
               </div>
             </template>
@@ -608,7 +625,7 @@ function replay() {
 .studio-preview-caption { display: flex; align-items: center; gap: 8px; padding: 0 2px 8px; color: var(--muted); font-size: 11px; }
 .studio-preview-caption strong { color: var(--text); font-size: 11.5px; letter-spacing: .02em; }
 .studio-preview-caption small { margin-left: auto; font-size: 10px; opacity: .85; }
-.studio-preview-frame { position: relative; width: 100%; min-width: 0; box-sizing: border-box; container-type: inline-size; overflow: hidden; border: 1px solid var(--line-strong); border-radius: max(calc(var(--radius-card, 7px) * 2), 12px); aspect-ratio: 16 / 11; background: var(--panel-soft); }
+.studio-preview-frame { position: relative; width: 100%; min-width: 0; box-sizing: border-box; container-type: inline-size; overflow: hidden; border: 0; border-radius: 0; aspect-ratio: 16 / 11; background: transparent; }
 .studio-preview-chrome { position: absolute; inset: 0 0 auto 0; z-index: 5; display: flex; align-items: center; gap: 6px; height: 22px; padding: 0 10px; border-bottom: 1px solid color-mix(in srgb, var(--line) 80%, transparent); background: color-mix(in srgb, var(--panel) 92%, transparent); font-size: 9px; font-weight: 600; letter-spacing: .06em; color: var(--muted); text-transform: uppercase; pointer-events: none; }
 .studio-preview-chrome i { width: 7px; height: 7px; border-radius: 50%; background: color-mix(in srgb, var(--muted) 45%, transparent); }
 .studio-preview-chrome span { margin-left: 4px; }

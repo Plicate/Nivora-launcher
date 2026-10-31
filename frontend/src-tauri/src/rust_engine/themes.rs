@@ -11,14 +11,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::state::launcher_roots;
 
-const MAX_ARCHIVE_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_ARCHIVE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_JSON_BYTES: u64 = 128 * 1024;
 const MAX_METADATA_BYTES: u64 = 16 * 1024;
-const MAX_UNPACKED_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_UNPACKED_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_ARCHIVE_FILES: usize = 128;
-const MAX_RESOURCE_BYTES: usize = 4 * 1024 * 1024;
-const MAX_BUTTON_IMAGE_BYTES: usize = 512 * 1024;
-const MAX_BUTTON_SOUND_BYTES: usize = 1024 * 1024;
+const MAX_RESOURCE_BYTES: usize = 15 * 1024 * 1024;
+const MAX_BUTTON_IMAGE_BYTES: usize = 15 * 1024 * 1024;
+const MAX_BUTTON_SOUND_BYTES: usize = 15 * 1024 * 1024;
 const MAX_FUNCTION_BYTES: usize = 256 * 1024;
 const MAX_FUNCTION_TOTAL_BYTES: usize = 2 * 1024 * 1024;
 const MAX_ASSET_FILES: usize = 64;
@@ -40,7 +40,7 @@ const DOCUMENT_KEYS: [&str; 13] = [
     "density",
     "sidebar_mode",
 ];
-const OPTIONAL_DOCUMENT_KEYS: [&str; 4] = ["locale", "button_customization", "resources", "plugin"];
+const OPTIONAL_DOCUMENT_KEYS: [&str; 5] = ["locale", "button_customization", "resources", "plugin", "radius_tokens"];
 const BUTTON_TARGET_IDS: [&str; 4] = ["topbar-button", "card-button", "hero-play", "nav-item"];
 const MAX_THEME_RESOURCES: usize = 64;
 const LABEL_KEYS: [&str; 6] = ["instances", "accounts", "mods", "modpacks", "themes", "settings"];
@@ -115,7 +115,7 @@ fn valid_button_target(target: &str) -> bool {
 }
 
 fn valid_resource_key(key: &str) -> bool {
-    if ["texture", "icon", "sound"].contains(&key) {
+    if ["texture", "icon", "sound", "sidebar"].contains(&key) {
         return true;
     }
     ["texture", "icon", "sound"].iter().any(|kind| {
@@ -271,7 +271,7 @@ fn validate_plugin(value: &Value) -> Result<(Value, Vec<String>), String> {
 }
 
 fn resource_kind(key: &str) -> Option<&'static str> {
-    if key == "texture" || key.ends_with("-texture") { Some("texture") }
+    if key == "texture" || key.ends_with("-texture") || key == "sidebar" { Some("texture") }
     else if key == "icon" || key.ends_with("-icon") { Some("icon") }
     else if key == "sound" || key.ends_with("-sound") { Some("sound") }
     else { None }
@@ -347,7 +347,7 @@ pub fn normalize_theme(value: &Value, metadata: &Value, source: &str, source_url
         return Err(err("Эта версия схемы темы не поддерживается"));
     }
     if schema_version == 2 {
-        reject_unknown_fields(theme_object, &["schema_version", "id", "name", "author", "description", "mode", "accent", "accent_strong", "background", "panel", "panel_soft", "density", "sidebar_mode", "locale", "button_customization", "resources", "plugin", "featured", "resource_data", "version", "creators", "source", "source_url"], "theme.json")?;
+        reject_unknown_fields(theme_object, &["schema_version", "id", "name", "author", "description", "mode", "accent", "accent_strong", "background", "panel", "panel_soft", "density", "sidebar_mode", "locale", "button_customization", "resources", "plugin", "featured", "resource_data", "radius_tokens", "version", "creators", "source", "source_url"], "theme.json")?;
     }
 
     let theme_id = text_field(theme_object.get("id"), "id", 48)?.to_lowercase();
@@ -418,6 +418,11 @@ pub fn normalize_theme(value: &Value, metadata: &Value, source: &str, source_url
     }
     result.insert("density".into(), json!(density));
     result.insert("sidebar_mode".into(), json!(sidebar_mode));
+    if let Some(value) = theme_object.get("radius_tokens") {
+        let radius = value.as_object().ok_or_else(|| err("radius_tokens должен быть объектом"))?;
+        reject_unknown_fields(radius, &["card", "button", "control", "sidebar"], "radius_tokens")?;
+        result.insert("radius_tokens".into(), super::config::normalize_radius_tokens(value));
+    }
     result.insert("featured".into(), json!(theme_object.get("featured") == Some(&Value::Bool(true))));
     if let Some(locale) = theme_object.get("locale") {
         let locale = locale.as_str().unwrap_or_default();
