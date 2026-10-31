@@ -17,6 +17,12 @@ jobs:
         with:
           toolchain: "1.99.0"
           build-warnings: allow
+      - name: Install Tauri Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential curl file \
+            libayatana-appindicator3-dev libssl-dev \
+            libwebkit2gtk-4.1-dev librsvg2-dev libxdo-dev
       - name: Run Tauri Rust tests
         working-directory: frontend/src-tauri
         run: cargo test --locked
