@@ -1275,6 +1275,11 @@ body[data-launcher-animations='off'] *, body[data-launcher-animations='off'] *::
 .studio-inspector-group { display: grid; gap: 10px; padding: 12px 13px; border: 1px solid var(--line); border-radius: var(--radius-card, 7px); background: var(--panel-raised); }
 .studio-inspector-group > h4 { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 0; color: var(--text); font-size: 11px; letter-spacing: -.01em; }
 .studio-inspector-note { margin: 0; color: var(--muted); font-size: 10px; line-height: 1.6; }
+.button-asset-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 7px; align-items: center; min-width: 0; }
+.button-asset-row > span { display: grid; min-width: 0; gap: 3px; }
+.button-asset-row strong { font-size: 10px; }
+.button-asset-row small { overflow: hidden; color: var(--muted); font-size: 8.5px; text-overflow: ellipsis; white-space: nowrap; }
+.button-crop-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
 .studio-inspector-toolbar { display: grid; gap: 8px; }
 .studio-token-row { display: grid; gap: 9px; padding: 11px 12px; border: 1px solid var(--line); border-radius: var(--radius-card, 7px); background: var(--panel-raised); }
 .studio-token-meta { display: flex; align-items: center; gap: 10px; }

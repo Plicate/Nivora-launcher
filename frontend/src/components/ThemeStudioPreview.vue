@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import Icon from './Icon.vue'
+import { buttonFontStack, cropBackgroundPosition, cropBackgroundSize, truncateButtonLabel } from '../services/buttonCustomization'
 import type { AppearanceSettings } from '../types'
 import { LAUNCHER_VERSION_LABEL } from '../version'
 
@@ -11,11 +12,12 @@ const props = withDefaults(defineProps<{
   lightTokens?: Record<string, string>
   theme: string
   fontFamily: string
+  language?: string
   wallpaperUrl: string
   interactive?: boolean
   selected?: string
   hovered?: string
-}>(), { interactive: false, selected: '', hovered: '', defaultTokens: undefined, lightTokens: undefined })
+}>(), { interactive: false, language: 'ru', selected: '', hovered: '', defaultTokens: undefined, lightTokens: undefined })
 
 const emit = defineEmits<{
   select: [target: string]
@@ -30,13 +32,21 @@ const navItems = [
   { id: 'modpacks', label: 'Модпаки', icon: 'archive' },
   { id: 'themes', label: 'Студия тем', icon: 'palette' },
 ] as const
-
-const pageHeaders: Record<string, { eyebrow: string; title: string; action: string }> = {
-  instances: { eyebrow: 'Библиотека', title: 'Экземпляры', action: 'Новый экземпляр' },
-  accounts: { eyebrow: 'Аккаунты', title: 'Аккаунты Minecraft', action: 'Добавить' },
-  mods: { eyebrow: 'Каталог ресурсов', title: 'Моды и ресурсы', action: 'Обновить' },
-  modpacks: { eyebrow: 'Модпаки', title: 'Готовые сборки', action: 'Импорт' },
-  themes: { eyebrow: 'Студия оформления', title: 'Центр настройки тем', action: 'Сохранить' },
+const pageHeaders: Record<'ru' | 'en', Record<string, { eyebrow: string; title: string; action: string }>> = {
+  ru: {
+    instances: { eyebrow: 'Библиотека', title: 'Экземпляры', action: 'Новый экземпляр' },
+    accounts: { eyebrow: 'Аккаунты', title: 'Аккаунты Minecraft', action: 'Добавить' },
+    mods: { eyebrow: 'Каталог ресурсов', title: 'Моды и ресурсы', action: 'Обновить' },
+    modpacks: { eyebrow: 'Модпаки', title: 'Готовые сборки', action: 'Импорт' },
+    themes: { eyebrow: 'Студия оформления', title: 'Центр настройки тем', action: 'Сохранить' },
+  },
+  en: {
+    instances: { eyebrow: 'Library', title: 'Instances', action: 'New instance' },
+    accounts: { eyebrow: 'Accounts', title: 'Minecraft accounts', action: 'Add account' },
+    mods: { eyebrow: 'Resource catalog', title: 'Mods and resources', action: 'Refresh' },
+    modpacks: { eyebrow: 'Modpacks', title: 'Ready-to-play packs', action: 'Import' },
+    themes: { eyebrow: 'Appearance studio', title: 'Theme editor', action: 'Save' },
+  },
 }
 
 const tabs = [
@@ -44,7 +54,6 @@ const tabs = [
   { id: 'survival', label: 'Survival' },
   { id: 'servers', label: 'Серверы' },
 ] as const
-
 const clientRows = [
   { title: 'Survival', meta: 'Fabric · 1.20.1 · 12 ч 42 мин' },
   { title: 'Creative+', meta: 'Quilt · 1.20.4 · 3 ч 05 мин' },
@@ -70,7 +79,7 @@ const activeNav = ref('instances')
 const activeTab = ref<'all' | 'survival' | 'servers'>('all')
 const replayKey = ref(0)
 
-const header = computed(() => pageHeaders[activeNav.value] || pageHeaders.instances)
+const header = computed(() => pageHeaders[props.language === 'en' ? 'en' : 'ru'][activeNav.value] || pageHeaders[props.language === 'en' ? 'en' : 'ru'].instances)
 
 const visibleRows = computed(() => {
   if (activeTab.value === 'servers') return [serverRow]
@@ -97,6 +106,12 @@ const activeTokens = computed<Record<string, string>>(() => {
 })
 
 const token = (key: string) => activeTokens.value[key] || props.tokens[key] || '#ffffff'
+
+function buttonLabel(id: string, fallback: string): string {
+  const custom = props.appearance.button_customization.labels[id as keyof typeof props.appearance.button_customization.labels]
+  const english: Record<string, string> = { instances: 'Instances', accounts: 'Accounts', mods: 'Catalog', modpacks: 'Modpacks', themes: 'Themes' }
+  return truncateButtonLabel(custom || (props.language === 'en' ? english[id] || fallback : fallback))
+}
 
 const pageLayout = computed(() => props.appearance.page_layouts[activeNav.value as keyof typeof props.appearance.page_layouts] || 'balanced')
 
@@ -186,6 +201,23 @@ const rootStyle = computed(() => ({
   '--preview-row-pad': `${Math.round(9 * density.value)}px ${Math.round(11 * density.value)}px`,
   '--preview-page-pad': pageLayout.value === 'compact' ? '8px 10px' : pageLayout.value === 'wide' ? '18px 22px' : '12px 14px',
   '--preview-scale': String(Math.max(0.8, Math.min(1.25, props.appearance.ui_scale / 100))),
+  '--studio-button-width': `${Math.max(120, Math.min(280, props.appearance.button_customization.width))}px`,
+  '--studio-button-height': `${Math.max(28, Math.min(64, props.appearance.button_customization.height))}px`,
+  '--studio-button-font': buttonFontStack(props.appearance.button_customization.font_family),
+  '--studio-button-font-size': `${Math.max(9, Math.min(20, props.appearance.button_customization.font_size))}px`,
+  '--studio-button-outline': props.appearance.button_customization.outline.enabled
+    ? `${Math.max(0, Math.min(3, props.appearance.button_customization.outline.width))}px ${props.appearance.button_customization.outline.color}`
+    : '0 transparent',
+  '--studio-button-texture': props.appearance.button_customization.texture_data
+    ? `url("${props.appearance.button_customization.texture_data}")`
+    : 'none',
+  '--studio-button-texture-size': cropBackgroundSize(props.appearance.button_customization.crop_enabled ? props.appearance.button_customization.crop : { x: 0, y: 0, width: 100, height: 100 }, props.appearance.button_customization.texture_fit),
+  '--studio-button-texture-position': props.appearance.button_customization.crop_enabled
+    ? cropBackgroundPosition(props.appearance.button_customization.crop)
+    : '50% 50%',
+  '--studio-button-icon': props.appearance.button_customization.icon_data
+    ? `url("${props.appearance.button_customization.icon_data}")`
+    : 'none',
 }))
 
 const sidebarStyle = computed(() => {
@@ -249,7 +281,7 @@ function replay() {
 </script>
 
 <template>
-  <div class="studio-preview" :style="rootStyle">
+  <div class="studio-preview" :style="rootStyle" :data-button-icon="String(Boolean(appearance.button_customization.icon_data))" :data-button-fill="String(appearance.button_customization.fill)" :data-button-border="String(appearance.button_customization.border)">
     <div class="studio-preview-caption">
       <Icon name="eye" :size="13" :stroke-width="1.8" />
       <strong>Предпросмотр оформления</strong>
@@ -294,14 +326,14 @@ function replay() {
             type="button"
             class="studio-preview-nav"
             :class="[targetClass('nav-item'), { 'studio-preview-nav--active': activeNav === item.id }]"
-            v-tooltip="item.label"
+            v-tooltip="appearance.button_customization.labels[item.id] || item.label"
             :style="{ borderRadius: radius.button }"
             @click.stop="pickNav(item.id)"
             @pointerenter="hover('nav-item')"
             @pointerleave="hover(null)"
           >
             <Icon :name="item.icon" :size="13" :stroke-width="1.7" />
-            <span v-if="!compactSidebar">{{ item.label }}</span>
+            <span v-if="!compactSidebar">{{ buttonLabel(item.id, item.label) }}</span>
           </button>
           <div class="studio-preview-spacer" />
           <div
@@ -553,7 +585,8 @@ function replay() {
 .studio-preview-brand-copy { display: grid; line-height: 1.15; }
 .studio-preview-brand-copy strong { font-size: 12px; letter-spacing: -.02em; color: var(--preview-text); }
 .studio-preview-brand-copy small { font-size: 9px; color: var(--preview-muted); }
-.studio-preview-nav { display: flex; align-items: center; gap: 8px; width: 100%; padding: 6px 8px; border: 0; color: var(--preview-quiet); background: transparent; font: inherit; font-size: 10.5px; text-align: left; cursor: pointer; }
+.studio-preview-nav { display: flex; min-width: 0; align-items: center; gap: 8px; width: 100%; padding: 6px 8px; border: 0; color: var(--preview-quiet); background: transparent; font: inherit; font-size: 10.5px; text-align: left; cursor: pointer; }
+.studio-preview-nav > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .studio-preview-nav:hover { color: var(--preview-text); background: color-mix(in srgb, var(--preview-text) 7%, transparent); }
 .studio-preview-nav--active { color: var(--preview-text); background: color-mix(in srgb, var(--preview-text) 9%, transparent); }
 .studio-preview-sidebar--compact .studio-preview-nav { justify-content: center; padding: 7px 0; }
@@ -585,9 +618,13 @@ function replay() {
 .studio-preview-row-copy strong { overflow: hidden; font-size: 11px; letter-spacing: -.01em; color: var(--preview-text); text-overflow: ellipsis; white-space: nowrap; }
 .studio-preview-row-copy small { overflow: hidden; color: var(--preview-muted); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
 .studio-preview-row-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 5px; }
-.studio-preview-button { display: inline-flex; align-items: center; gap: 4px; padding: 5px 9px; font-size: 9.5px; font-weight: 600; }
+.studio-preview-button { display: inline-flex; box-sizing: border-box; width: min(var(--studio-button-width), 100%); min-height: var(--studio-button-height); align-items: center; gap: 6px; overflow: hidden; padding: 5px 10px; border: 1px solid color-mix(in srgb, var(--preview-border) 75%, transparent); color: var(--preview-text); background-color: var(--preview-panel-soft); background-image: var(--studio-button-texture, none) !important; background-position: var(--studio-button-texture-position, 50% 50%) !important; background-size: var(--studio-button-texture-size, cover) !important; background-repeat: no-repeat !important; font-family: var(--studio-button-font, inherit); font-size: var(--studio-button-font-size, 12px); font-weight: 600; -webkit-text-stroke: var(--studio-button-outline, 0 transparent); }
 .studio-preview-button--accent { color: var(--preview-accent-foreground, #fff); }
-.studio-preview-button--quiet { border: 1px solid var(--preview-border); color: var(--preview-quiet); background: color-mix(in srgb, var(--preview-text) 4%, transparent); }
+.studio-preview-button--quiet { border: 1px solid var(--preview-border); color: var(--preview-quiet); background-color: color-mix(in srgb, var(--preview-text) 4%, transparent); }
+.studio-preview[data-button-fill="false"] .studio-preview-button { background-color: transparent !important; }
+.studio-preview[data-button-border="false"] .studio-preview-button { border-color: transparent !important; }
+.studio-preview[data-button-icon="true"] .studio-preview-button > svg { display: none; }
+.studio-preview[data-button-icon="true"] .studio-preview-button::before { content: ''; display: block; width: 16px; height: 16px; flex: 0 0 16px; background: var(--studio-button-icon) center / contain no-repeat; }
 .studio-preview-badge { padding: 3px 8px; border: 1px solid var(--preview-border); color: var(--preview-muted); font-size: 8.5px; }
 .studio-preview-search { display: flex; align-items: center; gap: 7px; padding: 6px 10px; border: 1px solid var(--preview-border); color: var(--preview-muted); font-size: 9.5px; background: color-mix(in srgb, var(--preview-panel-raised) 70%, transparent); }
 .studio-preview-cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); min-height: 0; flex: 1; align-content: start; gap: 8px; overflow: hidden; }

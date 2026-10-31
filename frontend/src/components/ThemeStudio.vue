@@ -5,6 +5,7 @@ import CustomSelect from './CustomSelect.vue'
 import Icon from './Icon.vue'
 import NumericStepper from './NumericStepper.vue'
 import ThemeStudioPreview from './ThemeStudioPreview.vue'
+import { normalizeButtonCustomization, safeDataUrl, type ButtonLabelKey } from '../services/buttonCustomization'
 import type { AppearanceSettings, SelectOption, ViewName } from '../types'
 
 const props = defineProps<{
@@ -13,6 +14,8 @@ const props = defineProps<{
   theme: string
   baseTheme?: string
   fontFamily: string
+  language: string
+  languageOptions: SelectOption[]
   pages: Array<{ id: ViewName; title: string; kicker: string }>
   wallpaperUrl: string
   defaultColorTokens: Record<string, string>
@@ -25,6 +28,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   'update:fontFamily': [value: string]
+  'update:language': [value: string]
   save: []
   resetAppearance: []
   importWallpaperFile: [] | [void]
@@ -32,6 +36,77 @@ const emit = defineEmits<{
   commitWallpaperBlur: []
   openPage: [view: ViewName]
 }>()
+
+const buttonTextureInput = ref<HTMLInputElement>()
+const buttonIconInput = ref<HTMLInputElement>()
+const buttonSoundInput = ref<HTMLInputElement>()
+const buttonAssetError = ref('')
+const labelOptions: Array<{ key: ButtonLabelKey; label: string }> = [
+  { key: 'instances', label: 'Экземпляры' },
+  { key: 'accounts', label: 'Аккаунты' },
+  { key: 'mods', label: 'Каталог' },
+  { key: 'modpacks', label: 'Модпаки' },
+  { key: 'themes', label: 'Темы' },
+  { key: 'settings', label: 'Настройки' },
+]
+const textureFitOptions: SelectOption[] = [
+  { value: 'cover', label: 'Заполнить кнопку', meta: 'Увеличить маленькую, автоматически кадрировать большую' },
+  { value: 'contain', label: 'Показать целиком', meta: 'Сохранить всю картинку внутри кнопки' },
+]
+
+function chooseButtonAsset(kind: 'texture' | 'icon' | 'sound') {
+  const input = kind === 'texture' ? buttonTextureInput.value : kind === 'icon' ? buttonIconInput.value : buttonSoundInput.value
+  input?.click()
+}
+
+async function loadButtonAsset(event: Event, kind: 'texture' | 'icon' | 'sound') {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ''
+  if (!file) return
+  const imageTypes = new Set(['image/png', 'image/jpeg', 'image/webp'])
+  const audioTypes = new Set(['audio/mpeg', 'audio/ogg', 'audio/wav', 'audio/webm'])
+  const accepted = kind === 'sound' ? audioTypes : imageTypes
+  const limit = kind === 'sound' ? 1_048_576 : 524_288
+  if (!accepted.has(file.type) || file.size > limit) {
+    buttonAssetError.value = kind === 'sound' ? 'Выберите WAV, OGG, MP3 или WebM до 1 MiB.' : 'Выберите PNG, JPEG или WebP до 512 KiB.'
+    return
+  }
+  const data = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => typeof reader.result === 'string' ? resolve(reader.result) : reject(new Error('Не удалось прочитать файл'))
+    reader.onerror = () => reject(new Error('Не удалось прочитать файл'))
+    reader.readAsDataURL(file)
+  }).catch(() => '')
+  const safe = safeDataUrl(data, kind === 'sound' ? 'audio' : 'image')
+  if (!safe) {
+    buttonAssetError.value = 'Файл не прошёл проверку формата.'
+    return
+  }
+  const extension = file.type === 'image/jpeg' ? 'jpg' : file.type.split('/')[1].replace('mpeg', 'mp3')
+  const settings = normalizeButtonCustomization(props.appearance.button_customization)
+  if (kind === 'texture') {
+    settings.texture = `resources/button-texture.${extension}`
+    settings.texture_data = safe
+  } else if (kind === 'icon') {
+    settings.icon = `resources/button-icon.${extension}`
+    settings.icon_data = safe
+  } else {
+    settings.sound = `resources/button-click.${extension}`
+    settings.sound_data = safe
+  }
+  props.appearance.button_customization = settings
+  buttonAssetError.value = ''
+}
+
+function clearButtonAsset(kind: 'texture' | 'icon' | 'sound') {
+  const settings = normalizeButtonCustomization(props.appearance.button_customization)
+  if (kind === 'texture') { settings.texture = ''; settings.texture_data = '' }
+  else if (kind === 'icon') { settings.icon = ''; settings.icon_data = '' }
+  else { settings.sound = ''; settings.sound_data = '' }
+  props.appearance.button_customization = settings
+  buttonAssetError.value = ''
+}
 
 const themeOptions: SelectOption[] = [
   { value: 'system', label: 'Как в системе', meta: 'Автоматически' },
@@ -125,9 +200,10 @@ const radiusPresets: Array<{ label: string; hint: string; value: Record<string, 
   { label: 'Мягкие', hint: 'Максимально плавные формы', value: { card: 18, button: 20, control: 22 } },
 ]
 
-type RailSection = 'general' | 'colors' | 'shape' | 'wallpaper' | 'navigation' | 'motion' | 'pages'
+type RailSection = 'general' | 'buttons' | 'colors' | 'shape' | 'wallpaper' | 'navigation' | 'motion' | 'pages'
 const railSections: Array<{ id: RailSection; label: string; icon: string; hint: string }> = [
   { id: 'general', label: 'Тема', icon: 'palette', hint: 'Режим, акцент, шрифт, масштаб' },
+  { id: 'buttons', label: 'Кнопки', icon: 'settings', hint: 'Размер, текст, иконка, текстура и звук' },
   { id: 'colors', label: 'Цвета', icon: 'mods', hint: 'Вся палитра лаунчера' },
   { id: 'shape', label: 'Формы', icon: 'instances', hint: 'Закруглённости и плотность' },
   { id: 'wallpaper', label: 'Обои', icon: 'image', hint: 'Картинка, размытие, видимость' },
@@ -602,6 +678,7 @@ const saveLabel = computed(() => {
             :default-tokens="defaultColorTokens"
             :light-tokens="lightTokens"
             :font-family="fontFamily"
+            :language="language"
             :wallpaper-url="wallpaperUrl"
             :selected="selectedTarget"
             :hovered="hoveredTarget"
@@ -670,6 +747,8 @@ const saveLabel = computed(() => {
           <template v-else-if="activeSection === 'general'">
             <div class="studio-inspector-field"><div class="field"><span>Основная тема</span><CustomSelect v-model="appearance.theme" :options="themeOptions" /></div></div>
             <div class="studio-inspector-field"><div class="field"><span>Шрифт интерфейса</span><CustomSelect v-model="fontFamilyValue" :options="fontFamilyOptions" /></div></div>
+            <div class="studio-inspector-field"><div class="field"><span>Язык интерфейса</span><CustomSelect :model-value="language" :options="languageOptions" @update:model-value="emit('update:language', $event)" /></div></div>
+            <p class="studio-inspector-note">При применении темы её язык выбирается автоматически. Здесь можно переключить язык отдельно от темы.</p>
             <div class="studio-inspector-group">
               <h4>Акцент</h4>
               <div class="studio-token-row">
@@ -689,6 +768,50 @@ const saveLabel = computed(() => {
             <div class="studio-inspector-field"><div class="field"><span>Плотность</span><CustomSelect v-model="appearance.density" :options="densityOptions" /></div></div>
             <div class="studio-inspector-field"><div class="field"><span>Экземпляры</span><CustomSelect v-model="appearance.instance_layout" :options="instanceLayoutOptions" /></div></div>
             <label class="field"><span>Масштаб интерфейса <strong>{{ appearance.ui_scale }}%</strong></span><input v-model.number="appearance.ui_scale" type="range" min="80" max="125" step="5" /></label>
+          </template>
+
+          <template v-else-if="activeSection === 'buttons'">
+            <div class="studio-inspector-group">
+              <h4>Размер и оформление</h4>
+              <label class="field"><span>Ширина <strong>{{ appearance.button_customization.width }} px</strong></span><input v-model.number="appearance.button_customization.width" type="range" min="120" max="280" step="4" /></label>
+              <label class="field"><span>Высота <strong>{{ appearance.button_customization.height }} px</strong></span><input v-model.number="appearance.button_customization.height" type="range" min="28" max="64" step="2" /></label>
+              <label class="workspace-check"><input v-model="appearance.button_customization.fill" type="checkbox" /><span><strong>Заливка</strong><small>Отключите, чтобы оставить прозрачную кнопку</small></span></label>
+              <label class="workspace-check"><input v-model="appearance.button_customization.border" type="checkbox" /><span><strong>Контур кнопки</strong><small>Показывать границу кнопки</small></span></label>
+            </div>
+            <div class="studio-inspector-group">
+              <h4>Текст кнопок</h4>
+              <div class="field"><span>Шрифт</span><CustomSelect v-model="appearance.button_customization.font_family" :options="fontFamilyOptions" /></div>
+              <label class="field"><span>Размер текста <strong>{{ appearance.button_customization.font_size }} px</strong></span><input v-model.number="appearance.button_customization.font_size" type="range" min="9" max="20" step="1" /></label>
+              <label class="workspace-check"><input v-model="appearance.button_customization.outline.enabled" type="checkbox" /><span><strong>Контур текста</strong><small>Улучшает читаемость на текстуре</small></span></label>
+              <template v-if="appearance.button_customization.outline.enabled">
+                <label class="field"><span>Толщина контура <strong>{{ appearance.button_customization.outline.width }} px</strong></span><input v-model.number="appearance.button_customization.outline.width" type="range" min="0" max="3" step="0.5" /></label>
+                <div class="studio-token-row"><div class="studio-token-meta"><span class="studio-token-swatch" :style="{ background: appearance.button_customization.outline.color }" /><div><strong>Цвет контура</strong><small>{{ appearance.button_customization.outline.color }}</small></div></div><ColorPicker v-model="appearance.button_customization.outline.color" /></div>
+              </template>
+            </div>
+            <div class="studio-inspector-group">
+              <h4>Текстура, иконка и звук</h4>
+              <input ref="buttonTextureInput" class="visually-hidden" type="file" accept="image/png,image/jpeg,image/webp" @change="loadButtonAsset($event, 'texture')" />
+              <input ref="buttonIconInput" class="visually-hidden" type="file" accept="image/png,image/jpeg,image/webp" @change="loadButtonAsset($event, 'icon')" />
+              <input ref="buttonSoundInput" class="visually-hidden" type="file" accept="audio/mpeg,audio/ogg,audio/wav,audio/webm" @change="loadButtonAsset($event, 'sound')" />
+              <div class="button-asset-row"><span><strong>Текстура</strong><small>{{ appearance.button_customization.texture ? 'Подогнана под размер кнопки' : 'Не выбрана' }}</small></span><button class="button button--small button--outline" type="button" @click="chooseButtonAsset('texture')">{{ appearance.button_customization.texture ? 'Заменить' : 'Загрузить' }}</button><button v-if="appearance.button_customization.texture" class="icon-button" type="button" aria-label="Убрать текстуру" @click="clearButtonAsset('texture')"><Icon name="close" :size="14" /></button></div>
+              <div class="field"><span>Масштаб</span><CustomSelect v-model="appearance.button_customization.texture_fit" :options="textureFitOptions" /></div>
+              <label class="workspace-check"><input v-model="appearance.button_customization.crop_enabled" type="checkbox" /><span><strong>Кадрировать вручную</strong><small>Необязательно: выберите область текстуры</small></span></label>
+              <div v-if="appearance.button_customization.crop_enabled" class="button-crop-grid">
+                <label class="field"><span>Смещение X <strong>{{ appearance.button_customization.crop.x }}%</strong></span><input v-model.number="appearance.button_customization.crop.x" type="range" min="0" max="100" /></label>
+                <label class="field"><span>Смещение Y <strong>{{ appearance.button_customization.crop.y }}%</strong></span><input v-model.number="appearance.button_customization.crop.y" type="range" min="0" max="100" /></label>
+                <label class="field"><span>Область X <strong>{{ appearance.button_customization.crop.width }}%</strong></span><input v-model.number="appearance.button_customization.crop.width" type="range" min="5" max="100" /></label>
+                <label class="field"><span>Область Y <strong>{{ appearance.button_customization.crop.height }}%</strong></span><input v-model.number="appearance.button_customization.crop.height" type="range" min="5" max="100" /></label>
+              </div>
+              <div class="button-asset-row"><span><strong>Иконка</strong><small>{{ appearance.button_customization.icon ? 'Заменяет или добавляет иконку' : 'Не выбрана' }}</small></span><button class="button button--small button--outline" type="button" @click="chooseButtonAsset('icon')">{{ appearance.button_customization.icon ? 'Заменить' : 'Добавить' }}</button><button v-if="appearance.button_customization.icon" class="icon-button" type="button" aria-label="Убрать иконку" @click="clearButtonAsset('icon')"><Icon name="close" :size="14" /></button></div>
+              <div class="button-asset-row"><span><strong>Звук нажатия</strong><small>{{ appearance.button_customization.sound ? 'Будет звучать при нажатии' : 'Не выбран' }}</small></span><button class="button button--small button--outline" type="button" @click="chooseButtonAsset('sound')">{{ appearance.button_customization.sound ? 'Заменить' : 'Добавить' }}</button><button v-if="appearance.button_customization.sound" class="icon-button" type="button" aria-label="Убрать звук" @click="clearButtonAsset('sound')"><Icon name="close" :size="14" /></button></div>
+              <p class="studio-inspector-note">PNG, JPEG или WebP до 512 KiB; звук WAV, OGG, MP3 или WebM до 1 MiB. Кнопка заполняет область текстурой автоматически; большие изображения кадрируются по центру.</p>
+              <p v-if="buttonAssetError" class="studio-inspector-note studio-inspector-note--error" role="alert">{{ buttonAssetError }}</p>
+            </div>
+            <div class="studio-inspector-group">
+              <h4>Подписи навигации</h4>
+              <label v-for="item in labelOptions" :key="item.key" class="field"><span>{{ item.label }} <strong>{{ Array.from(appearance.button_customization.labels[item.key]).length }}/16</strong></span><input v-model="appearance.button_customization.labels[item.key]" type="text" maxlength="16" :placeholder="item.label" /></label>
+              <p class="studio-inspector-note">Если подпись не помещается, она сокращается с многоточием. Наведение показывает полный текст в подсказке лаунчера.</p>
+            </div>
           </template>
 
           <template v-else-if="activeSection === 'colors'">
