@@ -45,14 +45,6 @@ API v2/v3 (`plugin.json`) запускает entrypoint в отдельном Qu
 
 V2 предоставляет `launcher:servers` для списка серверов, изолированного в namespace конкретного плагина. Доступны `api.launcher.servers.list()`, `save()`, `add()` и `remove()`; хост ограничивает список 200 записями и проверяет permission при каждом вызове. `network:fetch`, `network:dns` и `network:ping` требуют соответствующих grants и точного host из `network_hosts`. Разрешение `network:listen` зарезервировано и плагинам не предоставляется.
 
-### Безопасный контекст темы v2/v3
-
-`api.theme.get()` сохраняет прежние поля `mode`, `accent` и `tokens`, дополняя их безопасным read-only snapshot: `locale`, `colors`, `buttonStyle`, `buttonLabels` и `fonts`. `buttonStyle` содержит только числовые параметры, флаги, выбранный шрифт, контур и crop; изображения, звуки и их данные плагину не передаются. Snapshot и вложенные объекты заморожены в worker.
-
-Для удобного чтения доступны `getColor(name)`, `getToken(name)`, `getButtonStyle()`, `getButtonLabels()`, `getLocale()` и `getFonts()`. `fonts.available` перечисляет `system`, `inter`, `manrope` и `mono`. Чистые helper-функции `normalizeColor(value, fallback?)` принимают только hex `#rgb`/`#rrggbb` (иначе возвращают нормализованный fallback или `#000000`), а `contrastRatio(foreground, background)` вычисляет WCAG contrast ratio только для hex-цветов.
-
-Чтение сохраняет прежнюю модель разрешений `theme.get()`. `theme.register()` по-прежнему добавляет только ограниченный contribution, требует `ui:compose`, проверяет цвета по hex и не применяет, не заменяет и не внедряет глобальную тему или CSS. Архивы тем не запускаются автоматически; исходник плагина исполняется только через существующий sandbox и flow доверия/согласия.
-
 V3 добавляет расширенные host-секции `runtime`, `permissions`, `config.readProjected`, `http`, `instances`, `os` и `proxy`. Уже реализованы следующие операции:
 
 - `api.runtime.getInfo()`, `getCapabilities()`, `getQuotaUsage()`, `assertCapability()`;
@@ -201,14 +193,6 @@ In API v1 the permissions fields remain metadata and do not give plugin code acc
 A signed plugin runs only after the publisher's Ed25519 key is explicitly pinned. For an unsigned package the user separately enables local execution; the consent is bound to the SHA-256 of that exact version. Packages are disabled by default. Replacing a package keeps grants only for permissions declared both before and after the replacement; new permissions must be granted again.
 
 V2 provides `launcher:servers` for a server list namespaced to the plugin. Available are `api.launcher.servers.list()`, `save()`, `add()` and `remove()`; the host caps the list at 200 entries and checks the permission on every call. `network:fetch`, `network:dns` and `network:ping` require the matching grants and an exact host from `network_hosts`. The `network:listen` permission is reserved and is not granted to plugins.
-
-### Safe theme context, v2/v3
-
-`api.theme.get()` keeps its existing `mode`, `accent` and `tokens` fields and adds a safe read-only snapshot: `locale`, `colors`, `buttonStyle`, `buttonLabels` and `fonts`. `buttonStyle` contains only numeric settings, flags, the selected font, outline and crop; image/audio assets and their data are not exposed. The snapshot and its nested objects are frozen in the worker.
-
-Convenience readers are `getColor(name)`, `getToken(name)`, `getButtonStyle()`, `getButtonLabels()`, `getLocale()` and `getFonts()`. `fonts.available` lists `system`, `inter`, `manrope` and `mono`. Pure helpers `normalizeColor(value, fallback?)` accept only `#rgb`/`#rrggbb` hex (otherwise returning a normalized fallback or `#000000`), while `contrastRatio(foreground, background)` calculates WCAG contrast ratio for hex colors only.
-
-Read access preserves the existing `theme.get()` permission model. `theme.register()` remains a bounded contribution, still requires `ui:compose`, validates colors as hex, and does not apply, replace or inject a global theme or CSS. Theme archives are never executed automatically; plugin source still runs only through the existing sandbox and trust/consent flow.
 
 V3 adds the extended host sections `runtime`, `permissions`, `config.readProjected`, `http`, `instances`, `os` and `proxy`. Implemented operations:
 

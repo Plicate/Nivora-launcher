@@ -4,9 +4,8 @@ import fs from 'node:fs'
 import vm from 'node:vm'
 import { stripTypeScriptTypes } from 'node:module'
 import { PluginRuntimeService } from '../src/services/pluginRuntime.ts'
-import { buildPluginThemeContext, dispatchPluginThemeHostCall } from '../src/services/pluginThemeContext.ts'
 
-function facade(themeSnapshot = () => null) {
+function facade() {
   const source = fs.readFileSync(new URL('../src/plugins/quickjs.worker.ts', import.meta.url), 'utf8')
   const begin = source.indexOf('function facadeSource(')
   const end = source.indexOf('\nfunction invokeInternal(', begin)
@@ -14,9 +13,8 @@ function facade(themeSnapshot = () => null) {
   const build = vm.runInNewContext(builder + '\nfacadeSource', { quoteJs: JSON.stringify, MAX_RPC_BYTES: 4 * 1024 * 1024, MAX_VIEW_BYTES: 256 * 1024 })
   const calls = [], sandbox = {
     __hostCall: async (operation, args) => {
-      const parsed = JSON.parse(args)
-      calls.push({ operation, args: parsed })
-      return JSON.stringify({ ok: true, hasValue: true, value: operation === 'theme.get' ? themeSnapshot() : null })
+      calls.push({ operation, args: JSON.parse(args) })
+      return JSON.stringify({ ok: true, hasValue: true, value: null })
     },
   }
   sandbox.entry = (api) => { sandbox.api = api }
@@ -24,96 +22,6 @@ function facade(themeSnapshot = () => null) {
   return { sandbox, calls }
 }
 const settle = () => new Promise((resolve) => setImmediate(resolve))
-
-test('theme snapshot is frozen, filtered and exposes read-only helpers', async () => {
-  const sample = {
-    mode: 'dark', accent: '#336699', locale: 'ru',
-    colors: { accent: '#336699', background: '#ffffff' },
-    tokens: { accent: '#336699', radius: 8 },
-    buttonStyle: { width: 152, outline: { enabled: false } },
-    buttonLabels: { instances: 'Играть' },
-    fonts: { ui: 'system', button: 'inter', available: ['system', 'inter'] },
-  }
-  const { sandbox, calls } = facade(() => sample)
-  await sandbox.start()
-  const theme = sandbox.api.theme
-  const snapshot = await theme.get()
-  assert.equal(snapshot.mode, 'dark')
-  assert.equal(await theme.getColor('accent'), '#336699')
-  assert.equal(await theme.getColor('unknown'), undefined)
-  assert.equal(await theme.getToken('radius'), 8)
-  assert.equal(await theme.getLocale(), 'ru')
-  assert.equal((await theme.getButtonStyle()).width, 152)
-  assert.equal((await theme.getButtonLabels()).instances, 'Играть')
-  assert.deepEqual(Array.from((await theme.getFonts()).available), ['system', 'inter'])
-  assert.equal(Object.isFrozen(snapshot), true)
-  assert.equal(Object.isFrozen(snapshot.tokens), true)
-  assert.equal(Object.getPrototypeOf(snapshot)?.constructor?.name, 'Object')
-  assert.equal(Object.hasOwn(snapshot, '__proto__'), false)
-  assert.throws(() => theme.getToken('__proto__'), /safe name/)
-  assert.throws(() => theme.getToken('a'.repeat(257)), /safe name/)
-  assert.equal(theme.normalizeColor(' #AbC '), '#aabbcc')
-  assert.equal(theme.normalizeColor('url(javascript:alert(1))', '#ABC'), '#aabbcc')
-  assert.equal(theme.contrastRatio('#000', '#fff'), 21)
-  assert.throws(() => theme.contrastRatio('url(javascript:alert(1))', '#fff'), /hex values/)
-  assert.equal(['apply', 'set', 'replace', 'injectCss'].some((name) => name in theme), false)
-  assert.equal(calls.filter((call) => call.operation === 'theme.get').length, 8)
-  await sandbox.dispose()
-})
-
-test('plugin theme snapshot strips unsafe keys, colors and asset data', () => {
-  const snapshot = buildPluginThemeContext({
-    theme: 'dark', accent_color: 'url(javascript:alert(1))',
-    color_tokens: { accent: '#ABCDEF', background: '#ffffff', unsafe: 'url(javascript:alert(1))', '__proto__': '#ffffff' },
-    button_customization: {
-      width: 900, height: -1, font_family: 'external-font', font_size: 99,
-      crop: { x: 90, y: 99, width: 50, height: 25 },
-      texture_data: 'data:image/png;base64,AA==', icon_data: 'secret',
-      labels: { instances: 'Launch', injected: 'ignored' },
-    },
-  }, 'glass', 'en', '__proto__')
-  assert.equal(snapshot.mode, 'glass')
-  assert.equal(snapshot.locale, 'en')
-  assert.equal(snapshot.accent, '#abcdef')
-  assert.deepEqual({ ...snapshot.colors }, { accent: '#abcdef', background: '#ffffff' })
-  assert.equal(snapshot.buttonStyle.width, 280)
-  assert.equal(snapshot.buttonStyle.height, 28)
-  assert.deepEqual({ ...snapshot.buttonStyle.crop }, { x: 50, y: 75, width: 50, height: 25 })
-  assert.equal(snapshot.buttonStyle.font_family, 'system')
-  assert.deepEqual({ ...snapshot.buttonLabels }, { instances: 'Launch', accounts: '', mods: '', modpacks: '', themes: '', settings: '' })
-  assert.equal(snapshot.fonts.ui, 'system')
-  assert.equal(Object.hasOwn(snapshot.buttonStyle, 'texture_data'), false)
-  assert.equal(Object.hasOwn(snapshot.tokens, 'unsafe'), false)
-  assert.equal(Object.hasOwn(snapshot.tokens, '__proto__'), false)
-  assert.equal(Object.isFrozen(snapshot), true)
-  assert.equal(Object.isFrozen(snapshot.buttonStyle.outline), true)
-})
-
-test('theme contributions require consent and reject CSS color payloads', async () => {
-  let authorized = false
-  const registrations = []
-  const theme = { mode: 'dark', accent: '#000000', tokens: {}, colors: {}, locale: 'en', buttonStyle: {}, buttonLabels: {}, fonts: {} }
-  const context = {
-    theme: () => theme,
-    authorize: async (permission) => {
-      if (!authorized || permission !== 'ui:compose') throw new Error('permission denied')
-    },
-    registerTheme: (...args) => registrations.push(args),
-    unregisterTheme() {},
-  }
-  await assert.rejects(dispatchPluginThemeHostCall('theme.register', { registration_id: 'test', definition: { colors: { primary: '#123456' } } }, context), /permission denied/)
-  assert.equal(registrations.length, 0)
-  authorized = true
-  await assert.rejects(dispatchPluginThemeHostCall('theme.register', { registration_id: 'test', definition: { colors: { primary: 'url(javascript:alert(1))' } } }, context), /Invalid theme color/)
-  await assert.rejects(dispatchPluginThemeHostCall('theme.register', { registration_id: 'x'.repeat(97), definition: {} }, context), /at most 96 characters/)
-  await assert.rejects(dispatchPluginThemeHostCall('theme.register', { registration_id: 'test', definition: { colors: Object.fromEntries(Array.from({ length: 65 }, (_, index) => [`color${index}`, '#123456'])) } }, context), /at most 64 entries/)
-  await assert.rejects(dispatchPluginThemeHostCall('theme.register', { registration_id: 'test', definition: { tokens: { long: 'x'.repeat(257) } } }, context), /Invalid theme token/)
-  assert.equal(registrations.length, 0)
-  await dispatchPluginThemeHostCall('theme.register', { registration_id: 'test', definition: { colors: { primary: '#ABCDEF' } } }, context)
-  assert.deepEqual(registrations, [['test', { colors: { primary: '#abcdef' } }]])
-  const oldApiContext = await dispatchPluginThemeHostCall('theme.get', {}, context)
-  assert.equal(oldApiContext.mode, 'dark')
-})
 
 test('real guest facade expands fragments, refreshes and rejects cycles', async () => {
   const { sandbox, calls } = facade(); await sandbox.start()

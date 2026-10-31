@@ -4,7 +4,6 @@ import test from 'node:test'
 
 // подменяем RPC и диалоги, чтобы тестировать обработчик без окна Tauri и Vue
 const hostUrl = new URL('../src/services/pluginHost.ts', import.meta.url).href
-const themeContextUrl = new URL('../src/services/pluginThemeContext.ts', import.meta.url).href
 const bridgeUrl = `data:text/javascript,${encodeURIComponent(`
   export const calls = [];
   function record(operation, args, result) {
@@ -33,9 +32,6 @@ const hooks = registerHooks({
     }
     if (context.parentURL === hostUrl && specifier === './dialogs') {
       return { url: dialogsUrl, shortCircuit: true }
-    }
-    if (context.parentURL === hostUrl && specifier === './pluginThemeContext') {
-      return { url: themeContextUrl, shortCircuit: true }
     }
     return nextResolve(specifier, context)
   },

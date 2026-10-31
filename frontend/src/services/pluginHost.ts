@@ -15,7 +15,6 @@ import type { RuntimePluginManifest } from '../plugins/runtimeManifest'
 import type { PluginRuntimeOptions } from './pluginRuntime'
 import { alertDialog, chooseDialog, confirmDialog, promptDialog } from './dialogs'
 import { bridge } from './bridge'
-import { dispatchPluginThemeHostCall } from './pluginThemeContext'
 
 const tones = new Set<PluginUiTone>(['default', 'muted', 'success', 'warning', 'danger'])
 
@@ -86,6 +85,42 @@ function declaredDefinition(
   const declaration = declarations.find((entry) => entry.id === id)
   if (!declaration) throw new Error(`${field} id is not declared in plugin.json: ${id}`)
   return declaration
+}
+
+function themeDefinition(value: unknown): PluginThemeDefinition {
+  if (!isRecord(value) || Object.keys(value).some((key) => !['name', 'colors', 'tokens'].includes(key))) {
+    throw new TypeError('theme definition must contain only name, colors, and tokens')
+  }
+  const name = optionalStringArg(value, 'name', '', 80)
+  const colors: Record<string, string> = {}
+  const tokens: Record<string, string | number> = {}
+  if (value.colors !== undefined) {
+    if (!isRecord(value.colors) || Object.keys(value.colors).length > 64) throw new TypeError('theme colors must be an object of at most 64 entries')
+    for (const [key, color] of Object.entries(value.colors)) {
+      if (!/^[a-z][a-z0-9_.-]{0,63}$/i.test(key) || typeof color !== 'string' || !/^#[0-9a-f]{6}$/i.test(color)) {
+        throw new TypeError(`Invalid theme color: ${key}`)
+      }
+      colors[key] = color.toLowerCase()
+    }
+  }
+  if (value.tokens !== undefined) {
+    if (!isRecord(value.tokens) || Object.keys(value.tokens).length > 64) throw new TypeError('theme tokens must be an object of at most 64 entries')
+    for (const [key, token] of Object.entries(value.tokens)) {
+      if (!/^[a-z][a-z0-9_.-]{0,63}$/i.test(key)) throw new TypeError(`Invalid theme token: ${key}`)
+      if (typeof token === 'string' && token.length <= 256) {
+        tokens[key] = token
+      } else if (typeof token === 'number' && Number.isFinite(token)) {
+        tokens[key] = token
+      } else {
+        throw new TypeError(`Invalid theme token: ${key}`)
+      }
+    }
+  }
+  return {
+    ...(name ? { name } : {}),
+    ...(value.colors !== undefined ? { colors: Object.freeze(colors) } : {}),
+    ...(value.tokens !== undefined ? { tokens: Object.freeze(tokens) } : {}),
+  }
 }
 
 function eventName(value: string, manifest: RuntimePluginManifest): PluginEventName {
@@ -199,14 +234,14 @@ export function createPluginHostCall(context: PluginHostContext): PluginRuntimeO
         context.unsubscribe(stringArg(args, 'listener_id', 96))
         return undefined
       case 'theme.get':
+        return context.theme()
       case 'theme.register':
+        await authorize(context, 'ui:compose', signal)
+        context.registerTheme(stringArg(args, 'registration_id', 96), themeDefinition(args.definition))
+        return undefined
       case 'theme.unregister':
-        return dispatchPluginThemeHostCall(operation, args, {
-          theme: context.theme,
-          authorize: (permission) => authorize(context, permission, signal),
-          registerTheme: context.registerTheme,
-          unregisterTheme: context.unregisterTheme,
-        })
+        context.unregisterTheme(stringArg(args, 'registration_id', 96))
+        return undefined
       case 'storage.get':
         return (await bridge.pluginStorageGet(context.pluginId, stringArg(args, 'key'), signal)).value
       case 'storage.set':

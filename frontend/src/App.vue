@@ -53,8 +53,6 @@ import { diagnoseLaunchFailure, offerAutoRepair } from './services/autoRepair'
 import { nicknameError } from './services/nickname'
 import { createModpackWorkflow } from './services/modpackWorkflow'
 import { createThemeManager } from './services/themeManager'
-import { DEFAULT_BUTTON_CUSTOMIZATION, buttonCustomizationRole, normalizeButtonCustomization, resolveButtonCustomization } from './services/buttonCustomization'
-import type { ButtonCustomizationTarget } from './services/buttonCustomization'
 import { createSettingsWorkflow } from './services/settingsWorkflow'
 const GameOverlay = defineAsyncComponent(() => import('./components/GameOverlay.vue'))
 import type {
@@ -298,7 +296,6 @@ const initialState: AppState = {
       page_layouts: { instances: 'balanced', 'instance-settings': 'balanced', accounts: 'balanced', mods: 'wide', modpacks: 'wide', plugins: 'wide', themes: 'wide', settings: 'balanced' },
     widget_visibility: { 'instances.workspace': true, 'accounts.status': true, 'mods.context': true },
      color_tokens: { ...defaultColorTokens },
-     button_customization: normalizeButtonCustomization(DEFAULT_BUTTON_CUSTOMIZATION),
      instance_groups: [],
      pinned_instance_groups: [],
     login_source: 'microsoft',
@@ -671,7 +668,6 @@ const appearanceDraft = reactive<AppearanceSettings>({
     page_layouts: { instances: 'balanced', 'instance-settings': 'balanced', accounts: 'balanced', mods: 'wide', modpacks: 'wide', plugins: 'wide', themes: 'wide', settings: 'balanced' },
   widget_visibility: { 'instances.workspace': true, 'accounts.status': true, 'mods.context': true },
   color_tokens: { ...defaultColorTokens },
-  button_customization: normalizeButtonCustomization(DEFAULT_BUTTON_CUSTOMIZATION),
 })
 const activity = reactive<ActivityState>({
   open: false,
@@ -1541,27 +1537,7 @@ const {
   errorMessage,
   saveSettings,
   releaseWallpaperPreview,
-  setLanguageFromSettings,
 })
-
-let activeButtonSound: HTMLAudioElement | null = null
-function playButtonSound(event: MouseEvent) {
-  if (!(event.target instanceof Element)) return
-  const button = event.target.closest<HTMLButtonElement>('button:not(:disabled)')
-  if (!button) return
-  const target = button.dataset.buttonTarget
-  const role = target ? buttonCustomizationRole(target) : undefined
-  const source = role && target
-    ? resolveButtonCustomization(appearanceDraft.button_customization, target as ButtonCustomizationTarget).sound_data
-    : appearanceDraft.button_customization.sound_data
-  if (!source) return
-  if (activeButtonSound) {
-    activeButtonSound.pause()
-    activeButtonSound.currentTime = 0
-  }
-  activeButtonSound = new Audio(source)
-  void activeButtonSound.play().catch(() => {})
-}
 
 const topbarSystemMetrics = ref<SystemMetricsSnapshot>()
 const globalSearchOpen = ref(false)
@@ -1901,7 +1877,6 @@ function applyState(next: AppState, preserveAppearance = false) {
        page_layouts: { ...appearanceDraft.page_layouts, ...next.settings.page_layouts },
        widget_visibility: { ...appearanceDraft.widget_visibility, ...next.settings.widget_visibility },
         color_tokens: migrateDefaultColors(next.settings.color_tokens),
-        button_customization: normalizeButtonCustomization(next.settings.button_customization),
       })
       wallpaperRenderBlur.value = next.settings.wallpaper_blur
       if (next.settings.color_tokens?.accent) {
@@ -3499,7 +3474,7 @@ const settingsPageModel = {
   />
   </Transition>
   <AutoRepairDialog v-if="!overlayMode" @toast="showToast" @settings="applyAutoRepairSettings" @repaired="refreshBootstrap()" @relaunch="relaunchAfterRepair" @login="loginMicrosoft()" />
-  <div v-if="!overlayMode" ref="appShellRef" class="app-shell" :data-button-icon="String(Boolean(appearanceDraft.button_customization.icon_data))" :data-button-fill="String(appearanceDraft.button_customization.fill)" :data-button-border="String(appearanceDraft.button_customization.border)" @click.capture="playButtonSound">
+  <div v-if="!overlayMode" ref="appShellRef" class="app-shell">
         <div v-if="buildStampMismatch" class="build-mismatch-banner" role="alert">
           <Icon name="info" :size="16" />
           <span>Части лаунчера собраны из разных версий: интерфейс {{ buildStampMismatch.frontend }}, нативное ядро {{ buildStampMismatch.backend }}. При несовпадении версий некоторые экраны (Bedrock, оверлей и другие) могут работать неправильно. Пересоберите приложение целиком: <code>cd frontend &amp;&amp; npm install &amp;&amp; npm run tauri build</code></span>
@@ -3516,7 +3491,6 @@ const settingsPageModel = {
          :position="appearanceDraft.sidebar_position"
          :width-mode="appearanceDraft.sidebar_width_mode"
          :cloud-configured="settingsDraft.cloud_configured"
-         :button-labels="appearanceDraft.button_customization.labels"
          :plugin-tabs="enabledPluginTabs"
          :active-plugin-tab-id="activePluginTabId"
          :instances="state.instances"
@@ -3654,7 +3628,6 @@ const settingsPageModel = {
                  :busy="busy"
                  :group-busy="groupActionBusy"
                  :layout="appearanceDraft.instance_layout"
-                 :button-customization="appearanceDraft.button_customization"
                  @update:layout="setInstanceLayout"
                  @update:active-filter="instanceGroupFilter = $event"
                  @new-instance="openCreateInstance"
@@ -3841,13 +3814,10 @@ const settingsPageModel = {
 
                 <ThemeStudio
                  :appearance="appearanceDraft"
-                 :instances="state.instances"
                  :tokens="effectiveColorTokens"
                  :theme="currentTheme"
                  :base-theme="resolvedGlobalTheme"
                  :font-family="settingsDraft.font_family"
-                 :language="settingsDraft.language || 'ru'"
-                 :language-options="languageOptions"
                  :pages="customizablePages"
                  :wallpaper-url="wallpaperDisplayUrl"
                  :default-color-tokens="defaultColorTokens"
@@ -3857,7 +3827,6 @@ const settingsPageModel = {
                  :save-message="settingsSaveMessage"
                  :busy="busy"
                  @update:font-family="settingsDraft.font_family = $event"
-                 @update:language="setLanguageFromSettings"
                  @save="void saveSettings()"
                  @reset-appearance="resetAppearance"
                  @open-page="setView"
