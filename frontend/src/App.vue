@@ -2,32 +2,24 @@
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch, watchEffect } from 'vue'
 import ActivityPanel from './components/ActivityPanel.vue'
 import AppSidebar from './components/AppSidebar.vue'
-import AccountsPage from './components/AccountsPage.vue'
-import SettingsPage from './components/SettingsPage.vue'
 import BrandLogo from './components/BrandLogo.vue'
 import CatalogBadge from './components/CatalogBadge.vue'
 import CatalogDetailsDialog from './components/CatalogDetailsDialog.vue'
 import CloudStoragePanel from './components/CloudStoragePanel.vue'
-import BedrockWorkspace from './components/BedrockWorkspace.vue'
 import CustomSelect from './components/CustomSelect.vue'
 import CoreBadge from './components/CoreBadge.vue'
 import ColorPicker from './components/ColorPicker.vue'
 import Icon from './components/Icon.vue'
 import HotkeyInput from './components/HotkeyInput.vue'
 import InstanceGroups from './components/InstanceGroups.vue'
-import InstanceWorkspace from './components/InstanceWorkspace.vue'
 import FirstRunExperience from './components/FirstRunExperience.vue'
 import MemoryField from './components/MemoryField.vue'
 import NumericStepper from './components/NumericStepper.vue'
-import ServerWorkspace from './components/ServerWorkspace.vue'
 import LoaderBadge from './components/LoaderBadge.vue'
 import ModCardMeta from './components/ModCardMeta.vue'
 import BlockIconPicker from './components/BlockIconPicker.vue'
-import PluginCenter from './components/PluginCenter.vue'
 import PluginViewRenderer from './components/PluginViewRenderer.vue'
-import ThemeGallery from './components/ThemeGallery.vue'
-import ThemeStudio from './components/ThemeStudio.vue'
-import { FRONTEND_BUILD_STAMP, bridge } from './services/bridge'
+import { FRONTEND_BUILD_STAMP, bridge, inTauri } from './services/bridge'
 import { createCatalogWorkflow } from './services/catalogWorkflow'
 import { chooseAllowedCatalog } from './services/catalogSelection'
 import { shouldOpenActivityAfterSessionStart } from './services/activityVisibility'
@@ -47,14 +39,23 @@ import { pluginRuntime } from './services/pluginRuntime'
 import { useModalFocus } from './services/modalFocus'
 import { initialFirstRunPhase, readFirstRunExperience, writeFirstRunExperience, type FirstRunExperienceState, type FirstRunPhase } from './services/firstRunExperience'
 import { createWallpaperRenderer, prepareWallpaperForStorage } from './services/wallpaper'
-import DialogHost from './components/DialogHost.vue'
 import AutoRepairDialog from './components/AutoRepairDialog.vue'
 import { diagnoseLaunchFailure, offerAutoRepair } from './services/autoRepair'
 import { nicknameError } from './services/nickname'
 import { createModpackWorkflow } from './services/modpackWorkflow'
 import { createThemeManager } from './services/themeManager'
 import { createSettingsWorkflow } from './services/settingsWorkflow'
+const browserPreview = !inTauri()
 const GameOverlay = defineAsyncComponent(() => import('./components/GameOverlay.vue'))
+const AccountsPage = defineAsyncComponent(() => import('./components/AccountsPage.vue'))
+const SettingsPage = defineAsyncComponent(() => import('./components/SettingsPage.vue'))
+const BedrockWorkspace = defineAsyncComponent(() => import('./components/BedrockWorkspace.vue'))
+const InstanceWorkspace = defineAsyncComponent(() => import('./components/InstanceWorkspace.vue'))
+const ServerWorkspace = defineAsyncComponent(() => import('./components/ServerWorkspace.vue'))
+const PluginCenter = defineAsyncComponent(() => import('./components/PluginCenter.vue'))
+const ThemeGallery = defineAsyncComponent(() => import('./components/ThemeGallery.vue'))
+const ThemeStudio = defineAsyncComponent(() => import('./components/ThemeStudio.vue'))
+const DialogHost = defineAsyncComponent(() => import('./components/DialogHost.vue'))
 import type {
   PluginEventPayloadMap,
   PluginInstanceRef,
@@ -710,6 +711,7 @@ const {
   updateSavedSettingsBaseline,
   settingsProfiles,
   settingsProfilesLoading,
+  settingsProfilesError,
   settingsProfileBusy,
   settingsProfileName,
   backupDestinationOptions,
@@ -3444,7 +3446,7 @@ const settingsPageModel = {
   memoryUnitOptions, memoryValue, openGameFolder, openPluginLink, overwriteSettingsProfile, persistentViewOptions, pluginCatalogKindOptions,
   refreshBootstrap, refreshJavaOptions, removeLauncherProfile, removePluginCatalog, removeResourceCatalog, replayLauncherTour, resourceCatalogOptions,
   runPluginAction, savePluginConfig, saveSettings, saveSettingsProfileAs, selectActiveCatalog, setLanguageFromSettings, setView,
-  settingsDraft, settingsProfileBusy, settingsProfileName, settingsProfiles, settingsProfilesLoading, settingsSaveMessage, settingsSaveState,
+  settingsDraft, settingsProfileBusy, settingsProfileName, settingsProfiles, settingsProfilesLoading, settingsProfilesError, settingsSaveMessage, settingsSaveState,
   settingsSectionViews, shortcutRows, showToast, state,
 }
 </script>
@@ -3511,6 +3513,7 @@ const settingsPageModel = {
       />
 
         <main class="main-panel">
+        <div v-if="browserPreview" class="browser-preview-banner" role="status">Демо-предпросмотр: показаны примерные данные; операции рабочего стола здесь не выполняются.</div>
         <header class="topbar">
         <button class="mobile-menu-button" type="button" aria-label="Открыть меню" @click="mobileMenuOpen = true">
           <Icon name="instances" :size="20" />

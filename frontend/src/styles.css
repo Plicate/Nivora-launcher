@@ -62,6 +62,15 @@ body.overlay-mode #app { height: calc(100% / var(--ui-scale, 1)); }
   user-select: all;
 }
 .build-mismatch-banner .icon-button { flex: 0 0 auto; }
+.browser-preview-banner {
+  margin: 10px 14px 0;
+  padding: 8px 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  color: var(--muted);
+  background: var(--panel-raised);
+  font-size: 12px;
+}
 /* в непрозрачном окне Wayland фон не должен пропускать белый WebView */
 body.overlay-mode.overlay-mode--opaque { background: #0c0d0b !important; }
 button, input, select, textarea { font: inherit; }

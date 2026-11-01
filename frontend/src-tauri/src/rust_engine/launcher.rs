@@ -38,6 +38,9 @@ const WAYLAND_GLFW_URL: &str = "https://github.com/jdkeke142/glfw-wayland-minecr
 const WAYLAND_GLFW_SHA256: &str = "1fa075ea4f595bd6917a7f304f2fe5d583ec82d8f1ac0f0350bd38b32a20a46e";
 const WAYLAND_GLFW_SIZE: u64 = 662_440;
 const MAX_SESSION_LOG_LINES: usize = 500;
+const MAX_SESSION_STATES: usize = 32;
+const MAX_PROCESS_LOG_LINE_BYTES: usize = 4096;
+const MAX_PROCESS_LOG_LINE_CHARS: usize = 1024;
 const USER_COMMAND_TIMEOUT_SECONDS: u64 = 120;
 const USER_COMMAND_OUTPUT_LINES: usize = 40;
 
@@ -48,6 +51,22 @@ struct SessionState {
     logs: VecDeque<String>,
     running: bool,
     started_at: f64,
+}
+
+fn prune_finished_sessions(states: &mut HashMap<String, SessionState>) {
+    if states.len() <= MAX_SESSION_STATES {
+        return;
+    }
+    let mut finished: Vec<(f64, String)> = states
+        .iter()
+        .filter(|(_, state)| !state.running)
+        .map(|(name, state)| (state.started_at, name.clone()))
+        .collect();
+    finished.sort_by(|left, right| left.0.total_cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+    let remove_count = states.len().saturating_sub(MAX_SESSION_STATES);
+    for (_, name) in finished.into_iter().take(remove_count) {
+        states.remove(&name);
+    }
 }
 
 fn sessions() -> &'static Mutex<HashMap<String, SessionState>> {
@@ -65,6 +84,7 @@ pub(crate) fn session_start(instance_name: &str) {
             started_at: epoch_seconds(),
         },
     );
+    prune_finished_sessions(&mut guard);
 }
 
 pub(crate) fn session_append(instance_name: &str, line: &str) {
@@ -92,6 +112,24 @@ pub(crate) fn session_snapshot(instance_name: &str) -> (Vec<String>, bool) {
     match guard.get(instance_name) {
         Some(state) => (state.logs.iter().cloned().collect(), state.running),
         None => (Vec::new(), false),
+    }
+}
+
+fn record_launch_log_line(
+    log_path: &Path,
+    line: &str,
+    sink: &Arc<Mutex<dyn FnMut(&str) + Send>>,
+) {
+    let mut characters = line.chars();
+    let mut bounded: String = characters.by_ref().take(MAX_PROCESS_LOG_LINE_CHARS).collect();
+    if characters.next().is_some() {
+        bounded.push_str(" … [строка лога сокращена]");
+    }
+    if let Ok(mut file) = OpenOptions::new().write(true).create(true).append(true).open(log_path) {
+        let _ = writeln!(file, "{bounded}");
+    }
+    if let Ok(mut guard) = sink.lock() {
+        guard(&bounded);
     }
 }
 
@@ -1016,23 +1054,62 @@ impl Recorder {
 }
 
 fn read_process_lines<R: BufRead>(mut reader: R, mut on_line: impl FnMut(String) -> bool) -> std::io::Result<()> {
-    let mut bytes = Vec::new();
+    let mut bytes = Vec::with_capacity(MAX_PROCESS_LOG_LINE_BYTES);
+    let mut truncated = false;
     loop {
-        bytes.clear();
-        if reader.read_until(b'\n', &mut bytes)? == 0 {
+        let (consumed, ended, eof) = {
+            let available = reader.fill_buf()?;
+            if available.is_empty() {
+                (0, false, true)
+            } else {
+                let newline = available.iter().position(|byte| *byte == b'\n');
+                let consumed = newline.map_or(available.len(), |index| index + 1);
+                let content_len = consumed - if newline.is_some() { 1 } else { 0 };
+                let retained = content_len.min(MAX_PROCESS_LOG_LINE_BYTES.saturating_sub(bytes.len()));
+                bytes.extend_from_slice(&available[..retained]);
+                truncated |= retained < content_len;
+                (consumed, newline.is_some(), false)
+            }
+        };
+
+        if eof {
+            if bytes.last() == Some(&b'\r') {
+                bytes.pop();
+            }
+            if !bytes.is_empty() || truncated {
+                if emit_process_line(&mut bytes, truncated, &mut on_line) {
+                    break;
+                }
+            }
             break;
         }
-        if bytes.last() == Some(&b'\n') {
-            bytes.pop();
-        }
-        if bytes.last() == Some(&b'\r') {
-            bytes.pop();
-        }
-        if on_line(String::from_utf8_lossy(&bytes).into_owned()) {
-            break;
+        reader.consume(consumed);
+        if ended {
+            if bytes.last() == Some(&b'\r') {
+                bytes.pop();
+            }
+            if emit_process_line(&mut bytes, truncated, &mut on_line) {
+                break;
+            }
+            bytes.clear();
+            truncated = false;
         }
     }
     Ok(())
+}
+
+fn emit_process_line(
+    bytes: &mut Vec<u8>,
+    truncated: bool,
+    on_line: &mut impl FnMut(String) -> bool,
+) -> bool {
+    let decoded = String::from_utf8_lossy(bytes);
+    let mut chars = decoded.chars();
+    let mut line: String = chars.by_ref().take(MAX_PROCESS_LOG_LINE_CHARS).collect();
+    if truncated || chars.next().is_some() {
+        line.push_str(" … [строка лога сокращена]");
+    }
+    on_line(line)
 }
 
 fn run_process(run: RunProcess<'_>) -> Result<i32, String> {
@@ -1703,6 +1780,21 @@ mod tests {
     }
 
     #[test]
+    fn process_output_bounds_long_lines_and_continues() {
+        let input = format!("{}\nnext line\n", "x".repeat(MAX_PROCESS_LOG_LINE_BYTES * 3));
+        let mut lines = Vec::new();
+        read_process_lines(std::io::Cursor::new(input.into_bytes()), |line| {
+            lines.push(line);
+            false
+        })
+        .unwrap();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains("строка лога сокращена"));
+        assert!(lines[0].len() < MAX_PROCESS_LOG_LINE_CHARS + 64);
+        assert_eq!(lines[1], "next line");
+    }
+
+    #[test]
     fn cancellation_monitor_terminates_after_child_exit() {
         for expected_exit_code in [0, 23] {
             let operation_id = format!(
@@ -1971,6 +2063,79 @@ mod tests {
         session_finish(&name);
         let (_, running) = session_snapshot(&name);
         assert!(!running);
+        sessions().lock().unwrap().remove(&name);
+    }
+
+    #[test]
+    fn finished_session_cache_is_pruned_but_active_sessions_are_kept() {
+        let mut states = HashMap::new();
+        states.insert(
+            "active".to_owned(),
+            SessionState {
+                logs: VecDeque::new(),
+                running: true,
+                started_at: 0.0,
+            },
+        );
+        for index in 0..(MAX_SESSION_STATES + 4) {
+            states.insert(
+                format!("finished-{index:03}"),
+                SessionState {
+                    logs: VecDeque::new(),
+                    running: false,
+                    started_at: index as f64,
+                },
+            );
+        }
+        prune_finished_sessions(&mut states);
+        assert_eq!(states.len(), MAX_SESSION_STATES);
+        assert!(
+            states
+                .get("active")
+                .is_some_and(|state| state.running)
+        );
+        assert!(!states.contains_key("finished-000"));
+        assert!(states.contains_key(&format!("finished-{:03}", MAX_SESSION_STATES + 3)));
+    }
+
+    #[test]
+    fn preflight_errors_are_written_to_launch_log_and_published() {
+        let directory = std::env::temp_dir().join(format!("launch-log-test-{}", random_hex(4)));
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("launch.log");
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let captured = output.clone();
+        let sink: Arc<Mutex<dyn FnMut(&str) + Send>> = Arc::new(Mutex::new(move |line| {
+            captured.lock().unwrap().push(line.to_owned());
+        }));
+        record_launch_log_line(&path, "Не удалось подготовить команду Java: Java не найдена", &sink);
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "Не удалось подготовить команду Java: Java не найдена\n"
+        );
+        assert_eq!(
+            output.lock().unwrap().as_slice(),
+            ["Не удалось подготовить команду Java: Java не найдена"]
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn launch_log_events_are_bounded_for_disk_and_ui() {
+        let directory = std::env::temp_dir().join(format!("launch-log-bound-test-{}", random_hex(4)));
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("launch.log");
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let captured = output.clone();
+        let sink: Arc<Mutex<dyn FnMut(&str) + Send>> = Arc::new(Mutex::new(move |line| {
+            captured.lock().unwrap().push(line.to_owned());
+        }));
+        record_launch_log_line(&path, &"x".repeat(MAX_PROCESS_LOG_LINE_CHARS * 3), &sink);
+        let saved = fs::read_to_string(&path).unwrap();
+        assert_eq!(saved.trim_end(), output.lock().unwrap()[0]);
+        assert!(saved.len() < MAX_PROCESS_LOG_LINE_CHARS + 64);
+        assert!(saved.contains("строка лога сокращена"));
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

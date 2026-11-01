@@ -48,7 +48,7 @@ cargo test --locked
 
 ## Документация
 
-- [Модель безопасности](docs/security.md)
+- [Модель безопасности](SECURITY.md)
 - [API плагинов](docs/plugin-api.md)
 - [Формат тем](docs/theme-format.md)
 - [Серверный движок](docs/server-runtime.md) и [сеть серверов](docs/server-network.md)

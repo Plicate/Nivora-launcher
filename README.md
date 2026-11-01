@@ -48,7 +48,7 @@ Platform packaging scripts are in `scripts/`; see [build instructions](docs/BUIL
 
 ## Project documentation
 
-- [Security model](docs/security.md)
+- [Security model](SECURITY.md)
 - [Plugin API](docs/plugin-api.md)
 - [Theme format](docs/theme-format.md)
 - [Server runtime](docs/server-runtime.md) and [networking](docs/server-network.md)

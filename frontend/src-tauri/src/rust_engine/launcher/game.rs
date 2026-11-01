@@ -2,6 +2,15 @@
 
 use super::*;
 
+fn parse_legacy_game_arguments(
+    value: &str,
+    version_id: &str,
+) -> Result<Vec<Value>, String> {
+    shlex_split(value, true)
+        .map(|tokens| tokens.into_iter().map(Value::String).collect())
+        .map_err(|error| format!("Некорректные minecraftArguments версии {version_id}: {error}"))
+}
+
 pub(crate) struct GameLauncher {
     config: ConfigStore,
     http: Arc<HttpClient>,
@@ -180,7 +189,7 @@ impl GameLauncher {
         let game_items: Vec<Value> = match arguments.get("game").and_then(Value::as_array) {
             Some(items) if !jvm_source.is_empty() => items.clone(),
             _ => match install.version_json.get("minecraftArguments").and_then(Value::as_str) {
-                Some(legacy) => shlex_split(legacy, true).map(|tokens| tokens.into_iter().map(Value::String).collect()).unwrap_or_default(),
+                Some(legacy) => parse_legacy_game_arguments(legacy, &install.version_id)?,
                 None => Vec::new(),
             },
         };
@@ -353,17 +362,6 @@ impl GameLauncher {
         if account_kind == "offline" && matches!(accounts::offline_remaining(account), Some(0)) {
             return Err("Ограничение автономного аккаунта исчерпано. Используйте Microsoft-авторизацию.".to_owned());
         }
-        let access_token = rec_str(account, "access_token");
-        let mut command = materialize_auth_token(&self.build_command(install, account, launch_settings)?, &access_token);
-        {
-            let mut emit = |line: &str| publish(line);
-            command = adapt_command_for_old_java(&command, &mut emit);
-        }
-        if dry_run {
-            let secrets = [access_token.as_str(), AUTH_TOKEN_PLACEHOLDER];
-            publish(&shell_join(&redact_command(&command, &secrets)));
-            return Ok(0);
-        }
         let logs_dir = self.config.paths.logs_dir.clone();
         fs::create_dir_all(&logs_dir).map_err(|error| format!("Каталог логов недоступен: {error}"))?;
         let log_path = logs_dir.join(log_id);
@@ -372,6 +370,24 @@ impl GameLauncher {
             return Err("Файлы состояния запуска являются символьными ссылками".to_owned());
         }
         ensure_private_file(&log_path);
+        let event = |line: &str| record_launch_log_line(&log_path, line, &sink);
+        let access_token = rec_str(account, "access_token");
+        let mut command = match self.build_command(install, account, launch_settings) {
+            Ok(command) => materialize_auth_token(&command, &access_token),
+            Err(error) => {
+                event(&format!("Не удалось подготовить команду Java: {error}"));
+                return Err(error);
+            }
+        };
+        {
+            let mut emit = |line: &str| event(line);
+            command = adapt_command_for_old_java(&command, &mut emit);
+        }
+        if dry_run {
+            let secrets = [access_token.as_str(), AUTH_TOKEN_PLACEHOLDER];
+            event(&shell_join(&redact_command(&command, &secrets)));
+            return Ok(0);
+        }
         let launch_preset = launch_settings
             .get("jvm_preset")
             .and_then(Value::as_str)
@@ -398,12 +414,6 @@ impl GameLauncher {
         let launch_wall_start = Instant::now();
         let started = Instant::now();
         let mut environment = self.launch_environment(launch_settings, Some(&install.version_id));
-        let event = |line: &str| {
-            if let Ok(mut file) = OpenOptions::new().write(true).create(true).append(true).open(&log_path) {
-                let _ = writeln!(file, "{line}");
-            }
-            publish(line);
-        };
         event(&format!("Лог запуска: {}", log_path.display()));
         event(&format!("Запуск {} для {}", install.version_id, rec_str(account, "username")));
         let version_json = &install.version_json;
@@ -752,7 +762,36 @@ impl GameLauncher {
                 None => publish("Осталось debug-времени: без лимита"),
             }
         }
+        if let Err(error) = &launch_result {
+            if error.to_ascii_lowercase().contains("cancel") {
+                event("Запуск Java отменён.");
+            } else {
+                event(&format!("Ошибка подготовки или запуска Java: {error}"));
+            }
+        }
         launch_result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_legacy_game_arguments;
+    use serde_json::json;
+
+    #[test]
+    fn malformed_legacy_arguments_are_reported_instead_of_silently_dropped() {
+        let error =
+            parse_legacy_game_arguments("--username Steve --server \"", "1.7.10").unwrap_err();
+        assert!(error.contains("1.7.10"));
+        assert!(error.contains("minecraftArguments"));
+    }
+
+    #[test]
+    fn legacy_arguments_preserve_quoted_values() {
+        assert_eq!(
+            parse_legacy_game_arguments("--username Steve --server \"my server\"", "1.7.10").unwrap(),
+            vec![json!("--username"), json!("Steve"), json!("--server"), json!("my server")]
+        );
     }
 }
 

@@ -341,8 +341,9 @@ async function runOverlaySelfTest() {
                            <button class="icon-button" type="button" aria-label="Удалить профиль" :disabled="model.settingsProfileBusy" @click="model.deleteSettingsProfile(profile.name)"><Icon name="trash" :size="14" /></button>
                          </span>
                        </div>
-                       <span v-if="!model.settingsProfiles.length && !model.settingsProfilesLoading" class="muted">Профилей пока нет — сохраните текущие настройки как пресет.</span>
                        <span v-if="model.settingsProfilesLoading" class="muted">Загружаю…</span>
+                       <span v-else-if="model.settingsProfilesError" class="muted" role="status">{{ model.settingsProfilesError }}</span>
+                       <span v-else-if="!model.settingsProfiles.length" class="muted">Профилей пока нет — сохраните текущие настройки как пресет.</span>
                        <div class="settings-profile-actions">
                          <input v-model="model.settingsProfileName" class="settings-profile-name" placeholder="Имя профиля" maxlength="48" />
                          <button class="button button--small button--accent" type="button" :disabled="model.settingsProfileBusy || !model.settingsProfileName.trim()" @click="model.saveSettingsProfileAs">{{ model.settingsProfileBusy ? 'Работаю…' : 'Сохранить пресет' }}</button>

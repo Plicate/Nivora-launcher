@@ -339,6 +339,7 @@ export function createSettingsWorkflow(deps: SettingsWorkflowDependencies) {
 
   const settingsProfiles = ref<SettingsProfile[]>([])
   const settingsProfilesLoading = ref(false)
+  const settingsProfilesError = ref('')
   const settingsProfileBusy = ref(false)
   const settingsProfileName = ref('')
   const backupDestinationOptions: SelectOption[] = [
@@ -350,8 +351,9 @@ export function createSettingsWorkflow(deps: SettingsWorkflowDependencies) {
     settingsProfilesLoading.value = true
     try {
       settingsProfiles.value = (await bridge.settingsProfilesList()).profiles
-    } catch {
-      settingsProfiles.value = []
+      settingsProfilesError.value = ''
+    } catch (error) {
+      settingsProfilesError.value = errorMessage(error)
     } finally {
       settingsProfilesLoading.value = false
     }
@@ -753,6 +755,7 @@ export function createSettingsWorkflow(deps: SettingsWorkflowDependencies) {
     updateSavedSettingsBaseline,
     settingsProfiles,
     settingsProfilesLoading,
+    settingsProfilesError,
     settingsProfileBusy,
     settingsProfileName,
     backupDestinationOptions,
