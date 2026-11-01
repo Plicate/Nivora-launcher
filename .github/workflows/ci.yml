@@ -20,7 +20,14 @@ jobs:
       - name: Install Tauri Rust test dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential libayatana-appindicator3-dev libssl-dev libwebkit2gtk-4.1-dev librsvg2-dev libxdo-dev
+          sudo apt-get install -y build-essential zlib1g-dev libayatana-appindicator3-dev libssl-dev libwebkit2gtk-4.1-dev librsvg2-dev libxdo-dev
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go-modcat/go.mod
+      - name: Build Tauri helper resources
+        run: |
+          bash scripts/build_modcat.sh
+          bash scripts/build_turbo.sh
       - name: Run Tauri Rust tests
         working-directory: frontend/src-tauri
         run: cargo test --locked
