@@ -4,6 +4,10 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT="${1:-$ROOT/frontend/src-tauri/resources/backend/nivora-modcat}"
+case "$OUT" in
+    /*|[A-Za-z]:/*|[A-Za-z]:\\*) ;;
+    *) OUT="$PWD/$OUT" ;;
+esac
 GO="${GO:-go}"
 if ! command -v "$GO" >/dev/null 2>&1; then
     for candidate in /usr/local/go/bin/go /usr/lib/go/bin/go "$HOME/.local/go/bin/go"; do
