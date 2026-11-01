@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use super::config::ConfigStore;
 use super::events::emit_status_event;
-use super::net::{client_from_settings, HttpClient};
+use super::net::{client_from_settings, plugin_request_client_from_settings, HttpClient};
 use super::plugins::PluginStore;
 
 const PLUGIN_MAX_ARCHIVE_BYTES: usize = 64 * 1024 * 1024;
@@ -477,17 +477,23 @@ fn request_body_bytes(body: Option<&Value>, method: &str, allowed_methods: &[&st
     Ok(Some(bytes))
 }
 
-fn http_client() -> Result<std::sync::Arc<HttpClient>, String> {
+fn http_client(operation_id: &str) -> Result<std::sync::Arc<HttpClient>, String> {
     // клиент не сохраняется: запросы плагинов краткосрочные
     let settings = ConfigStore::load()?.settings().clone();
-    client_from_settings(&settings, "plugin-network")
+    client_from_settings(&settings, operation_id)
+}
+
+fn http_client_with_timeout(operation_id: &str, timeout: Duration) -> Result<std::sync::Arc<HttpClient>, String> {
+    let settings = ConfigStore::load()?.settings().clone();
+    plugin_request_client_from_settings(&settings, operation_id, timeout)
 }
 
 pub fn plugin_network_fetch(request: &Value) -> Result<Value, String> {
     let store = plugin_store()?;
     let plugin_id = plugin_id_of(request);
     let manifest = require_permission_any(&store, &plugin_id, &["network:fetch", "network:https"])?;
-    let http = http_client()?;
+    let operation_id = request.get("operation_id").and_then(Value::as_str).unwrap_or_default();
+    let http = http_client(operation_id)?;
     if !http.proxy().is_empty() {
         return Err("Сетевые запросы плагинов через прокси запрещены: адрес узла невозможно проверить на стороне соединения".to_owned());
     }
@@ -603,6 +609,7 @@ pub fn plugin_http_request(request: &Value) -> Result<Value, String> {
         return Err("HTTP-метод плагина не поддерживается".to_owned());
     }
     let timeout_ms = plugin_timeout_ms(request_options.get("timeout_ms"))?;
+    let operation_id = request.get("operation_id").and_then(Value::as_str).unwrap_or_default();
     let mut headers = validated_headers(request_options.get("headers"), Vec::new())?;
     let body: Option<Vec<u8>> = match request_options.get("body") {
         None => None,
@@ -622,7 +629,7 @@ pub fn plugin_http_request(request: &Value) -> Result<Value, String> {
             return Err("Тело HTTP-запроса плагина слишком большое".to_owned());
         }
     }
-    let http = http_client()?;
+    let http = http_client_with_timeout(operation_id, Duration::from_millis(timeout_ms as u64))?;
     let proxy = http.proxy();
     require_plugin_direct_network(&proxy)?;
     let validate_redirect = |target: &str| -> Result<(), String> {

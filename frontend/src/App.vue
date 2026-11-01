@@ -1129,6 +1129,9 @@ let activityLogRevision = 0
 let activityLogInstanceName = ''
 let microsoftStatusTimer: number | undefined
 let microsoftStatusPollInFlight = false
+let appUnmounted = false
+let unlistenHiddenToTray: (() => void) | undefined
+let unlistenLaunchRequest: (() => void) | undefined
 let stopBackendEvents: (() => void) | undefined
 let systemThemeMedia: MediaQueryList | undefined
 let systemThemeListener: ((event: MediaQueryListEvent) => void) | undefined
@@ -1144,6 +1147,10 @@ const launcherHidden = ref(false)
 
 function syncLauncherHidden() {
   launcherHidden.value = document.hidden || !document.hasFocus()
+}
+
+function handleVisibilityChange() {
+  syncLauncherHidden()
 }
 
 function notifySystemIfHidden(message: string) {
@@ -3301,30 +3308,37 @@ onMounted(async () => {
     let trayHintShown = false
     try {
       const { listen } = await import('@tauri-apps/api/event')
-      await listen('nivora-hidden-to-tray', () => {
-        if (trayHintShown) return
-        trayHintShown = true
-        void bridge.systemNotify('Nivora Launcher', 'Лаунчер свернулся в трей и продолжает работать — глобальные клавиши и оверлей активны. Полный выход: «Выйти» в меню значка.').catch(() => undefined)
-      })
+      if (!appUnmounted) {
+        const unlisten = await listen('nivora-hidden-to-tray', () => {
+          if (trayHintShown) return
+          trayHintShown = true
+          void bridge.systemNotify('Nivora Launcher', 'Лаунчер свернулся в трей и продолжает работать — глобальные клавиши и оверлей активны. Полный выход: «Выйти» в меню значка.').catch(() => undefined)
+        })
+        if (appUnmounted) unlisten()
+        else unlistenHiddenToTray = unlisten
+      }
       // при уже запущенном лаунчере цель приходит отдельным событием
-      await listen<{ name: string | null }>('nivora-launch-request', (event) => {
-        const name = event.payload?.name
-        if (name) void launchFromShortcut(name)
-      })
+      if (!appUnmounted) {
+        const unlisten = await listen<{ name: string | null }>('nivora-launch-request', (event) => {
+          const name = event.payload?.name
+          if (name) void launchFromShortcut(name)
+        })
+        if (appUnmounted) unlisten()
+        else unlistenLaunchRequest = unlisten
+      }
     } catch {
     }
     // при холодном старте цель ярлыка доступна после инициализации интерфейса
-    void takeShortcutLaunchRequest()
+    if (!appUnmounted) void takeShortcutLaunchRequest()
   }
+  if (appUnmounted) return
   void loadSettingsProfiles()
   pluginController.startDevelopmentPolling()
   window.addEventListener('keydown', handleGlobalKeydown)
   window.addEventListener('resize', scheduleWallpaperRender)
   window.addEventListener('focus', syncLauncherHidden)
   window.addEventListener('blur', syncLauncherHidden)
-  document.addEventListener('visibilitychange', () => {
-    syncLauncherHidden()
-  })
+  document.addEventListener('visibilitychange', handleVisibilityChange)
   syncLauncherHidden()
   systemThemeMedia = window.matchMedia('(prefers-color-scheme: dark)')
   systemDark.value = systemThemeMedia.matches
@@ -3414,6 +3428,11 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  appUnmounted = true
+  unlistenHiddenToTray?.()
+  unlistenHiddenToTray = undefined
+  unlistenLaunchRequest?.()
+  unlistenLaunchRequest = undefined
   if (topbarMetricsTimer !== undefined) window.clearInterval(topbarMetricsTimer)
   stopOverlayWatcher()
   void detachOverlay()
@@ -3421,7 +3440,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('resize', scheduleWallpaperRender)
   window.removeEventListener('focus', syncLauncherHidden)
   window.removeEventListener('blur', syncLauncherHidden)
-  document.removeEventListener('visibilitychange', syncLauncherHidden)
+  document.removeEventListener('visibilitychange', handleVisibilityChange)
   if (wallpaperResizeTimer) window.clearTimeout(wallpaperResizeTimer)
   wallpaperRenderer.release()
   stopBackendEvents?.()

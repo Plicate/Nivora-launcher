@@ -124,6 +124,43 @@ async function ensureLoaded() {
 }
 
 const accountStatus = ref<{ signed_in: boolean; platform: string } | null>(null)
+type PollingContext = { instanceName: string; generation: number }
+type InstanceLogResult = Awaited<ReturnType<typeof bridge.instanceLog>>
+type InstanceLogRequest = PollingContext & { promise: Promise<InstanceLogResult> }
+let pollingGeneration = 0
+let pollingDisposed = false
+let instanceLogRequest: InstanceLogRequest | undefined
+let metricsPollInFlight = false
+
+function capturePollingContext(): PollingContext {
+  return { instanceName: props.instance.name, generation: pollingGeneration }
+}
+
+function isPollingContextCurrent(context: PollingContext) {
+  return !pollingDisposed
+    && context.generation === pollingGeneration
+    && context.instanceName === props.instance.name
+}
+
+function requestInstanceLog(context: PollingContext) {
+  if (pollingDisposed) return undefined
+  if (instanceLogRequest) {
+    return instanceLogRequest.instanceName === context.instanceName
+      && instanceLogRequest.generation === context.generation
+      ? instanceLogRequest.promise
+      : undefined
+  }
+
+  const request: InstanceLogRequest = {
+    ...context,
+    promise: bridge.instanceLog(context.instanceName),
+  }
+  request.promise = request.promise.finally(() => {
+    if (instanceLogRequest === request) instanceLogRequest = undefined
+  })
+  instanceLogRequest = request
+  return request.promise
+}
 
 async function refreshAccountStatus() {
   try {
@@ -134,31 +171,45 @@ async function refreshAccountStatus() {
 }
 
 async function refresh() {
+  const context = capturePollingContext()
   loading.value = true
   try {
     const [runtime, content, account] = await Promise.all([
-      bridge.bedrockRuntimeStatus(props.instance.name),
-      bridge.bedrockContentList(props.instance.name),
-      bridge.bedrockAccountStatus(props.instance.name).catch(() => null),
+      bridge.bedrockRuntimeStatus(context.instanceName),
+      bridge.bedrockContentList(context.instanceName),
+      bridge.bedrockAccountStatus(context.instanceName).catch(() => null),
     ])
+    if (!isPollingContextCurrent(context)) return
     status.value = runtime.status
     items.value = content.items
     accountStatus.value = account
     await pollMetrics()
   } catch (error) {
-    notice.value = error instanceof Error ? error.message : String(error)
+    if (isPollingContextCurrent(context)) {
+      notice.value = error instanceof Error ? error.message : String(error)
+    }
   } finally {
-    loading.value = false
+    if (isPollingContextCurrent(context)) loading.value = false
   }
 }
 
 async function pollMetrics() {
+  if (metricsPollInFlight || pollingDisposed) return
+  const context = capturePollingContext()
+  const request = requestInstanceLog(context)
+  if (!request) return
+  metricsPollInFlight = true
   try {
-    const result = await bridge.instanceLog(props.instance.name)
+    const result = await request
+    if (!isPollingContextCurrent(context)) return
     metrics.value = result.metrics
     metricHistory.value = [...metricHistory.value, result.metrics].slice(-60)
   } catch (error) {
-    if (!metrics.value) notice.value = error instanceof Error ? error.message : String(error)
+    if (isPollingContextCurrent(context) && !metrics.value) {
+      notice.value = error instanceof Error ? error.message : String(error)
+    }
+  } finally {
+    metricsPollInFlight = false
   }
 }
 
@@ -592,7 +643,13 @@ function formatSize(bytes: number) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`
 }
 
-watch(() => props.instance.name, () => void ensureLoaded())
+watch(
+  () => [props.instance, props.instance.name, props.instance.path],
+  () => {
+    pollingGeneration += 1
+    void ensureLoaded()
+  },
+)
 let metricsTimer: number | undefined
 const consoleLines = ref<string[]>([])
 const consoleRunning = ref(false)
@@ -601,24 +658,36 @@ const logArchives = ref<InstanceLogArchive[]>([])
 const archiveViewer = ref<{ id: string; content: string } | null>(null)
 const archiveBusy = ref(false)
 let consoleTimer: number | undefined
+let consolePollingEnabled = false
+let consolePollInFlight = false
 
 async function pollConsole() {
+  if (!consolePollingEnabled || consolePollInFlight || pollingDisposed) return
+  const context = capturePollingContext()
+  const request = requestInstanceLog(context)
+  if (!request) return
+  consolePollInFlight = true
   try {
-    const result = await bridge.instanceLog(props.instance.name)
+    const result = await request
+    if (!consolePollingEnabled || !isPollingContextCurrent(context)) return
     consoleLines.value = result.lines.slice(-300)
     consoleRunning.value = result.running
   } catch {
     // журнал появится после создания сессии
+  } finally {
+    consolePollInFlight = false
   }
 }
 
 function startConsolePolling() {
   if (consoleTimer !== undefined) return
+  consolePollingEnabled = true
   void pollConsole()
   consoleTimer = window.setInterval(() => void pollConsole(), 2500)
 }
 
 function stopConsolePolling() {
+  consolePollingEnabled = false
   if (consoleTimer !== undefined) window.clearInterval(consoleTimer)
   consoleTimer = undefined
 }
@@ -770,6 +839,8 @@ onMounted(() => {
 })
 onBeforeUnmount(() => {
   setupWatcherDisposed = true
+  pollingDisposed = true
+  pollingGeneration += 1
   if (metricsTimer !== undefined) window.clearInterval(metricsTimer)
   stopConsolePolling()
 })

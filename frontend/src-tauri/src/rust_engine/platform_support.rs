@@ -75,12 +75,22 @@ pub(crate) fn process_exists(pid: i32) -> bool {
     }
 }
 
-pub(crate) fn prepare_process(command: &mut std::process::Command) {
+pub(crate) fn prepare_process_group(command: &mut std::process::Command) {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
         command.process_group(0);
     }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        command.creation_flags(CREATE_NEW_PROCESS_GROUP);
+    }
+}
+
+pub(crate) fn prepare_process(command: &mut std::process::Command) {
+    prepare_process_group(command);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -123,6 +133,26 @@ pub(crate) fn terminate_process_tree(pid: i32, force: bool) {
                 CloseHandle(handle);
             }
         }
+    }
+}
+
+pub(crate) fn terminate_descendants_after_exit(pid: i32) {
+    if pid <= 0 {
+        return;
+    }
+    #[cfg(unix)]
+    unsafe {
+        // после выхода лидера сигнализируем только группу, чтобы не затронуть повторно использованный pid
+        libc::kill(-pid, libc::SIGKILL);
+    }
+    #[cfg(windows)]
+    if let Some(taskkill) = which_taskkill() {
+        let _ = super::platform::command(taskkill)
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
     }
 }
 
