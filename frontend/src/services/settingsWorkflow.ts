@@ -1,5 +1,6 @@
 import { computed, nextTick, ref, watch, type Ref } from 'vue'
 import { bridge } from './bridge'
+import { buttonFontStack, cropBackgroundPosition, cropBackgroundSize } from './buttonCustomization'
 import { confirmDialog } from './dialogs'
 import { launcherThemes } from './launcherExtensions'
 import { setExplorerMode } from './fileBrowser'
@@ -311,6 +312,8 @@ export function createSettingsWorkflow(deps: SettingsWorkflowDependencies) {
     '--blue': effectiveAccent.value,
     '--brand-color': currentTheme.value === 'light' ? '#111214' : '#f4f7ff',
     '--sidebar-bg': `color-mix(in srgb, ${effectiveColorTokens.value.panel} 92%, ${effectiveColorTokens.value.background})`,
+    '--sidebar-texture-image': appearanceDraft.sidebar_texture_data ? `url("${appearanceDraft.sidebar_texture_data}")` : 'none',
+    '--radius-sidebar': `${appearanceDraft.radius_tokens.sidebar ?? 0}px`,
     '--ui-scale': `${appearanceDraft.ui_scale / 100}`,
     '--radius': `${appearanceDraft.radius_tokens.card}px`,
     '--radius-card': `${appearanceDraft.radius_tokens.card}px`,
@@ -321,6 +324,23 @@ export function createSettingsWorkflow(deps: SettingsWorkflowDependencies) {
     '--sidebar-width': `${sidebarWidth.value}px`,
     '--sidebar-height': `${sidebarHeight.value}px`,
     '--font-family': fontFamilyCss.value,
+    '--button-width': `${Math.max(120, Math.min(280, appearanceDraft.button_customization.width))}px`,
+    '--button-height': `${Math.max(28, Math.min(64, appearanceDraft.button_customization.height))}px`,
+    '--button-font-family': buttonFontStack(appearanceDraft.button_customization.font_family),
+    '--button-font-size': `${Math.max(9, Math.min(20, appearanceDraft.button_customization.font_size))}px`,
+    '--button-text-stroke': appearanceDraft.button_customization.outline.enabled
+      ? `${Math.max(0, Math.min(3, appearanceDraft.button_customization.outline.width))}px ${appearanceDraft.button_customization.outline.color}`
+      : '0 transparent',
+    '--button-texture-image': appearanceDraft.button_customization.texture_data
+      ? `url("${appearanceDraft.button_customization.texture_data}")`
+      : 'none',
+    '--button-icon-image': appearanceDraft.button_customization.icon_data
+      ? `url("${appearanceDraft.button_customization.icon_data}")`
+      : 'none',
+    '--button-texture-size': cropBackgroundSize(appearanceDraft.button_customization.crop_enabled ? appearanceDraft.button_customization.crop : { x: 0, y: 0, width: 100, height: 100 }, appearanceDraft.button_customization.texture_fit),
+    '--button-texture-position': appearanceDraft.button_customization.crop_enabled
+      ? cropBackgroundPosition(appearanceDraft.button_customization.crop)
+      : '50% 50%',
     '--page-duration': `${effectiveAnimationDuration.value}ms`,
     '--surface-duration': `${appearanceDraft.animation_settings.surface_duration_ms}ms`,
     '--surface-stagger': `${appearanceDraft.animation_settings.surface_stagger_ms}ms`,
@@ -605,6 +625,7 @@ export function createSettingsWorkflow(deps: SettingsWorkflowDependencies) {
         widget_visibility: { ...appearanceDraft.widget_visibility },
         color_tokens: { ...appearanceDraft.color_tokens },
         radius_tokens: { ...appearanceDraft.radius_tokens },
+        sidebar_texture_data: appearanceDraft.sidebar_texture_data,
         login_source: settingsDraft.login_source,
         login_api_url: settingsDraft.login_api_url.trim(),
         catalog_source: settingsDraft.catalog_source,

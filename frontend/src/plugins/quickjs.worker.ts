@@ -442,6 +442,19 @@ function facadeSource(manifestJson: string, names: { start: string; dispatch: st
       if (typeof text !== 'string' || text.length > maxChars) throw new RangeError('Plugin payload exceeds the size limit');
       return JSON.parse(text);
     };
+    const parseThemeColor = (value) => {
+      if (typeof value !== 'string' || value.length > 16) return '';
+      const input = value.trim();
+      if (/^#[\\da-f]{3}$/i.test(input)) return ('#' + input.slice(1).split('').map((part) => part + part).join('')).toLowerCase();
+      return /^#[\\da-f]{6}$/i.test(input) ? input.toLowerCase() : '';
+    };
+    const normalizeThemeColor = (value, fallback) => parseThemeColor(value) || parseThemeColor(fallback) || '#000000';
+    const requireThemeKey = (name) => {
+      if (typeof name !== 'string' || name.length > 256 || !/^[a-z][a-z0-9_.-]{0,255}$/i.test(name) || ['__proto__', 'constructor', 'prototype'].includes(name.toLowerCase())) {
+        throw new TypeError('Theme key must be a safe name of at most 256 characters');
+      }
+      return name;
+    };
     const request = (operation, args = {}) => {
       const text = JSON.stringify(args);
       if (typeof text !== 'string' || text.length > MAX_RPC_CHARS) return Promise.reject(new RangeError('Host-call payload exceeds the size limit'));
@@ -543,6 +556,7 @@ function facadeSource(manifestJson: string, names: { start: string; dispatch: st
       apiVersion: manifest.api_version,
     });
     freezeDeep(manifest);
+    const getThemeSnapshot = () => request('theme.get').then((value) => freezeDeep(cloneJson(value, MAX_RPC_CHARS)));
     const api = Object.freeze({
       metadata,
       manifest,
@@ -662,7 +676,30 @@ function facadeSource(manifestJson: string, names: { start: string; dispatch: st
         },
       }),
       theme: Object.freeze({
-        get() { return request('theme.get'); },
+        get() { return getThemeSnapshot(); },
+        getColor(name) {
+          const key = requireThemeKey(name);
+          return getThemeSnapshot().then((snapshot) => Object.prototype.hasOwnProperty.call(snapshot.colors || {}, key) ? snapshot.colors[key] : undefined);
+        },
+        getToken(name) {
+          const key = requireThemeKey(name);
+          return getThemeSnapshot().then((snapshot) => Object.prototype.hasOwnProperty.call(snapshot.tokens || {}, key) ? snapshot.tokens[key] : undefined);
+        },
+        getButtonStyle() { return getThemeSnapshot().then((snapshot) => snapshot.buttonStyle); },
+        getButtonLabels() { return getThemeSnapshot().then((snapshot) => snapshot.buttonLabels); },
+        getLocale() { return getThemeSnapshot().then((snapshot) => snapshot.locale); },
+        getFonts() { return getThemeSnapshot().then((snapshot) => snapshot.fonts); },
+        normalizeColor(value, fallback) { return normalizeThemeColor(value, fallback); },
+        contrastRatio(foreground, background) {
+          const parse = (value) => {
+            const normalized = parseThemeColor(value);
+            if (!normalized) throw new TypeError('Colors must be #rgb or #rrggbb hex values');
+            return [1, 3, 5].map((index) => parseInt(normalized.slice(index, index + 2), 16) / 255).map((channel) => channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4);
+          };
+          const luminance = (channels) => channels[0] * 0.2126 + channels[1] * 0.7152 + channels[2] * 0.0722;
+          const first = luminance(parse(foreground)), second = luminance(parse(background));
+          return (Math.max(first, second) + 0.05) / (Math.min(first, second) + 0.05);
+        },
         register(definition) {
           const registrationId = 'theme-' + (++nextRegistrationId);
           return subscribe('theme.register', 'theme.unregister', { registration_id: registrationId, definition }, { registration_id: registrationId });

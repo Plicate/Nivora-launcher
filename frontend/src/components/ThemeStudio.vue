@@ -5,14 +5,21 @@ import CustomSelect from './CustomSelect.vue'
 import Icon from './Icon.vue'
 import NumericStepper from './NumericStepper.vue'
 import ThemeStudioPreview from './ThemeStudioPreview.vue'
-import type { AppearanceSettings, SelectOption, ViewName } from '../types'
+import ThemeButtonSettingsEditor from './ThemeButtonSettingsEditor.vue'
+import { buttonCustomizationRole, normalizeButtonCustomization, resolveButtonCustomization, resolveButtonLabel, safeDataUrl, type ButtonCustomizationTarget, type ButtonLabelKey } from '../services/buttonCustomization'
+import { pickFile } from '../services/fileBrowser'
+import type { ButtonCustomization } from '../services/buttonCustomization'
+import type { AppearanceSettings, InstanceInfo, SelectOption, ViewName } from '../types'
 
 const props = defineProps<{
   appearance: AppearanceSettings
+  instances?: InstanceInfo[]
   tokens: Record<string, string>
   theme: string
   baseTheme?: string
   fontFamily: string
+  language: string
+  languageOptions: SelectOption[]
   pages: Array<{ id: ViewName; title: string; kicker: string }>
   wallpaperUrl: string
   defaultColorTokens: Record<string, string>
@@ -25,6 +32,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   'update:fontFamily': [value: string]
+  'update:language': [value: string]
   save: []
   resetAppearance: []
   importWallpaperFile: [] | [void]
@@ -33,6 +41,14 @@ const emit = defineEmits<{
   openPage: [view: ViewName]
 }>()
 
+const labelOptions: Array<{ key: ButtonLabelKey; label: string }> = [
+  { key: 'instances', label: 'Экземпляры' },
+  { key: 'accounts', label: 'Аккаунты' },
+  { key: 'mods', label: 'Каталог' },
+  { key: 'modpacks', label: 'Модпаки' },
+  { key: 'themes', label: 'Темы' },
+  { key: 'settings', label: 'Настройки' },
+]
 const themeOptions: SelectOption[] = [
   { value: 'system', label: 'Как в системе', meta: 'Автоматически' },
   { value: 'dark', label: 'Тёмная', meta: 'Насыщенный интерфейс' },
@@ -119,15 +135,16 @@ const perPageAnimationStyleOptions: SelectOption[] = [
   ...animationStyleOptions,
 ]
 const radiusPresets: Array<{ label: string; hint: string; value: Record<string, number> }> = [
-  { label: 'Острые', hint: 'Строгие прямые углы', value: { card: 0, button: 0, control: 0 } },
-  { label: 'Стандарт', hint: 'Значения Nivora по умолчанию', value: { card: 7, button: 8, control: 10 } },
-  { label: 'Скруглённые', hint: 'Мягкий современный вид', value: { card: 12, button: 12, control: 12 } },
-  { label: 'Мягкие', hint: 'Максимально плавные формы', value: { card: 18, button: 20, control: 22 } },
+  { label: 'Острые', hint: 'Строгие прямые углы', value: { card: 0, button: 0, control: 0, sidebar: 0 } },
+  { label: 'Стандарт', hint: 'Значения Nivora по умолчанию', value: { card: 7, button: 8, control: 10, sidebar: 0 } },
+  { label: 'Скруглённые', hint: 'Мягкий современный вид', value: { card: 12, button: 12, control: 12, sidebar: 8 } },
+  { label: 'Мягкие', hint: 'Максимально плавные формы', value: { card: 18, button: 20, control: 22, sidebar: 16 } },
 ]
 
-type RailSection = 'general' | 'colors' | 'shape' | 'wallpaper' | 'navigation' | 'motion' | 'pages'
+type RailSection = 'general' | 'buttons' | 'colors' | 'shape' | 'wallpaper' | 'navigation' | 'motion' | 'pages'
 const railSections: Array<{ id: RailSection; label: string; icon: string; hint: string }> = [
   { id: 'general', label: 'Тема', icon: 'palette', hint: 'Режим, акцент, шрифт, масштаб' },
+  { id: 'buttons', label: 'Кнопки', icon: 'settings', hint: 'Размер, текст, иконка, текстура и звук' },
   { id: 'colors', label: 'Цвета', icon: 'mods', hint: 'Вся палитра лаунчера' },
   { id: 'shape', label: 'Формы', icon: 'instances', hint: 'Закруглённости и плотность' },
   { id: 'wallpaper', label: 'Обои', icon: 'image', hint: 'Картинка, размытие, видимость' },
@@ -137,23 +154,45 @@ const railSections: Array<{ id: RailSection; label: string; icon: string; hint: 
 ]
 const activeSection = ref<RailSection>('general')
 const selectedTarget = ref('')
+const selectedButtonLabelFallback = ref('')
 const hoveredTarget = ref('')
+const buttonScope = ref<'global' | 'specific'>('global')
 
 function selectRailSection(id: RailSection) {
   activeSection.value = id
   selectedTarget.value = ''
+  selectedButtonLabelFallback.value = ''
+  buttonScope.value = 'global'
 }
 
-function selectTarget(target: string) {
+function targetEditor(target: string): TargetEditor | undefined {
+  const registered = targetRegistry[target]
+  if (registered) return registered
+  const role = buttonCustomizationRole(target)
+  const group = role ? targetRegistry[role] : undefined
+  return group ? { ...group, buttonId: target as ButtonCustomizationTarget } : undefined
+}
+
+function selectTarget(target: string, label?: string) {
   selectedTarget.value = target
+  selectedButtonLabelFallback.value = label || ''
+  const buttonId = targetEditor(target)?.buttonId
+  if (buttonId) {
+    activeSection.value = 'buttons'
+    buttonScope.value = 'specific'
+  } else {
+    buttonScope.value = 'global'
+  }
 }
 
 function clearSelection() {
   selectedTarget.value = ''
+  selectedButtonLabelFallback.value = ''
+  buttonScope.value = 'global'
 }
 
 function handleEscape() {
-  if (selectedTarget.value) selectedTarget.value = ''
+  if (selectedTarget.value) clearSelection()
 }
 
 onMounted(() => { window.addEventListener('keydown', handleStudioKeydown) })
@@ -163,7 +202,8 @@ type TargetEditor = {
   label: string
   description: string
   tokens: string[]
-  radius?: { key: 'card' | 'button' | 'control'; label: string }
+  buttonId?: ButtonCustomizationTarget
+  radius?: { key: 'card' | 'button' | 'control' | 'sidebar'; label: string }
   extras?: 'wallpaper' | 'sidebar' | 'text'
   note?: string
 }
@@ -179,12 +219,13 @@ const targetRegistry: Record<string, TargetEditor> = {
     label: 'Сайдбар',
     description: 'Навигационная панель с брендом и меню.',
     tokens: ['panel'],
-    radius: { key: 'card', label: 'Закруглённость панели' },
+    radius: { key: 'sidebar', label: 'Закруглённость сайдбара' },
     extras: 'sidebar',
   },
   'nav-item': {
     label: 'Пункт меню',
     description: 'Кнопки навигации в сайдбаре.',
+    buttonId: 'nav-item',
     tokens: ['quiet', 'muted', 'accent'],
     radius: { key: 'button', label: 'Закруглённость пункта' },
     note: 'Активный пункт подсвечивается акцентом, соседние — вторичным текстом.',
@@ -204,6 +245,7 @@ const targetRegistry: Record<string, TargetEditor> = {
   'topbar-button': {
     label: 'Кнопка действия',
     description: 'Акцентная кнопка в верхней панели («Импортировать»).',
+    buttonId: 'topbar-button',
     tokens: ['accent', 'accent_strong'],
     radius: { key: 'button', label: 'Закруглённость кнопки' },
     note: 'Цвет текста на кнопке подбирается автоматически для контраста.',
@@ -223,6 +265,7 @@ const targetRegistry: Record<string, TargetEditor> = {
   'hero-play': {
     label: 'Кнопка «Играть»',
     description: 'Главная кнопка запуска игры в строке экземпляра.',
+    buttonId: 'hero-play',
     tokens: ['accent'],
     radius: { key: 'button', label: 'Закруглённость кнопки' },
   },
@@ -235,6 +278,7 @@ const targetRegistry: Record<string, TargetEditor> = {
   'card-button': {
     label: 'Вторичная кнопка',
     description: 'Тихие кнопки на карточках («Открыть», «Запустить»).',
+    buttonId: 'card-button',
     tokens: ['quiet', 'border'],
     radius: { key: 'button', label: 'Закруглённость кнопки' },
   },
@@ -252,23 +296,73 @@ const targetRegistry: Record<string, TargetEditor> = {
   },
 }
 
-const currentTarget = computed(() => targetRegistry[selectedTarget.value])
+const currentTarget = computed(() => targetEditor(selectedTarget.value))
 const currentRailSection = computed(() => railSections.find((section) => section.id === activeSection.value)!)
 
 const inspectorTitle = computed(() => currentTarget.value?.label || currentRailSection.value.label)
 const inspectorSubtitle = computed(() => currentTarget.value?.description || currentRailSection.value.hint)
+const selectedButtonId = computed(() => currentTarget.value?.buttonId)
+const activeButtonSettings = computed(() => selectedButtonId.value && buttonScope.value === 'specific'
+  ? resolveButtonCustomization(props.appearance.button_customization, selectedButtonId.value)
+  : normalizeButtonCustomization(props.appearance.button_customization))
+const activeButtonOverride = computed(() => {
+  const target = selectedButtonId.value
+  return target ? props.appearance.button_customization.overrides?.[target] : undefined
+})
+const hasButtonOverride = computed(() => Boolean(activeButtonOverride.value && Object.keys(activeButtonOverride.value).length))
+const selectedButtonLabel = computed(() => {
+  const target = selectedButtonId.value
+  if (!target || buttonScope.value !== 'specific' || !selectedButtonLabelFallback.value) return undefined
+  return resolveButtonLabel(props.appearance.button_customization, target, selectedButtonLabelFallback.value)
+})
+
+function updateButtonSettings(patch: Partial<ButtonCustomization>) {
+  pushHistory()
+  const current = normalizeButtonCustomization(props.appearance.button_customization)
+  if (!selectedButtonId.value || buttonScope.value === 'global') {
+    props.appearance.button_customization = normalizeButtonCustomization({ ...current, ...patch })
+    return
+  }
+  const overrides = { ...current.overrides }
+  overrides[selectedButtonId.value] = { ...overrides[selectedButtonId.value], ...patch }
+  props.appearance.button_customization = normalizeButtonCustomization({ ...current, overrides })
+}
+
+function updateButtonLabel(value: string) {
+  const target = selectedButtonId.value
+  if (!target || buttonScope.value !== 'specific' || !selectedButtonLabelFallback.value) return
+  pushHistory()
+  const current = normalizeButtonCustomization(props.appearance.button_customization)
+  const overrides = { ...current.overrides }
+  const override = { ...overrides[target] }
+  const label = Array.from(value).slice(0, 16).join('')
+  if (label) override.label = label
+  else delete override.label
+  overrides[target] = override
+  props.appearance.button_customization = normalizeButtonCustomization({ ...current, overrides })
+}
+
+function resetButtonOverride() {
+  const target = selectedButtonId.value
+  if (!target) return
+  pushHistory()
+  const current = normalizeButtonCustomization(props.appearance.button_customization)
+  const overrides = { ...current.overrides }
+  delete overrides[target]
+  props.appearance.button_customization = normalizeButtonCustomization({ ...current, overrides })
+}
 const contextLabel = computed(() => selectedTarget.value
   ? `Редактируется: ${currentTarget.value?.label}`
   : `Общие настройки · ${currentRailSection.value.label}`)
 const statusHint = computed(() => {
-  if (hoveredTarget.value && targetRegistry[hoveredTarget.value]) return `${targetRegistry[hoveredTarget.value].label} — клик, чтобы настроить`
+  if (hoveredTarget.value && targetEditor(hoveredTarget.value)) return `${targetEditor(hoveredTarget.value)?.label} — клик, чтобы настроить`
   if (selectedTarget.value) return 'Esc или клик по фону — вернуться к общим настройкам'
   return 'Кликните элемент в предпросмотре — откроется его редактор'
 })
 
 const themeLabel = computed(() => themeOptions.find((option) => option.value === props.appearance.theme)?.label || props.appearance.theme)
 const fontLabel = computed(() => fontFamilyOptions.find((option) => option.value === props.fontFamily)?.label || props.fontFamily)
-const radiusSummary = computed(() => `${props.appearance.radius_tokens.card}/${props.appearance.radius_tokens.button}/${props.appearance.radius_tokens.control}`)
+const radiusSummary = computed(() => `${props.appearance.radius_tokens.card}/${props.appearance.radius_tokens.button}/${props.appearance.radius_tokens.control}/${props.appearance.radius_tokens.sidebar ?? 0}`)
 
 function setAccentColor(value: string) {
   const normalized = value.trim().toLowerCase()
@@ -341,7 +435,7 @@ function resetRadiusTokens() {
   props.appearance.radius_tokens = { ...props.defaultRadiusTokens }
 }
 
-type StudioSnapshot = { accent: string; tokens: Record<string, string>; radius: Record<string, number> }
+type StudioSnapshot = { accent: string; tokens: Record<string, string>; radius: Record<string, number>; sidebarTexture: string; buttons: ButtonCustomization }
 const undoStack = ref<StudioSnapshot[]>([])
 const redoStack = ref<StudioSnapshot[]>([])
 
@@ -350,6 +444,8 @@ function snapshotAppearance(): StudioSnapshot {
     accent: props.appearance.accent_color,
     tokens: { ...props.appearance.color_tokens },
     radius: { ...props.appearance.radius_tokens },
+    sidebarTexture: props.appearance.sidebar_texture_data,
+    buttons: JSON.parse(JSON.stringify(normalizeButtonCustomization(props.appearance.button_customization))) as ButtonCustomization,
   }
 }
 
@@ -364,6 +460,8 @@ function restoreSnapshot(snapshot: StudioSnapshot) {
   props.appearance.accent_color = snapshot.accent
   props.appearance.color_tokens = { ...snapshot.tokens }
   props.appearance.radius_tokens = { ...snapshot.radius }
+  props.appearance.sidebar_texture_data = snapshot.sidebarTexture
+  props.appearance.button_customization = normalizeButtonCustomization(snapshot.buttons)
 }
 
 function undoAppearance() {
@@ -517,10 +615,11 @@ const previewWidthOptions: Array<{ id: PreviewWidth; label: string; hint: string
 ]
 const previewDesignWidth = computed(() => ({ compact: 560, standard: 860, wide: 1180 }[previewWidth.value]))
 
-const radiusKeys: Array<{ key: 'card' | 'button' | 'control'; label: string; hint: string }> = [
+const radiusKeys: Array<{ key: 'card' | 'button' | 'control' | 'sidebar'; label: string; hint: string }> = [
   { key: 'card', label: 'Панели и карточки', hint: 'Карточки, модальные окна, секции' },
   { key: 'button', label: 'Кнопки и навигация', hint: 'Кнопки, пункты меню, чипы действий' },
   { key: 'control', label: 'Поля ввода', hint: 'Поиск, поля, мелкие элементы' },
+  { key: 'sidebar', label: 'Сайдбар', hint: 'Только навигационная панель' },
 ]
 
 const sidebarWidthDisabled = computed(() =>
@@ -531,6 +630,34 @@ const sidebarWidthDisabled = computed(() =>
 
 function chooseWallpaper() {
   emit('importWallpaperFile')
+}
+
+const sidebarTextureError = ref('')
+const SIDEBAR_TEXTURE_LIMIT = 15 * 1024 * 1024
+
+async function chooseSidebarTexture() {
+  const file = await pickFile({ accept: '.png,.jpg,.jpeg,.webp', title: 'Текстура сайдбара' })
+  if (!file) return
+  if (file.size > SIDEBAR_TEXTURE_LIMIT) {
+    sidebarTextureError.value = 'Изображение должно быть не больше 15 МБ.'
+    return
+  }
+  const extension = file.fileName.split('.').pop()?.toLowerCase()
+  const mime = extension === 'png' ? 'image/png' : extension === 'jpg' || extension === 'jpeg' ? 'image/jpeg' : extension === 'webp' ? 'image/webp' : ''
+  const data = mime ? `data:${mime};base64,${file.data}` : ''
+  if (!safeDataUrl(data, 'image')) {
+    sidebarTextureError.value = 'Выберите PNG, JPEG или WebP не больше 15 МБ.'
+    return
+  }
+  pushHistory()
+  props.appearance.sidebar_texture_data = data
+  sidebarTextureError.value = ''
+}
+
+function clearSidebarTexture() {
+  pushHistory()
+  props.appearance.sidebar_texture_data = ''
+  sidebarTextureError.value = ''
 }
 
 const fontFamilyValue = computed({
@@ -597,11 +724,13 @@ const saveLabel = computed(() => {
           <ThemeStudioPreview
             interactive
             :appearance="appearance"
+            :instances="instances"
             :tokens="tokens"
             :theme="baseTheme || theme"
             :default-tokens="defaultColorTokens"
             :light-tokens="lightTokens"
             :font-family="fontFamily"
+            :language="language"
             :wallpaper-url="wallpaperUrl"
             :selected="selectedTarget"
             :hovered="hoveredTarget"
@@ -623,6 +752,23 @@ const saveLabel = computed(() => {
 
         <div class="studio-inspector-body">
           <template v-if="currentTarget">
+            <div v-if="currentTarget.buttonId" class="studio-button-inspector">
+              <div class="studio-button-scope" role="group" aria-label="Область настройки кнопок">
+                <button type="button" :class="{ active: buttonScope === 'global' }" @click="buttonScope = 'global'">Все кнопки</button>
+                <button type="button" :class="{ active: buttonScope === 'specific' }" @click="buttonScope = 'specific'">Только эта</button>
+              </div>
+              <p v-if="buttonScope === 'specific'" class="studio-inspector-note">Собственные параметры этой кнопки. Остальные используют общие настройки.</p>
+              <button v-if="buttonScope === 'specific' && hasButtonOverride" class="text-button" type="button" @click="resetButtonOverride"><Icon name="refresh" :size="13" />Сбросить её настройки</button>
+            </div>
+            <ThemeButtonSettingsEditor
+              v-if="currentTarget.buttonId"
+              :settings="activeButtonSettings"
+              :resource-prefix="buttonScope === 'specific' ? (buttonCustomizationRole(currentTarget.buttonId) || currentTarget.buttonId) : 'global'"
+              :button-label="selectedButtonLabel"
+              label-placeholder="Играть"
+              @update:settings="updateButtonSettings"
+              @update:button-label="updateButtonLabel"
+            />
             <div v-for="token in currentTarget.tokens" :key="token" class="studio-token-row">
               <div class="studio-token-meta">
                 <span class="studio-token-swatch" :style="{ background: tokens[token] }" />
@@ -654,6 +800,9 @@ const saveLabel = computed(() => {
               <h4>Поведение сайдбара</h4>
               <div class="field"><span>Положение</span><CustomSelect v-model="appearance.sidebar_position" :options="sidebarPositionOptions" /></div>
               <div class="field"><span>Режим содержимого</span><CustomSelect v-model="appearance.sidebar_mode" :options="sidebarModeOptions" /></div>
+              <div class="button-asset-row"><span><strong>Текстура фона</strong><small>{{ appearance.sidebar_texture_data ? 'Изображение выбрано' : 'Не выбрана' }}</small></span><button class="button button--small button--outline" type="button" @click="chooseSidebarTexture">{{ appearance.sidebar_texture_data ? 'Заменить' : 'Выбрать' }}</button><button v-if="appearance.sidebar_texture_data" class="icon-button" type="button" aria-label="Убрать текстуру сайдбара" @click="clearSidebarTexture"><Icon name="close" :size="14" /></button></div>
+              <p v-if="sidebarTextureError" class="studio-inspector-note studio-inspector-note--error" role="alert">{{ sidebarTextureError }}</p>
+              <small class="studio-inspector-note">PNG, JPEG или WebP · до 15 МБ</small>
               <label class="workspace-check"><input v-model="appearance.sidebar_floating" type="checkbox" /><span><strong>Плавающий режим</strong><small>Сайдбар не приклеен к краю окна</small></span></label>
               <button class="text-button" type="button" @click="selectRailSection('navigation')"><Icon name="monitor" :size="13" />Все настройки навигации</button>
             </div>
@@ -670,6 +819,8 @@ const saveLabel = computed(() => {
           <template v-else-if="activeSection === 'general'">
             <div class="studio-inspector-field"><div class="field"><span>Основная тема</span><CustomSelect v-model="appearance.theme" :options="themeOptions" /></div></div>
             <div class="studio-inspector-field"><div class="field"><span>Шрифт интерфейса</span><CustomSelect v-model="fontFamilyValue" :options="fontFamilyOptions" /></div></div>
+            <div class="studio-inspector-field"><div class="field"><span>Язык интерфейса</span><CustomSelect :model-value="language" :options="languageOptions" @update:model-value="emit('update:language', $event)" /></div></div>
+            <p class="studio-inspector-note">При применении темы её язык выбирается автоматически. Здесь можно переключить язык отдельно от темы.</p>
             <div class="studio-inspector-group">
               <h4>Акцент</h4>
               <div class="studio-token-row">
@@ -689,6 +840,15 @@ const saveLabel = computed(() => {
             <div class="studio-inspector-field"><div class="field"><span>Плотность</span><CustomSelect v-model="appearance.density" :options="densityOptions" /></div></div>
             <div class="studio-inspector-field"><div class="field"><span>Экземпляры</span><CustomSelect v-model="appearance.instance_layout" :options="instanceLayoutOptions" /></div></div>
             <label class="field"><span>Масштаб интерфейса <strong>{{ appearance.ui_scale }}%</strong></span><input v-model.number="appearance.ui_scale" type="range" min="80" max="125" step="5" /></label>
+          </template>
+
+          <template v-else-if="activeSection === 'buttons'">
+            <ThemeButtonSettingsEditor :settings="appearance.button_customization" resource-prefix="global" @update:settings="updateButtonSettings" />
+            <div class="studio-inspector-group">
+              <h4>Подписи навигации</h4>
+              <label v-for="item in labelOptions" :key="item.key" class="field"><span>{{ item.label }} <strong>{{ Array.from(appearance.button_customization.labels[item.key]).length }}/16</strong></span><input v-model="appearance.button_customization.labels[item.key]" type="text" maxlength="16" :placeholder="item.label" /></label>
+              <p class="studio-inspector-note">Если подпись не помещается, она сокращается с многоточием. Наведение показывает полный текст в подсказке лаунчера.</p>
+            </div>
           </template>
 
           <template v-else-if="activeSection === 'colors'">
@@ -766,6 +926,13 @@ const saveLabel = computed(() => {
             <div class="studio-inspector-field"><div class="field"><span>Ширина</span><CustomSelect v-model="appearance.sidebar_width_mode" :options="sidebarWidthModeOptions" /></div></div>
             <div class="studio-inspector-field"><div class="field"><span>Видимость</span><CustomSelect v-model="appearance.sidebar_visibility" :options="sidebarVisibilityOptions" /></div></div>
             <label class="field" :class="{ 'field--disabled': sidebarWidthDisabled }"><span>Размер rail <strong>{{ sidebarWidthDisabled ? 'фиксированный' : `${appearance.sidebar_width} px` }}</strong></span><input v-model.number="appearance.sidebar_width" type="range" min="168" max="360" :disabled="sidebarWidthDisabled" /><small>{{ appearance.sidebar_position === 'top' || appearance.sidebar_position === 'bottom' ? 'Для верхней и нижней панели ширина задаётся окном.' : appearance.sidebar_width_mode === 'manual' ? 'Перетащите ползунок или растяните rail за край.' : 'Ползунок недоступен: выберите режим «Вручную», чтобы менять ширину.' }}</small></label>
+            <div class="studio-inspector-group">
+              <h4>Внешний вид сайдбара</h4>
+              <label class="field"><span>Закруглённость <strong>{{ appearance.radius_tokens.sidebar ?? 0 }} px</strong></span><input v-model.number="appearance.radius_tokens.sidebar" type="range" min="0" max="24" /></label>
+              <div class="button-asset-row"><span><strong>Текстура фона</strong><small>{{ appearance.sidebar_texture_data ? 'Изображение выбрано' : 'Не выбрана' }}</small></span><button class="button button--small button--outline" type="button" @click="chooseSidebarTexture">{{ appearance.sidebar_texture_data ? 'Заменить' : 'Выбрать' }}</button><button v-if="appearance.sidebar_texture_data" class="icon-button" type="button" aria-label="Убрать текстуру сайдбара" @click="clearSidebarTexture"><Icon name="close" :size="14" /></button></div>
+              <p v-if="sidebarTextureError" class="studio-inspector-note studio-inspector-note--error" role="alert">{{ sidebarTextureError }}</p>
+              <small class="studio-inspector-note">PNG, JPEG или WebP · до 15 МБ</small>
+            </div>
             <label class="workspace-check"><input v-model="appearance.sidebar_floating" type="checkbox" /><span><strong>Плавающий режим</strong><small>Сайдбар не приклеен к краю окна</small></span></label>
           </template>
 

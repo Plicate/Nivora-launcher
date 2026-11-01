@@ -2,11 +2,30 @@ import type { ComputedRef, Ref } from 'vue'
 import type { PluginUiTone } from '../../../plugins/api'
 import { bridge } from './bridge'
 import type { AnimationSettings, AppState, AppearanceSettings, LauncherThemePreset, ThemeSaveRequest } from '../types'
+import { buttonCustomizationRole, DEFAULT_BUTTON_CUSTOMIZATION, normalizeButtonCustomization, type ButtonCustomizationTarget } from './buttonCustomization'
+
+function stableResourceHash(value: string): string {
+  let hash = 0xcbf29ce484222325n
+  for (const byte of new TextEncoder().encode(value)) {
+    hash = BigInt.asUintN(64, (hash ^ BigInt(byte)) * 0x100000001b3n)
+  }
+  return hash.toString(16).padStart(16, '0')
+}
+
+function themeResourceUrl(theme: LauncherThemePreset, key: string, fallbackPath = ''): string {
+  const raw = theme.resource_data?.[key] || ''
+  if (!raw) return ''
+  if (raw.startsWith('data:')) return raw
+  const path = theme.resources?.[key] || fallbackPath
+  const extension = path.split('.').pop()?.toLowerCase() || ''
+  const mime = extension === 'png' ? 'image/png' : extension === 'jpg' || extension === 'jpeg' ? 'image/jpeg' : extension === 'webp' ? 'image/webp' : extension === 'ogg' ? 'audio/ogg' : extension === 'wav' ? 'audio/wav' : extension === 'webm' ? 'audio/webm' : extension === 'mp3' ? 'audio/mpeg' : ''
+  return mime ? `data:${mime};base64,${raw}` : ''
+}
 
 type ThemeManagerDependencies = {
   state: AppState
   appearanceDraft: AppearanceSettings
-  settingsDraft: { font_family: string }
+  settingsDraft: { font_family: string; language: string | null }
   localThemes: Ref<LauncherThemePreset[]>
   themeOperationBusy: Ref<boolean>
   githubThemeInstallBusy: Ref<boolean>
@@ -23,6 +42,7 @@ type ThemeManagerDependencies = {
   errorMessage: (error: unknown) => string
   saveSettings: () => Promise<boolean>
   releaseWallpaperPreview: () => void
+  setLanguageFromSettings: (value: string) => void
 }
 
 export function createThemeManager(deps: ThemeManagerDependencies) {
@@ -46,6 +66,7 @@ export function createThemeManager(deps: ThemeManagerDependencies) {
     errorMessage,
     saveSettings,
     releaseWallpaperPreview,
+    setLanguageFromSettings,
   } = deps
 
   function applyTheme(theme: LauncherThemePreset) {
@@ -54,6 +75,8 @@ export function createThemeManager(deps: ThemeManagerDependencies) {
     appearanceDraft.theme = theme.mode
     appearanceDraft.accent_color = theme.accent
     appearanceDraft.sidebar_mode = theme.sidebar_mode
+    appearanceDraft.sidebar_texture_data = themeResourceUrl(theme, 'sidebar', theme.resources?.sidebar)
+    appearanceDraft.radius_tokens = { ...defaultRadiusTokens, ...(theme.radius_tokens || {}) }
     appearanceDraft.density = theme.density
     // дополняем цвета пресета базовой палитрой, чтобы не сохранять цвета старой темы
     const base = theme.mode === 'light' ? lightColorTokens : defaultColorTokens
@@ -66,6 +89,31 @@ export function createThemeManager(deps: ThemeManagerDependencies) {
       panel_soft: theme.panel_soft,
       banner_shade: theme.background,
     }
+    if (theme.button_customization) {
+      const button = normalizeButtonCustomization(theme.button_customization)
+      const resourceUrl = (key: string, fallbackPath = '') => {
+        return themeResourceUrl(theme, key, fallbackPath)
+      }
+      for (const kind of ['texture', 'icon', 'sound'] as const) {
+        const path = theme.resources?.[kind] || button[kind] || ''
+        button[kind] = path
+        button[`${kind}_data`] = resourceUrl(kind, path)
+      }
+      for (const [target, existingOverride] of Object.entries(button.overrides)) {
+        if (!buttonCustomizationRole(target)) continue
+        const override = existingOverride || {}
+        for (const kind of ['texture', 'icon', 'sound'] as const) {
+          const resourceKey = `${target}-${kind}`
+          const path = theme.resources?.[resourceKey] || override[kind] || ''
+          if (path) override[kind] = path
+          const data = resourceUrl(resourceKey, path)
+          if (data) override[`${kind}_data`] = data
+        }
+        button.overrides[target as ButtonCustomizationTarget] = override
+      }
+      appearanceDraft.button_customization = button
+    }
+    if (theme.locale === 'ru' || theme.locale === 'en') setLanguageFromSettings(theme.locale)
     showToast(`Тема «${theme.name}» применена`)
     if (!busy.value) void saveSettings()
   }
@@ -89,6 +137,7 @@ export function createThemeManager(deps: ThemeManagerDependencies) {
     appearanceDraft.accent_color = defaultColorTokens.accent
     appearanceDraft.color_tokens = { ...defaultColorTokens }
     appearanceDraft.radius_tokens = { ...defaultRadiusTokens }
+    appearanceDraft.button_customization = normalizeButtonCustomization(DEFAULT_BUTTON_CUSTOMIZATION)
     appearanceDraft.sidebar_position = 'left'
     appearanceDraft.sidebar_mode = 'adaptive'
     appearanceDraft.sidebar_width_mode = 'content'
@@ -105,6 +154,7 @@ export function createThemeManager(deps: ThemeManagerDependencies) {
     appearanceDraft.ui_scale = 100
     appearanceDraft.wallpaper_blur = 12
     appearanceDraft.wallpaper_opacity = 34
+    appearanceDraft.sidebar_texture_data = ''
     wallpaperRenderBlur.value = 12
     appearanceDraft.page_themes = { instances: 'inherit', 'instance-settings': 'inherit', accounts: 'inherit', mods: 'inherit', modpacks: 'inherit', plugins: 'inherit', themes: 'inherit', settings: 'inherit' }
     appearanceDraft.page_layouts = { instances: 'balanced', 'instance-settings': 'balanced', accounts: 'balanced', mods: 'wide', modpacks: 'wide', plugins: 'wide', themes: 'wide', settings: 'balanced' }
@@ -146,8 +196,50 @@ export function createThemeManager(deps: ThemeManagerDependencies) {
   async function saveCurrentTheme(metadata: ThemeSaveRequest) {
     themeOperationBusy.value = true
     const tokens = appearanceDraft.color_tokens
+    const button = normalizeButtonCustomization(appearanceDraft.button_customization)
+    const resourceData: Record<string, string> = {}
+    const resources: Record<string, string> = {}
+    const registerResource = (key: string, dataUrl: string, prefix = `button-${key}`) => {
+      const separator = dataUrl.indexOf(',')
+      const mime = dataUrl.slice(5, dataUrl.indexOf(';'))
+      const extension = mime === 'image/png' ? 'png' : mime === 'image/jpeg' ? 'jpg' : mime === 'image/webp' ? 'webp' : mime === 'audio/ogg' ? 'ogg' : mime === 'audio/wav' ? 'wav' : mime === 'audio/webm' ? 'webm' : mime === 'audio/mpeg' ? 'mp3' : ''
+      if (!extension || separator < 0) return
+      const safePrefix = /^[a-z\d._-]{1,100}$/i.test(prefix) ? prefix : `button-${stableResourceHash(key)}`
+      resources[key] = `resources/${safePrefix}.${extension}`
+      resourceData[key] = dataUrl.slice(separator + 1)
+    }
+    registerResource('sidebar', appearanceDraft.sidebar_texture_data || '', 'sidebar')
+    for (const key of ['texture', 'icon', 'sound'] as const) registerResource(key, button[`${key}_data`])
+    for (const [target, override] of Object.entries(button.overrides)) {
+      if (!override || !buttonCustomizationRole(target)) continue
+      for (const kind of ['texture', 'icon', 'sound'] as const) {
+        const key = `${target}-${kind}`
+        registerResource(key, override[`${kind}_data`] || '', `button-${key}`)
+      }
+    }
+    const themeOverrides = Object.fromEntries(Object.entries(button.overrides).flatMap(([target, override]) => {
+      if (!override || !buttonCustomizationRole(target)) return []
+      const { label, width, height, fill, border, font_family, font_size, outline, texture_fit, crop_enabled, crop } = override
+      const stored = {
+        label,
+        width,
+        height,
+        fill,
+        border,
+        font_family,
+        font_size,
+        outline,
+        texture_fit,
+        crop_enabled,
+        crop,
+        texture: resources[`${target}-texture`],
+        icon: resources[`${target}-icon`],
+        sound: resources[`${target}-sound`],
+      }
+      return Object.values(stored).some((value) => value !== undefined) ? [[target, stored]] : []
+    }))
     const theme = {
-      schema_version: 1 as const,
+      schema_version: 2 as const,
       id: uniqueThemeId(metadata.name),
       name: metadata.name,
       author: metadata.author,
@@ -160,9 +252,26 @@ export function createThemeManager(deps: ThemeManagerDependencies) {
       panel_soft: String(tokens.panel_soft || defaultColorTokens.panel_soft),
       density: appearanceDraft.density,
       sidebar_mode: appearanceDraft.sidebar_mode,
+      radius_tokens: { ...appearanceDraft.radius_tokens },
+      locale: settingsDraft.language === 'en' ? 'en' as const : 'ru' as const,
+      button_customization: {
+        width: button.width,
+        height: button.height,
+        fill: button.fill,
+        border: button.border,
+        font_family: button.font_family,
+        font_size: button.font_size,
+        outline: button.outline,
+        texture_fit: button.texture_fit,
+        crop_enabled: button.crop_enabled,
+        crop: button.crop,
+        labels: button.labels,
+        overrides: themeOverrides,
+      },
+      resources,
     }
     try {
-      const result = await bridge.themeSave(theme, metadata)
+      const result = await bridge.themeSave(theme, metadata, resourceData)
       localThemes.value = result.themes
       syncActiveTheme()
       showToast(`Тема «${result.theme.name}» сохранена локально`)

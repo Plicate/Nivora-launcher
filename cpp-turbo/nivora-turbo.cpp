@@ -1,3 +1,7 @@
+// pcholki
+// bzzzz
+// pchol
+// пчолки бзззззз
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
@@ -700,7 +704,7 @@ int main(int argc, char **argv) {
                 all_ok = false;
             }
         }
-    } else {
+    } else {gh
         std::vector<FileResult> results(paths.size());
         CompressFn compress = pick_compress();
         unsigned workers = std::thread::hardware_concurrency();

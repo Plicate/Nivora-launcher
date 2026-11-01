@@ -1062,7 +1062,13 @@ impl<'a> GitHubPluginService<'a> {
         if theme.get("version").and_then(Value::as_str).unwrap_or_default() != release_version {
             return Err("Версия в theme.yml должна совпадать с тегом GitHub Release".to_owned());
         }
-        let installed = super::themes::persist(&super::themes::themes_root()?, &theme, replace)?;
+        let installed = super::themes::persist_with_files(
+            &super::themes::themes_root()?,
+            &theme,
+            &archive.resources,
+            &archive.functions,
+            replace,
+        )?;
         use sha2::{Digest, Sha256};
         let digest = Sha256::digest(&content);
         let metadata = json!({
