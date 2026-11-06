@@ -140,9 +140,7 @@ defineExpose({ openExternalJoin })
 <template>
   <section class="plicate-rates">
     <header class="rates-heading">
-      <div class="rates-brand" aria-hidden="true"><Icon name="globe" :size="19" /></div>
       <div class="rates-heading-copy">
-        <span class="rates-kicker">Экосистема Plicate</span>
         <h2>Рейтинг серверов</h2>
         <p>Проверенные Minecraft-серверы, актуальный онлайн и быстрый вход из лаунчера.</p>
       </div>
@@ -186,7 +184,7 @@ defineExpose({ openExternalJoin })
 
     <dialog ref="joinDialog" class="rates-join-dialog" aria-labelledby="rates-join-title" @close="selectedServer = null">
       <div class="rates-dialog-heading">
-        <div><span class="rates-kicker">Быстрый вход</span><h2 id="rates-join-title">Выберите Java-экземпляр</h2><p v-if="selectedServer">Подключение к <strong>{{ selectedServer.name }}</strong> · {{ displayedAddress(selectedServer) }}</p></div>
+        <div><h2 id="rates-join-title">Выберите Java-экземпляр</h2><p v-if="selectedServer">Подключение к <strong>{{ selectedServer.name }}</strong> · {{ displayedAddress(selectedServer) }}</p></div>
         <button class="icon-button" type="button" aria-label="Закрыть" @click="closeJoinChooser"><Icon name="close" :size="16" /></button>
       </div>
       <div v-if="joinableInstances.length" class="rates-instance-options" role="radiogroup" aria-label="Экземпляр для подключения">
@@ -205,12 +203,10 @@ defineExpose({ openExternalJoin })
 
 <style scoped>
 .plicate-rates { display: grid; gap: 14px; }
-.rates-heading { display: flex; align-items: center; gap: 13px; padding: 18px 20px; border: 1px solid var(--line); border-radius: var(--radius-card, 12px); background: linear-gradient(115deg, color-mix(in srgb, var(--blue) 10%, var(--panel)), var(--panel)); }
-.rates-brand { display: grid; width: 42px; height: 42px; flex: 0 0 auto; place-items: center; border: 1px solid color-mix(in srgb, var(--blue) 30%, var(--line)); border-radius: 12px; background: color-mix(in srgb, var(--blue) 14%, var(--panel-raised)); color: var(--blue-bright); }
+.rates-heading { display: flex; align-items: flex-end; gap: 12px; }
 .rates-heading-copy { min-width: 0; flex: 1; }
-.rates-kicker { color: var(--blue-bright); font-size: 10px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
-.rates-heading h2 { margin: 2px 0 0; font-size: 20px; letter-spacing: -.035em; }
-.rates-heading p { margin: 4px 0 0; color: var(--muted); font-size: 12px; }
+.rates-heading h2 { margin: 0 0 6px; font-size: 20px; font-weight: 650; letter-spacing: -.02em; }
+.rates-heading p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.5; }
 .rates-refresh { flex: 0 0 auto; }
 .rates-toolbar { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; }
 .rates-search { display: flex; min-width: min(100%, 250px); height: 40px; flex: 1; align-items: center; gap: 9px; padding: 0 11px; border: 1px solid var(--line); border-radius: var(--radius-control); background: var(--panel); color: var(--muted); }
@@ -275,8 +271,7 @@ defineExpose({ openExternalJoin })
   .rates-refresh { padding-inline: 8px; }
 }
 @media (max-width: 470px) {
-  .rates-heading { flex-wrap: wrap; padding: 14px; }
-  .rates-heading-copy { flex-basis: calc(100% - 58px); }
+  .rates-heading { flex-wrap: wrap; align-items: flex-start; }
   .rates-refresh { margin-left: auto; }
   .rates-toolbar { align-items: stretch; }
   .rates-search { flex-basis: 100%; }

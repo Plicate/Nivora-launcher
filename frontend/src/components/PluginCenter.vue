@@ -228,7 +228,6 @@ async function importRevocationData(file: { fileName: string; data: string; size
 <style scoped>
 .plugin-import-actions { display: flex; flex-wrap: wrap; gap: 9px; margin-top: 12px; }
 .plugin-center { display: grid; min-width: 0; gap: 14px; }
-.plugin-catalog-intro { margin-bottom: 0; }
 .plugin-library-panel { display: grid; gap: 14px; padding: 20px; }
 .plugin-runtime-panel { display: grid; gap: 14px; padding: 20px; }
 .plugin-library-heading { align-items: center; margin: 0; }
@@ -270,8 +269,7 @@ async function importRevocationData(file: { fileName: string; data: string; size
 .plugin-security__local small { color: var(--muted); font-size: 9px; line-height: 1.45; overflow-wrap: anywhere; }
 .plugin-security__actions { display: flex; flex-wrap: wrap; gap: 7px; }
 @media (max-width: 760px) {
-  .plugin-catalog-intro { margin-bottom: 0; }
-  .plugin-library-heading { align-items: flex-start; }
+    .plugin-library-heading { align-items: flex-start; }
   .plugin-installed-row { flex-wrap: wrap; }
   .plugin-installed-copy { flex-basis: calc(100% - 54px); }
   .plugin-status { margin-left: 50px; }

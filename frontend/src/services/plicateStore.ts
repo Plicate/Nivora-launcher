@@ -12,6 +12,12 @@ export interface PlicateStoreItem {
   download_url: string
   screenshots?: Array<{ url: string; mime?: string }>
   can_update?: boolean
+  /** Палитра темы (приходит из details публикации или из встроенной темы). */
+  background?: string
+  panel?: string
+  panel_soft?: string
+  accent?: string
+  accent_strong?: string
   /** Встроенная тема лаунчера: применяется локально, без скачивания архива. */
   preset?: boolean
 }
@@ -123,6 +129,11 @@ export function presetStoreItems(themes: LauncherThemePreset[]): PlicateStoreIte
       kind: 'theme' as const,
       download_url: '',
       preset: true,
+      background: theme.background,
+      panel: theme.panel,
+      panel_soft: theme.panel_soft,
+      accent: theme.accent,
+      accent_strong: theme.accent_strong,
     }))
 }
 
