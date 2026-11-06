@@ -2191,6 +2191,12 @@ onMounted(async () => {
   void refreshShortcutStatus()
   stopBackendEvents = await bridge.subscribeEvents((event) => {
     if (event.instance_name !== props.instance?.name) return
+    if (event.kind === 'status' && event.event === 'launch-preparing') {
+      liveLogRevision += 1
+      liveLogCount = 0
+      logs.value = []
+      return
+    }
     if (event.kind === 'status' && event.event === 'session-started') {
       // отсекаем ответ уже выполняющегося pollLiveLog: он мог ещё содержать
       // строки прошлого запуска, завершившегося аварийно

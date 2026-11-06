@@ -87,3 +87,36 @@ test('known regressions stay admitted', () => {
     assert.ok(allowed.has(operation), operation)
   }
 })
+
+test('browser preview rejects operations that cannot reach desktop state', () => {
+  const bridge = readFileSync(new URL('../src/services/bridge.ts', import.meta.url), 'utf8')
+  const start = bridge.indexOf('async function mockRequest')
+  const end = bridge.indexOf('\nexport const bridge', start)
+  assert.ok(start >= 0 && end > start, 'mockRequest boundaries are present')
+  const mockRequest = bridge.slice(start, end)
+  const guardedLines = mockRequest.split('\n').filter((line) => line.includes('rejectBrowserPreviewOperation'))
+  for (const operation of [
+    'java_validate', 'install', 'skins_export', 'world_backup_create',
+    'server_core_download', 'server_snapshot_create', 'instance_mod_list_export',
+    'mods_update', 'instance_pin_toggle', 'cloud_sync', 'fs_reveal',
+    'instance_file_write', 'server_file_write', 'server_create',
+    'check_remote_release', 'external_instances_scan', 'auto_repair_diagnose',
+    'cloud_configure', 'cloud_disconnect', 'server_core_versions',
+    'save_server_plugin_catalogs', 'mods_update_sessions',
+    'settings_profiles_list', 'bedrock_versions', 'bedrock_content_list',
+  ]) {
+    assert.ok(guardedLines.some((line) => line.includes(`'${operation}'`)), operation)
+  }
+  assert.match(mockRequest, /throw new Error\(`Операция \$\{operation\} недоступна в браузерном предпросмотре`\)/)
+})
+
+test('browser preview clearly labels demo data and has no mock running instance', () => {
+  const app = readFileSync(new URL('../src/App.vue', import.meta.url), 'utf8')
+  const bridge = readFileSync(new URL('../src/services/bridge.ts', import.meta.url), 'utf8')
+  const start = bridge.indexOf('const fallbackState: AppState = {')
+  const end = bridge.indexOf('\nexport function inTauri', start)
+  assert.ok(start >= 0 && end > start, 'fallback state boundaries are present')
+  assert.match(app, /const browserPreview = !inTauri\(\)/)
+  assert.match(app, /Демо-предпросмотр: показаны примерные данные/)
+  assert.doesNotMatch(bridge.slice(start, end), /\brunning:\s*true\b/)
+})

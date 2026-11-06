@@ -159,3 +159,47 @@ nivora-launcher plugin keygen ./private.pem ./public.pem
 ```
 
 Unsigned-пакеты содержат хеши целостности SHA-256. Подпись и проверка используют общую Ed25519-реализацию plugin-security лаунчера. Держите приватный PEM вне пакета и не коммитьте его.
+
+## Theme effects API (plugin themes)
+
+Plugins with the `theme:effects` permission can restyle the launcher far beyond accent colors. Slot replacement and HUD widgets additionally require `ui:compose`. Every operation is scoped to the calling plugin and cleared automatically when the plugin stops or is disabled (`theme.clearPlugin` on the host side).
+
+```ts
+import type { PluginApi, TrialPlugin } from "@nivora-launcher/plugin-sdk";
+
+const plugin: TrialPlugin = {
+  activate(api: PluginApi) {
+    const theme = api.theme;
+    void theme.particles.spawn({ preset: "snow" });            // built-in presets: snow, rain, embers, fireflies, sparks, ...
+    void theme.particles.spawn({ shape: "star", colors: ["#ffd166", "#ef476f"], count: 120, layer: "above" });
+    void theme.particles.burst({ x: 0.5, y: 0.5, count: 60 });  // radial confetti/firework burst
+    void theme.wallpaper.set({ image: wallpaperDataUrl, fit: "cover", blur: 12, dim: 0.3 });
+    void theme.cursor.set({ image: cursorDataUrl, size: 48, hotspotX: 4, hotspotY: 4 });
+    void theme.effects.set({ vignette: 0.5, scanlines: true, shimmer: true, panelGlow: "#3d8bfd" });
+    void theme.style.set("sidebar", { "background-color": "#101828", "border-radius": "12px" });
+    void theme.slots.set("sidebar.footer", { type: "card", children: [/* plugin UI nodes */] });
+    void theme.hud.add({ type: "metric", label: "FPS", value: 120 }, { position: "top-right", width: 260 });
+    void theme.transitions.set("cinematic");
+    void theme.sounds.register("click", clickDataUrl);
+    void theme.sounds.play("click", { volume: 0.6, rate: 1 });
+    void theme.fonts.register("Display", fontDataUrl);
+    void theme.tokens.set({ "panel.radius": 14 });
+    return { dispose: () => { void theme.particles.stopAll(); void theme.effects.reset(); } };
+  },
+};
+```
+
+What the API covers:
+
+- **Particles** — screen-space emitters behind or above the whole interface: shape (circle, square, star, heart, diamond or a data-URL image), color palettes, speed/direction/spread with variance, sway, gravity, wind, opacity and lifetime, spawn zones (full, top, bottom, left, right, center), blend modes (`lighter` for glow effects), respawn, plus one-shot `burst` fireworks. Built-in presets: `snow`, `rain`, `embers`, `fireflies`, `sparks`.
+- **Wallpaper** — replace the window background with an image (cover/contain/tile), with blur and dim levels; runs below all launcher content.
+- **Effects overlay** — vignette, film-grain noise, CRT scanlines, panel glow/blur, angled gradient washes, and a shimmer highlight; rendered above content but below dialogs.
+- **Style overrides** — limited, safe CSS properties (`background-color`, `color`, `border-radius`, `box-shadow`, opacity, transition and similar allow-listed props) applied per scope: window, sidebar, cards, buttons, inputs, header, scrollbars.
+- **Slot replacement** — swap three launcher areas (`sidebar.footer`, `instances.top`, `settings.footer`) with declarative plugin UI nodes; `theme.slots.reset()` restores the original.
+- **HUD widgets** — floating plugin-driven widgets pinned to six screen positions with bounded width and margin.
+- **Sounds** — register short data-URL audio and play it with volume/rate/loop bounds.
+- **Custom cursor** — data-URL cursor image with hotspot and size bounds.
+- **Transitions** — interface-wide transition presets: `instant`, `swift`, `smooth`, `cinematic`.
+- **Fonts and tokens** — register custom fonts (auto-scoped family names) and set safe theme tokens (`accent`, `panel.radius` and friends) without direct CSS injection.
+
+Safety rails: data-URL size caps per asset type, per-plugin caps (8 particle emitters, 8 HUD widgets, 3 slots, 8 fonts, 32 sounds), global launcher caps across plugins, CSS property and color-value allow-lists, and `theme.slots`/`theme.hud` gated behind the same `ui:compose` consent as UI composition.

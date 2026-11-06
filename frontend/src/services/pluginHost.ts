@@ -203,9 +203,11 @@ export function createPluginHostCall(context: PluginHostContext): PluginRuntimeO
       case 'theme.unregister':
         return dispatchPluginThemeHostCall(operation, args, {
           theme: context.theme,
-          authorize: (permission) => authorize(context, permission, signal),
+          authorize: (permission) => authorize(context, permission as PluginPermission, signal),
           registerTheme: context.registerTheme,
           unregisterTheme: context.unregisterTheme,
+          pluginId: context.pluginId,
+          effects: undefined,
         })
       case 'storage.get':
         return (await bridge.pluginStorageGet(context.pluginId, stringArg(args, 'key'), signal)).value

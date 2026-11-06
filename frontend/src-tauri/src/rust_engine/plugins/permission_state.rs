@@ -1,6 +1,6 @@
 use serde_json::{json, Value};
 use std::collections::HashSet;
-use std::fs::{self, File};
+use std::fs;
 use std::io::Read;
 use std::path::Path;
 
@@ -96,23 +96,18 @@ pub(super) fn write_permission_state(path: &Path, value: &Value) -> Result<(), S
 fn read_private_file(path: &Path, max_bytes: usize) -> Result<Option<Vec<u8>>, String> {
     #[cfg(unix)]
     {
-        use std::os::unix::ffi::OsStrExt;
-        use std::os::unix::io::FromRawFd;
-        let c_path = std::ffi::CString::new(path.as_os_str().as_bytes())
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let file = match fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(path)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err("Could not securely read plugin permission grants".to_owned()),
+        };
+        file.set_permissions(fs::Permissions::from_mode(0o600))
             .map_err(|_| "Could not securely read plugin permission grants".to_owned())?;
-        let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
-        if fd < 0 {
-            let error = std::io::Error::last_os_error();
-            return match error.kind() {
-                std::io::ErrorKind::NotFound => Ok(None),
-                _ => Err("Could not securely read plugin permission grants".to_owned()),
-            };
-        }
-        if unsafe { libc::fchmod(fd, 0o600) } != 0 {
-            unsafe { libc::close(fd) };
-            return Err("Could not securely read plugin permission grants".to_owned());
-        }
-        let file = unsafe { File::from_raw_fd(fd) };
         let mut buffer = Vec::new();
         let outcome = file.take(max_bytes as u64 + 1).read_to_end(&mut buffer);
         match outcome {

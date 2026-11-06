@@ -596,7 +596,7 @@ pub(crate) struct ArchiveTheme {
 
 pub(crate) fn read_archive(content: &[u8]) -> Result<ArchiveTheme, String> {
     if content.is_empty() || content.len() as u64 > MAX_ARCHIVE_BYTES {
-        return Err(err("ZIP темы пустой или превышает 8 MiB"));
+        return Err(err("ZIP темы пустой или превышает 64 MiB"));
     }
     let mut archive = zip::ZipArchive::new(std::io::Cursor::new(content)).map_err(|_| err("Не удалось прочитать ZIP темы"))?;
     if archive.len() < 2 || archive.len() > MAX_ARCHIVE_FILES {
@@ -612,7 +612,7 @@ pub(crate) fn read_archive(content: &[u8]) -> Result<ArchiveTheme, String> {
         if name.contains('\\') || name.starts_with('/') || name.split('/').any(|part| part.is_empty() || part == "." || part == "..") {
             return Err(err("ZIP темы содержит небезопасный путь"));
         }
-        let permitted_path = name == "theme.json" || name == "theme.yml"
+        let permitted_path = name == "theme.json" || name == "theme/theme.json" || name == "theme.yml"
             || safe_relative_path(&name, "resources/") || safe_relative_path(&name, "functions/");
         if !permitted_path { return Err(err("ZIP темы содержит неожиданный путь")); }
         if !seen_paths.insert(name.to_ascii_lowercase()) || files.contains_key(&name) { return Err(err("ZIP темы содержит дублирующийся путь")); }
@@ -623,7 +623,7 @@ pub(crate) fn read_archive(content: &[u8]) -> Result<ArchiveTheme, String> {
             }
         }
         let limit = match name.as_str() {
-            "theme.json" => MAX_JSON_BYTES,
+            "theme.json" | "theme/theme.json" => MAX_JSON_BYTES,
             "theme.yml" => MAX_METADATA_BYTES,
             _ if name.starts_with("resources/") => MAX_RESOURCE_BYTES as u64,
             _ => MAX_FUNCTION_BYTES as u64,
@@ -637,9 +637,15 @@ pub(crate) fn read_archive(content: &[u8]) -> Result<ArchiveTheme, String> {
         if total_size > MAX_UNPACKED_BYTES { return Err(err("Распакованный ZIP темы слишком велик")); }
         files.insert(name, buffer);
     }
-    let raw_json = files.get("theme.json").ok_or_else(|| err("В ZIP темы отсутствует theme.json"))?;
+    let palette_path = match (files.contains_key("theme.json"), files.contains_key("theme/theme.json")) {
+        (true, false) => "theme.json",
+        (false, true) => "theme/theme.json",
+        (false, false) => return Err(err("В ZIP темы отсутствует theme/theme.json")),
+        (true, true) => return Err(err("ZIP темы содержит два файла палитры")),
+    };
+    let raw_json = files.get(palette_path).ok_or_else(|| err("В ZIP темы отсутствует JSON палитры"))?;
     let raw_yaml = files.get("theme.yml").ok_or_else(|| err("В ZIP темы отсутствует theme.yml"))?;
-    let theme: Value = serde_json::from_slice(raw_json).map_err(|_| err("theme.json должен содержать корректный JSON в UTF-8"))?;
+    let theme: Value = serde_json::from_slice(raw_json).map_err(|_| err("JSON палитры должен содержать корректный JSON в UTF-8"))?;
     let metadata = parse_theme_yml(raw_yaml)?;
     let normalized = normalize_theme(&theme, &metadata, "local", "")?;
     let resource_paths = match normalized.get("resources") {
@@ -650,7 +656,7 @@ pub(crate) fn read_archive(content: &[u8]) -> Result<ArchiveTheme, String> {
         Some(value) => validate_plugin(value)?.1,
         None => Vec::new(),
     };
-    let expected: HashSet<String> = std::iter::once("theme.json".to_owned())
+    let expected: HashSet<String> = std::iter::once(palette_path.to_owned())
         .chain(std::iter::once("theme.yml".to_owned()))
         .chain(resource_paths.values().cloned())
         .chain(function_paths.iter().cloned())
@@ -780,8 +786,27 @@ fn load_asset_bundle(directory: &Path, theme: &Value) -> Result<(BTreeMap<String
     Ok((resources, functions))
 }
 
+fn local_theme_document_path(directory: &Path) -> Result<PathBuf, String> {
+    let nested = directory.join("theme");
+    match fs::symlink_metadata(&nested) {
+        Ok(meta) => {
+            if meta.is_symlink() || !meta.is_dir() || fs::symlink_metadata(directory.join("theme.json")).is_ok() {
+                return Err(err("Каталог theme темы повреждён"));
+            }
+            let palette = nested.join("theme.json");
+            let meta = fs::symlink_metadata(&palette).map_err(|_| err("В каталоге theme отсутствует theme.json"))?;
+            if meta.is_symlink() || !meta.is_file() || meta.len() > MAX_JSON_BYTES {
+                return Err(err("Файл theme/theme.json повреждён"));
+            }
+            Ok(palette)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(directory.join("theme.json")),
+        Err(_) => Err(err("Пакет локальной темы повреждён")),
+    }
+}
+
 fn read_theme(directory: &Path) -> Result<Value, String> {
-    let theme_path = directory.join("theme.json");
+    let theme_path = local_theme_document_path(directory)?;
     let metadata_path = directory.join("theme.yml");
     for path in [&theme_path, &metadata_path] {
         let meta = fs::symlink_metadata(path).map_err(|_| err("Пакет локальной темы повреждён"))?;
@@ -820,11 +845,24 @@ fn read_theme(directory: &Path) -> Result<Value, String> {
     for entry in fs::read_dir(directory).map_err(|_| err("Пакет локальной темы повреждён"))? {
         let entry = entry.map_err(|_| err("Пакет локальной темы повреждён"))?;
         let name = entry.file_name().to_string_lossy().to_string();
-        if !["theme.json", "theme.yml", "origin.json", "resources", "functions"].contains(&name.as_str()) {
+        if !["theme.json", "theme.yml", "theme", "origin.json", "resources", "functions"].contains(&name.as_str()) {
             return Err(err("Пакет локальной темы содержит неожиданный файл"));
         }
         let meta = fs::symlink_metadata(entry.path()).map_err(|_| err("Пакет локальной темы повреждён"))?;
         if meta.is_symlink() { return Err(err("Пакет локальной темы содержит символьную ссылку")); }
+        if name == "theme" {
+            if !meta.is_dir() { return Err(err("Каталог theme темы повреждён")); }
+            let mut found_palette = false;
+            for child in fs::read_dir(entry.path()).map_err(|_| err("Каталог theme темы повреждён"))? {
+                let child = child.map_err(|_| err("Каталог theme темы повреждён"))?;
+                let child_meta = fs::symlink_metadata(child.path()).map_err(|_| err("Каталог theme темы повреждён"))?;
+                if child.file_name() != "theme.json" || child_meta.is_symlink() || !child_meta.is_file() || child_meta.len() > MAX_JSON_BYTES || found_palette {
+                    return Err(err("Каталог theme должен содержать только theme.json"));
+                }
+                found_palette = true;
+            }
+            if !found_palette { return Err(err("В каталоге theme отсутствует theme.json")); }
+        }
     }
     if theme["id"].as_str() != Some(directory.file_name().and_then(|name| name.to_str()).unwrap_or("")) {
         return Err(err("id темы не совпадает с каталогом"));
@@ -912,7 +950,10 @@ pub(crate) fn persist_with_files(
     let backup = root.join(format!(".theme-backup-{unique}"));
     fs::create_dir(&staging).map_err(|error| format!("Не удалось сохранить тему: {error}"))?;
     let result = (|| -> Result<Value, String> {
-        write_private(&staging.join("theme.json"), pretty_json(&theme_document(theme)).as_bytes())?;
+        let theme_directory = staging.join("theme");
+        fs::create_dir(&theme_directory).map_err(|error| format!("Не удалось сохранить тему: {error}"))?;
+        super::platform::restrict_dir(&theme_directory);
+        write_private(&theme_directory.join("theme.json"), pretty_json(&theme_document(theme)).as_bytes())?;
         write_private(&staging.join("theme.yml"), metadata_yaml(theme).as_bytes())?;
         let origin = json!({ "source": theme["source"].clone(), "source_url": theme["source_url"].clone() });
         write_private(&staging.join("origin.json"), pretty_json(&origin).as_bytes())?;
@@ -950,9 +991,9 @@ fn epoch_nanos() -> u128 {
 fn decode_archive_field(request: &Value) -> Result<Vec<u8>, String> {
     let raw = request.get("data").and_then(Value::as_str).unwrap_or_default().trim();
     if raw.is_empty() || raw.len() > ((MAX_ARCHIVE_BYTES as usize + 2) / 3) * 4 + 8 {
-        return Err(err("ZIP темы пустой или превышает 8 MiB"));
+        return Err(err("ZIP темы пустой или превышает 64 MiB"));
     }
-    base64::engine::general_purpose::STANDARD.decode(raw).map_err(|_| err("ZIP темы пустой или превышает 8 MiB"))
+    base64::engine::general_purpose::STANDARD.decode(raw).map_err(|_| err("ZIP темы пустой или превышает 64 MiB"))
 }
 
 fn decode_resource_data(request: &Value, theme: &Value) -> Result<BTreeMap<String, Vec<u8>>, String> {
@@ -1114,7 +1155,7 @@ fn export_at(root: &Path, theme_id: &str) -> Result<(String, Vec<u8>), String> {
     {
         let mut writer = zip::ZipWriter::new(&mut buffer);
         let options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
-        writer.start_file("theme.json", options).map_err(|_| err("Не удалось собрать ZIP темы"))?;
+        writer.start_file("theme/theme.json", options).map_err(|_| err("Не удалось собрать ZIP темы"))?;
         writer.write_all(pretty_json(&theme_document(&theme)).as_bytes()).map_err(|_| err("Не удалось собрать ZIP темы"))?;
         writer.start_file("theme.yml", options).map_err(|_| err("Не удалось собрать ZIP темы"))?;
         writer.write_all(metadata_yaml(&theme).as_bytes()).map_err(|_| err("Не удалось собрать ZIP темы"))?;
@@ -1335,8 +1376,12 @@ mod tests {
         let saved = persist(&root, &theme, false).expect("сохранить");
         assert_eq!(saved["id"], json!("midnight-sky"));
 
+        assert!(root.join("midnight-sky/theme/theme.json").is_file());
+        assert!(!root.join("midnight-sky/theme.json").exists());
         let (file_name, content) = export_at(&root, "midnight-sky").expect("экспорт");
         assert_eq!(file_name, "midnight-sky-1.0.0+meta.zip");
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(&content)).expect("ZIP");
+        assert!(zip.by_name("theme/theme.json").is_ok());
         let archive = read_archive(&content).expect("архив");
         let again = normalize_theme(&archive.theme, &archive.metadata, "local", "").expect("нормализация");
         assert_eq!(again["name"], json!("Midnight Sky"));
@@ -1346,6 +1391,18 @@ mod tests {
         assert!(persist(&root, &theme, true).is_ok());
         delete_at(&root, "midnight-sky").expect("удаление");
         assert!(delete_at(&root, "midnight-sky").is_err());
+    }
+
+    #[test]
+    fn archive_accepts_nested_palette_layout_and_legacy_root_palette() {
+        let theme = normalize_theme(&sample_theme(), &sample_metadata(), "local", "").unwrap();
+        let palette = pretty_json(&theme_document(&theme));
+        let archive = archive_with(&[("theme/theme.json", palette.as_bytes()), ("theme.yml", sample_yml().as_bytes())]);
+        let parsed = read_archive(&archive).expect("канонический ZIP с каталогом theme");
+        assert_eq!(parsed.theme["id"], json!("midnight-sky"));
+        assert_eq!(parsed.metadata["author"], json!("Автор"));
+        let legacy = archive_with(&[("theme.json", palette.as_bytes()), ("theme.yml", sample_yml().as_bytes())]);
+        assert!(read_archive(&legacy).is_ok());
     }
 
     #[test]
@@ -1385,7 +1442,7 @@ mod tests {
         assert_eq!(saved["button_customization"]["labels"]["instances"], json!("Миры"));
         assert_eq!(saved["button_customization"]["overrides"]["hero-play:survival%20one"]["texture"], json!("resources/per-instance.png"));
         assert_eq!(saved["button_customization"]["overrides"]["card-button:survival%20one%3Asettings"]["sound"], json!("resources/per-instance.ogg"));
-        let stored_json = fs::read(root.join("midnight-sky/theme.json")).expect("прочитать theme.json");
+        let stored_json = fs::read(root.join("midnight-sky/theme/theme.json")).expect("прочитать theme/theme.json");
         assert!(!String::from_utf8_lossy(&stored_json).contains(&base64::engine::general_purpose::STANDARD.encode(&resources["texture"])));
         assert!(fs::read(root.join("midnight-sky/functions/index.js")).is_ok());
 

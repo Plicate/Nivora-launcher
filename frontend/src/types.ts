@@ -1,6 +1,6 @@
 import type { ButtonCustomization, ButtonCustomizationTarget } from './services/buttonCustomization'
 
-export type ViewName = 'instances' | 'instance-settings' | 'accounts' | 'mods' | 'modpacks' | 'plugins' | 'themes' | 'settings'
+export type ViewName = 'instances' | 'instance-settings' | 'accounts' | 'mods' | 'modpacks' | 'plugins' | 'themes' | 'store' | 'rates' | 'settings'
 export type LoaderId = 'vanilla' | 'fabric' | 'forge' | 'neoforge' | 'quilt'
 export type ProjectType = 'mod' | 'resourcepack' | 'shader' | 'datapack' | 'plugin' | 'modpack'
 export type CatalogSort = 'relevance' | 'downloads' | 'newest' | 'updated'
@@ -1334,6 +1334,7 @@ export interface ActivityState {
   detail: string
   progress: number
   busy: boolean
+  status?: 'working' | 'success' | 'error' | 'cancelled'
   cancelling: boolean
   logs: string[]
   verification_code?: string
@@ -1428,6 +1429,7 @@ export type PluginPermission =
   | 'policy:read'
   | 'crypto:sign'
   | 'crypto:verify'
+  | 'theme:effects'
 
 export type PluginTrust = 'verified' | 'community' | 'local'
 

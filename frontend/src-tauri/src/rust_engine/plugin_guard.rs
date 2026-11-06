@@ -185,29 +185,20 @@ impl PluginOperationGuard {
 fn append_audit_line(path: &Path, encoded: &[u8]) -> Result<(), String> {
     #[cfg(unix)]
     {
-        use std::os::unix::ffi::OsStrExt;
-        let c_path = std::ffi::CString::new(path.as_os_str().as_bytes())
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .write(true)
+            .create(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(path)
             .map_err(|_| "Could not open the audit log".to_owned())?;
-        let flags = libc::O_APPEND | libc::O_WRONLY | libc::O_CREAT | libc::O_NOFOLLOW | libc::O_NONBLOCK;
-        let fd = unsafe { libc::open(c_path.as_ptr(), flags, 0o600) };
-        if fd < 0 {
-            return Err("Could not open the audit log".to_owned());
-        }
-        let mut written = 0usize;
-        while written < encoded.len() {
-            let count = unsafe { libc::write(fd, encoded[written..].as_ptr().cast(), encoded.len() - written) };
-            if count <= 0 {
-                unsafe { libc::close(fd) };
-                return Err("Could not append to the audit log".to_owned());
-            }
-            written += count as usize;
-        }
-        let status = if unsafe { libc::fchmod(fd, 0o600) } != 0 { 1 } else { 0 };
-        unsafe { libc::close(fd) };
-        if status != 0 {
-            return Err("Could not secure the audit log".to_owned());
-        }
-        Ok(())
+        file.write_all(encoded)
+            .map_err(|_| "Could not append to the audit log".to_owned())?;
+        file.set_permissions(fs::Permissions::from_mode(0o600))
+            .map_err(|_| "Could not secure the audit log".to_owned())
     }
     #[cfg(not(unix))]
     {

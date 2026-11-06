@@ -1,11 +1,15 @@
 use regex::Regex;
 use serde_json::{json, Value};
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::fs::{self, File, OpenOptions};
+use std::io::Read;
+use std::path::Path;
 use std::sync::OnceLock;
 use std::time::SystemTime;
 
 const MAX_EXCERPT_LINES: usize = 24;
+const MAX_HS_ERR_BYTES: u64 = 1024 * 1024;
+const MAX_HS_ERR_LINES: usize = 200;
+const MAX_HS_ERR_LINE_CHARS: usize = 300;
 
 fn re_fabric_required() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
@@ -72,11 +76,31 @@ pub(crate) fn analyze_crash(
     exit_code: Option<i64>,
     instance_path: Option<&Path>,
     memory: &str,
-    _minecraft_version: &str,
+    minecraft_version: &str,
     loader: &str,
 ) -> Value {
-    let bound = lines.len().min(400);
-    let text = lines[lines.len() - bound..].join("\n");
+    analyze_crash_with_started_at(lines, exit_code, instance_path, memory, minecraft_version, loader, None)
+}
+
+pub(crate) fn analyze_crash_with_started_at(
+    lines: &[String],
+    exit_code: Option<i64>,
+    instance_path: Option<&Path>,
+    memory: &str,
+    _minecraft_version: &str,
+    loader: &str,
+    started_at: Option<f64>,
+) -> Value {
+    let hs_err_report = instance_path
+        .map(|path| read_hs_err_report(path, MAX_HS_ERR_LINES, started_at))
+        .unwrap_or_default();
+    let mut diagnostic_lines = lines.to_vec();
+    if !hs_err_report.is_empty() {
+        diagnostic_lines.push("JVM fatal error report (hs_err_pid):".to_owned());
+        diagnostic_lines.extend(hs_err_report.iter().cloned());
+    }
+    let bound = diagnostic_lines.len().min(400);
+    let text = diagnostic_lines[diagnostic_lines.len() - bound..].join("\n");
     let lowered = text.to_lowercase();
     let mut hints: Vec<Value> = Vec::new();
     let mut suspected_mods: Vec<Value> = Vec::new();
@@ -166,7 +190,11 @@ pub(crate) fn analyze_crash(
     }
 
     let hs_err = re_hs_err().captures(&lowered);
-    if hs_err.is_some() || lowered.contains("sigsegv") || lowered.contains("exception_access_violation") {
+    if !hs_err_report.is_empty()
+        || hs_err.is_some()
+        || lowered.contains("sigsegv")
+        || lowered.contains("exception_access_violation")
+    {
         if title.is_empty() {
             title = "Аварийное завершение JVM".into();
         }
@@ -203,7 +231,7 @@ pub(crate) fn analyze_crash(
         "title": title,
         "hints": hints,
         "suspected_mods": suspected_mods,
-        "excerpt": excerpt(lines),
+        "excerpt": excerpt(&diagnostic_lines),
     })
 }
 
@@ -294,35 +322,67 @@ fn match_mod_file(mod_value: &mut Value, instance_path: Option<&Path>) -> bool {
 }
 
 /// хвост последнего hs_err_pid*.log в каталоге экземпляра
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn read_hs_err_report(instance_path: &Path, limit: usize) -> Vec<String> {
+pub(crate) fn read_hs_err_report(instance_path: &Path, limit: usize, started_at: Option<f64>) -> Vec<String> {
     let Ok(entries) = fs::read_dir(instance_path) else { return Vec::new() };
-    let mut reports: Vec<(SystemTime, PathBuf)> = Vec::new();
+    let mut newest: Option<(SystemTime, File)> = None;
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
-        if !(name.starts_with("hs_err_pid") && name.ends_with(".log")) || !entry.path().is_file() {
+        if !(name.starts_with("hs_err_pid") && name.ends_with(".log")) {
             continue;
         }
-        let Ok(metadata) = entry.metadata() else { return Vec::new() };
-        let Ok(modified) = metadata.modified() else { return Vec::new() };
-        reports.push((modified, entry.path()));
+        let Ok(file) = open_hs_err_file(&entry.path()) else { continue };
+        let Ok(metadata) = file.metadata() else { continue };
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            continue;
+        }
+        let Ok(modified) = metadata.modified() else { continue };
+        if started_at.is_some_and(|started| {
+            modified.duration_since(std::time::UNIX_EPOCH).map(|time| time.as_secs_f64() < started).unwrap_or(false)
+        }) {
+            continue;
+        }
+        if newest.as_ref().map(|(previous, _)| modified > *previous).unwrap_or(true) {
+            newest = Some((modified, file));
+        }
     }
-    if reports.is_empty() {
+    let Some((_, file)) = newest else { return Vec::new() };
+    let Ok(metadata) = file.metadata() else { return Vec::new() };
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
         return Vec::new();
     }
-    reports.sort_by(|left, right| right.0.cmp(&left.0));
-    let content = fs::read(&reports[0].1).unwrap_or_default();
+    let mut reader = file.take(MAX_HS_ERR_BYTES);
+    let mut content = Vec::with_capacity(metadata.len().min(MAX_HS_ERR_BYTES) as usize);
+    if reader.read_to_end(&mut content).is_err() {
+        return Vec::new();
+    }
     String::from_utf8_lossy(&content)
         .lines()
-        .take(limit)
-        .map(str::to_owned)
+        .take(limit.min(MAX_HS_ERR_LINES))
+        .map(|line| line.chars().take(MAX_HS_ERR_LINE_CHARS).collect())
         .collect()
+}
+
+fn open_hs_err_file(path: &Path) -> std::io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    options.open(path)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
+    use std::path::PathBuf;
 
     fn temp_root(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("nivora-crash-{tag}-{}", std::process::id()));
@@ -407,6 +467,23 @@ mod tests {
     }
 
     #[test]
+    fn crash_analysis_reads_jvm_report_when_console_output_is_empty() {
+        let root = temp_root("hs-err-analysis");
+        fs::write(
+            root.join("hs_err_pid1234.log"),
+            "# A fatal error has been detected by the Java Runtime Environment:\n# SIGSEGV (0xb) at pc=0x0\n",
+        )
+        .unwrap();
+
+        let report = analyze_crash_with_started_at(&[], Some(134), Some(&root), "", "", "vanilla", Some(0.0));
+
+        assert_eq!(report["title"], json!("Аварийное завершение JVM"));
+        assert!(report["excerpt"].as_array().unwrap().iter().any(|line| {
+            line.as_str().unwrap_or_default().contains("fatal error has been detected")
+        }));
+    }
+
+    #[test]
     fn generic_title_uses_exit_code() {
         let with_code = analyze_crash(&lines(&["[main/INFO]: Stopping!"]), Some(13), None, "", "", "vanilla");
         assert_eq!(with_code["title"], json!("Экземпляр завершился с кодом 13"));
@@ -445,11 +522,47 @@ mod tests {
         let future = SystemTime::now() + std::time::Duration::from_secs(3600);
         fs::File::options().write(true).open(&newer).unwrap().set_modified(future).unwrap();
         fs::write(root.join("ignored.log"), "nope").unwrap();
-        let head = read_hs_err_report(&root, 2);
+        let head = read_hs_err_report(&root, 2, None);
         assert_eq!(head, Vec::<String>::new());
         fs::write(&newer, "a\nb\nc\n").unwrap();
         fs::File::options().write(true).open(&newer).unwrap().set_modified(future).unwrap();
-        assert_eq!(read_hs_err_report(&root, 2), lines(&["a", "b"]));
-        assert!(read_hs_err_report(&root.join("missing"), 5).is_empty());
+        assert_eq!(read_hs_err_report(&root, 2, None), lines(&["a", "b"]));
+        assert!(read_hs_err_report(&root.join("missing"), 5, None).is_empty());
+    }
+
+    #[test]
+    fn hs_err_report_ignores_reports_from_before_the_current_launch() {
+        let root = temp_root("hs-err-stale");
+        fs::write(root.join("hs_err_pid1234.log"), "old JVM failure\n").unwrap();
+        let after_file_time = SystemTime::now() + std::time::Duration::from_secs(3600);
+        let started_at = after_file_time.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64();
+
+        assert!(read_hs_err_report(&root, 10, Some(started_at)).is_empty());
+    }
+
+    #[test]
+    fn hs_err_report_bounds_file_and_line_memory() {
+        let root = temp_root("hs-err-bounded");
+        fs::write(
+            root.join("hs_err_pid1234.log"),
+            format!("header\n{}", "x".repeat(MAX_HS_ERR_BYTES as usize * 2)),
+        )
+        .unwrap();
+
+        let report = read_hs_err_report(&root, usize::MAX, None);
+
+        assert_eq!(report.len(), 2);
+        assert!(report[1].len() <= MAX_HS_ERR_LINE_CHARS);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hs_err_report_does_not_follow_symlinks() {
+        let root = temp_root("hs-err-symlink");
+        let outside = temp_root("hs-err-outside").join("outside.log");
+        fs::write(&outside, "# SIGSEGV\n").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("hs_err_pid1234.log")).unwrap();
+
+        assert!(read_hs_err_report(&root, 10, None).is_empty());
     }
 }

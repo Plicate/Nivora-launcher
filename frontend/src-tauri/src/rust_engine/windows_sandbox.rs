@@ -341,7 +341,7 @@ pub(crate) fn spawn_in_appcontainer(
         STARTUPINFOEXW, STARTUPINFOW, STARTF_USESTDHANDLES,
     };
 
-    unsafe fn wide(value: &str) -> Vec<u16> {
+    fn wide(value: &str) -> Vec<u16> {
         value.encode_utf16().chain(std::iter::once(0)).collect()
     }
 
@@ -670,6 +670,18 @@ fn icacls(arguments: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(any(windows, test))]
+fn token_info_buffer(size: u32) -> Result<(Vec<usize>, u32), String> {
+    const MAX_TOKEN_INFORMATION_BYTES: u32 = 16 * 1024 * 1024;
+    let buffer_size = size.max(64);
+    if buffer_size > MAX_TOKEN_INFORMATION_BYTES {
+        return Err("Информация пользователя токена превышает допустимый размер".to_owned());
+    }
+    let word_size = std::mem::size_of::<usize>();
+    let word_count = (buffer_size as usize).saturating_add(word_size - 1) / word_size;
+    Ok((vec![0usize; word_count.max(1)], buffer_size))
+}
+
 #[cfg(windows)]
 pub(crate) fn current_user_sid() -> Result<String, String> {
     use windows_sys::Win32::Foundation::CloseHandle;
@@ -684,18 +696,18 @@ pub(crate) fn current_user_sid() -> Result<String, String> {
         let outcome = (|| -> Result<String, String> {
             let mut size: u32 = 0;
             GetTokenInformation(token, TokenUser, std::ptr::null_mut(), 0, &mut size);
-            let mut buffer = vec![0u8; size.max(64) as usize];
+            let (mut buffer, buffer_size) = token_info_buffer(size)?;
             if GetTokenInformation(
                 token,
                 TokenUser,
-                buffer.as_mut_ptr() as *mut core::ffi::c_void,
-                size,
+                buffer.as_mut_ptr().cast::<core::ffi::c_void>(),
+                buffer_size,
                 &mut size,
             ) == 0
             {
                 return Err("Не удалось прочитать пользователя токена".to_owned());
             }
-            let user = &*(buffer.as_ptr() as *const TOKEN_USER);
+            let user = &*buffer.as_ptr().cast::<TOKEN_USER>();
             sid_to_string(user.User.Sid)
         })();
         CloseHandle(token);
@@ -837,6 +849,14 @@ mod tests {
             "display": true,
             "audio": false,
         })
+    }
+
+    #[test]
+    fn token_information_buffer_is_aligned_and_bounded() {
+        let (buffer, bytes) = token_info_buffer(65).unwrap();
+        assert_eq!((buffer.as_ptr() as usize) % std::mem::align_of::<usize>(), 0);
+        assert!(buffer.len() * std::mem::size_of::<usize>() >= bytes as usize);
+        assert!(token_info_buffer(16 * 1024 * 1024 + 1).is_err());
     }
 
     #[test]

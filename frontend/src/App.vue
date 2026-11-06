@@ -2,32 +2,26 @@
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch, watchEffect } from 'vue'
 import ActivityPanel from './components/ActivityPanel.vue'
 import AppSidebar from './components/AppSidebar.vue'
-import AccountsPage from './components/AccountsPage.vue'
-import SettingsPage from './components/SettingsPage.vue'
 import BrandLogo from './components/BrandLogo.vue'
 import CatalogBadge from './components/CatalogBadge.vue'
 import CatalogDetailsDialog from './components/CatalogDetailsDialog.vue'
 import CloudStoragePanel from './components/CloudStoragePanel.vue'
-import BedrockWorkspace from './components/BedrockWorkspace.vue'
 import CustomSelect from './components/CustomSelect.vue'
 import CoreBadge from './components/CoreBadge.vue'
 import ColorPicker from './components/ColorPicker.vue'
 import Icon from './components/Icon.vue'
 import HotkeyInput from './components/HotkeyInput.vue'
 import InstanceGroups from './components/InstanceGroups.vue'
-import InstanceWorkspace from './components/InstanceWorkspace.vue'
 import FirstRunExperience from './components/FirstRunExperience.vue'
 import MemoryField from './components/MemoryField.vue'
 import NumericStepper from './components/NumericStepper.vue'
-import ServerWorkspace from './components/ServerWorkspace.vue'
 import LoaderBadge from './components/LoaderBadge.vue'
 import ModCardMeta from './components/ModCardMeta.vue'
 import BlockIconPicker from './components/BlockIconPicker.vue'
-import PluginCenter from './components/PluginCenter.vue'
 import PluginViewRenderer from './components/PluginViewRenderer.vue'
-import ThemeGallery from './components/ThemeGallery.vue'
-import ThemeStudio from './components/ThemeStudio.vue'
-import { FRONTEND_BUILD_STAMP, bridge } from './services/bridge'
+import PlicateRates from './components/PlicateRates.vue'
+import PlicateStore from './components/PlicateStore.vue'
+import { FRONTEND_BUILD_STAMP, bridge, inTauri } from './services/bridge'
 import { createCatalogWorkflow } from './services/catalogWorkflow'
 import { chooseAllowedCatalog } from './services/catalogSelection'
 import { shouldOpenActivityAfterSessionStart } from './services/activityVisibility'
@@ -47,7 +41,6 @@ import { pluginRuntime } from './services/pluginRuntime'
 import { useModalFocus } from './services/modalFocus'
 import { initialFirstRunPhase, readFirstRunExperience, writeFirstRunExperience, type FirstRunExperienceState, type FirstRunPhase } from './services/firstRunExperience'
 import { createWallpaperRenderer, prepareWallpaperForStorage } from './services/wallpaper'
-import DialogHost from './components/DialogHost.vue'
 import AutoRepairDialog from './components/AutoRepairDialog.vue'
 import { diagnoseLaunchFailure, offerAutoRepair } from './services/autoRepair'
 import { nicknameError } from './services/nickname'
@@ -56,7 +49,22 @@ import { createThemeManager } from './services/themeManager'
 import { DEFAULT_BUTTON_CUSTOMIZATION, buttonCustomizationRole, normalizeButtonCustomization, resolveButtonCustomization } from './services/buttonCustomization'
 import type { ButtonCustomizationTarget } from './services/buttonCustomization'
 import { createSettingsWorkflow } from './services/settingsWorkflow'
+import { createPlicateRatesApi, DEFAULT_PLICATE_API_BASE_URL, type PlicateJoinTarget } from './services/plicateRates'
+import { createPlicateStoreApi } from './services/plicateStore'
+import { plicateServicesEnabled } from './services/plicateServices'
+const browserPreview = !inTauri()
 const GameOverlay = defineAsyncComponent(() => import('./components/GameOverlay.vue'))
+const AccountsPage = defineAsyncComponent(() => import('./components/AccountsPage.vue'))
+const SettingsPage = defineAsyncComponent(() => import('./components/SettingsPage.vue'))
+const BedrockWorkspace = defineAsyncComponent(() => import('./components/BedrockWorkspace.vue'))
+const InstanceWorkspace = defineAsyncComponent(() => import('./components/InstanceWorkspace.vue'))
+const ServerWorkspace = defineAsyncComponent(() => import('./components/ServerWorkspace.vue'))
+const PluginCenter = defineAsyncComponent(() => import('./components/PluginCenter.vue'))
+const PluginEffectsLayer = defineAsyncComponent(() => import('./components/PluginEffectsLayer.vue'))
+const PluginSlotHost = defineAsyncComponent(() => import('./components/PluginSlotHost.vue'))
+const ThemeGallery = defineAsyncComponent(() => import('./components/ThemeGallery.vue'))
+const ThemeStudio = defineAsyncComponent(() => import('./components/ThemeStudio.vue'))
+const DialogHost = defineAsyncComponent(() => import('./components/DialogHost.vue'))
 import type {
   PluginEventPayloadMap,
   PluginInstanceRef,
@@ -110,6 +118,8 @@ const views: Record<ViewName, { title: string; kicker: string }> = {
   modpacks: { title: 'Модпаки', kicker: 'Готовые сборки' },
   plugins: { title: 'Плагины для лаунчера', kicker: 'Расширения интерфейса' },
   themes: { title: 'Центр настройки тем', kicker: 'Студия оформления' },
+  store: { title: 'Маркет Plicate', kicker: 'Темы и плагины' },
+  rates: { title: 'Рейтинг серверов', kicker: 'Каталог серверов' },
   settings: { title: 'Настройки', kicker: 'Параметры лаунчера' },
 }
 const customizablePages = (Object.entries(views) as Array<[ViewName, { title: string; kicker: string }]>).map(([id, value]) => ({ id, ...value }))
@@ -220,8 +230,8 @@ const defaultAnimationSettings: AnimationSettings = {
   page_duration_ms: 280,
   surface_duration_ms: 240,
   surface_stagger_ms: 30,
-  page_styles: { instances: '', 'instance-settings': '', accounts: '', mods: '', modpacks: '', plugins: '', themes: '', settings: '' },
-  page_durations_ms: { instances: 280, 'instance-settings': 280, accounts: 280, mods: 280, modpacks: 280, plugins: 280, themes: 280, settings: 280 },
+  page_styles: { instances: '', 'instance-settings': '', accounts: '', mods: '', modpacks: '', plugins: '', themes: '', store: '', rates: '', settings: '' },
+  page_durations_ms: { instances: 280, 'instance-settings': 280, accounts: 280, mods: 280, modpacks: 280, plugins: 280, themes: 280, store: 280, rates: 280, settings: 280 },
 }
 
 const initialState: AppState = {
@@ -296,8 +306,8 @@ const initialState: AppState = {
       instance_layout: 'default',
      ui_scale: 100,
      radius_tokens: { card: 7, button: 8, control: 10, sidebar: 0 },
-      page_themes: { instances: 'inherit', 'instance-settings': 'inherit', accounts: 'inherit', mods: 'inherit', modpacks: 'inherit', plugins: 'inherit', themes: 'inherit', settings: 'inherit' },
-      page_layouts: { instances: 'balanced', 'instance-settings': 'balanced', accounts: 'balanced', mods: 'wide', modpacks: 'wide', plugins: 'wide', themes: 'wide', settings: 'balanced' },
+      page_themes: { instances: 'inherit', 'instance-settings': 'inherit', accounts: 'inherit', mods: 'inherit', modpacks: 'inherit', plugins: 'inherit', themes: 'inherit', store: 'inherit', rates: 'inherit', settings: 'inherit' },
+      page_layouts: { instances: 'balanced', 'instance-settings': 'balanced', accounts: 'balanced', mods: 'wide', modpacks: 'wide', plugins: 'wide', themes: 'wide', store: 'wide', rates: 'wide', settings: 'balanced' },
     widget_visibility: { 'instances.workspace': true, 'accounts.status': true, 'mods.context': true },
      color_tokens: { ...defaultColorTokens },
      button_customization: normalizeButtonCustomization(DEFAULT_BUTTON_CUSTOMIZATION),
@@ -335,7 +345,14 @@ const initialState: AppState = {
 }
 
 const state = reactive<AppState>(initialState)
+const PLICATE_API_BASE_URL = import.meta.env.VITE_PLICATE_API_BASE_URL || DEFAULT_PLICATE_API_BASE_URL
+const plicateStoreApi = PLICATE_API_BASE_URL ? createPlicateStoreApi(PLICATE_API_BASE_URL) : undefined
+const plicateRatesApi = PLICATE_API_BASE_URL ? createPlicateRatesApi(PLICATE_API_BASE_URL) : undefined
 const currentView = ref<ViewName>('instances')
+
+watch([currentView, plicateServicesEnabled], ([view, enabled]) => {
+  if (!enabled && (view === 'store' || view === 'rates')) setView('instances')
+})
 const plugins = ref<PluginManifest[]>([])
 const pluginController = createPluginController({
   plugins,
@@ -361,7 +378,6 @@ const pluginController = createPluginController({
 })
 const {
   pluginViews,
-  githubPluginInstallBusy,
   pluginCommands,
   pluginShortcuts,
   replacePluginList,
@@ -389,7 +405,6 @@ const {
   revokePlugin,
   unrevokePlugin,
   installPluginArchive,
-  installGithubPlugin,
   uninstallPlugin,
 } = pluginController
 
@@ -522,7 +537,8 @@ const selectedAccount = ref('auto')
 watch(selectedAccount, (accountId) => {
   void broadcastPluginEvent('account.changed', { account_id: accountId === 'auto' ? null : accountId })
 })
-const instanceWorkspaceRef = ref<{ openConsoleIfOverview: () => boolean; openSettings: () => void; stop: () => Promise<void>; ensureLoaded?: () => Promise<void>; launch?: () => Promise<void> } | null>(null)
+const instanceWorkspaceRef = ref<{ openConsoleIfOverview: () => boolean; openSettings: () => void; stop: () => Promise<void>; ensureLoaded?: () => Promise<void>; launch?: (options?: { world?: string; server?: string }) => Promise<void> } | null>(null)
+const plicateRatesRef = ref<{ openExternalJoin: (target: { host: string; port?: number | string; edition?: string; name?: string }) => void } | null>(null)
 const bedrockWorkspaceRef = ref<{ ensureLoaded: () => Promise<void>; applyPendingVersion: (edition: 'release' | 'preview', version: string) => void; refreshAccountStatus?: () => Promise<void> } | null>(null)
 const serverWorkspaceRef = ref<{ openSettings: () => void; stop: () => Promise<void> } | null>(null)
 const instanceWorkspaceFocus = ref<'overview' | 'settings' | 'console'>('overview')
@@ -670,8 +686,8 @@ const appearanceDraft = reactive<AppearanceSettings>({
      page_styles: { ...defaultAnimationSettings.page_styles },
      page_durations_ms: { ...defaultAnimationSettings.page_durations_ms },
    } as AnimationSettings,
-    page_themes: { instances: 'inherit', 'instance-settings': 'inherit', accounts: 'inherit', mods: 'inherit', modpacks: 'inherit', plugins: 'inherit', themes: 'inherit', settings: 'inherit' },
-    page_layouts: { instances: 'balanced', 'instance-settings': 'balanced', accounts: 'balanced', mods: 'wide', modpacks: 'wide', plugins: 'wide', themes: 'wide', settings: 'balanced' },
+    page_themes: { instances: 'inherit', 'instance-settings': 'inherit', accounts: 'inherit', mods: 'inherit', modpacks: 'inherit', plugins: 'inherit', themes: 'inherit', store: 'inherit', rates: 'inherit', settings: 'inherit' },
+    page_layouts: { instances: 'balanced', 'instance-settings': 'balanced', accounts: 'balanced', mods: 'wide', modpacks: 'wide', plugins: 'wide', themes: 'wide', store: 'wide', rates: 'wide', settings: 'balanced' },
   widget_visibility: { 'instances.workspace': true, 'accounts.status': true, 'mods.context': true },
   color_tokens: { ...defaultColorTokens },
   button_customization: normalizeButtonCustomization(DEFAULT_BUTTON_CUSTOMIZATION),
@@ -682,6 +698,7 @@ const activity = reactive<ActivityState>({
   detail: 'Готово к запуску.',
   progress: 0,
   busy: false,
+  status: 'success',
   cancelling: false,
   logs: [],
 })
@@ -717,6 +734,7 @@ const {
   updateSavedSettingsBaseline,
   settingsProfiles,
   settingsProfilesLoading,
+  settingsProfilesError,
   settingsProfileBusy,
   settingsProfileName,
   backupDestinationOptions,
@@ -772,7 +790,8 @@ const {
   syncActiveTheme: () => syncActiveTheme(),
 })
 
-
+const storeInstalledThemes = computed(() => availableThemes.value.map((theme) => ({ id: theme.id, name: theme.name, version: theme.version || '0' })))
+const storeInstalledPlugins = computed(() => plugins.value.filter((plugin) => plugin.installed).map((plugin) => ({ id: plugin.id, name: plugin.name, version: plugin.version })))
 
 const page = computed(() => activePluginTab.value
   ? { title: activePluginTab.value.label, kicker: 'Вкладка плагина' }
@@ -1134,6 +1153,10 @@ let activityLogRevision = 0
 let activityLogInstanceName = ''
 let microsoftStatusTimer: number | undefined
 let microsoftStatusPollInFlight = false
+let appUnmounted = false
+let unlistenHiddenToTray: (() => void) | undefined
+let unlistenLaunchRequest: (() => void) | undefined
+let unlistenJoinRequest: (() => void) | undefined
 let stopBackendEvents: (() => void) | undefined
 let systemThemeMedia: MediaQueryList | undefined
 let systemThemeListener: ((event: MediaQueryListEvent) => void) | undefined
@@ -1149,6 +1172,10 @@ const launcherHidden = ref(false)
 
 function syncLauncherHidden() {
   launcherHidden.value = document.hidden || !document.hasFocus()
+}
+
+function handleVisibilityChange() {
+  syncLauncherHidden()
 }
 
 function notifySystemIfHidden(message: string) {
@@ -1680,6 +1707,16 @@ function setView(view: ViewName, pluginTabId = '') {
   }
 }
 
+async function quickJoinRates(payload: { instance: InstanceInfo; address: string }) {
+  if (payload.instance.running) return
+  selectedInstanceName.value = payload.instance.name
+  instanceWorkspaceFocus.value = 'overview'
+  setView('instance-settings')
+  await nextTick()
+  await instanceWorkspaceRef.value?.ensureLoaded?.()
+  await instanceWorkspaceRef.value?.launch?.({ server: payload.address })
+}
+
 function selectInstanceGroupFilter(filter: string) {
   instanceGroupFilter.value = filter
   if (currentView.value === 'instances') {
@@ -1953,7 +1990,8 @@ async function refreshBootstrap(preserveAppearance = true) {
        selectedAccount.value = next.settings.default_account_id || 'auto'
          if (!userNavigatedDuringBootstrap) {
            const preferredView = next.settings.remember_last_view ? next.settings.last_view : next.settings.startup_view
-           currentView.value = persistentViewOptions.some((option) => option.value === preferredView) ? preferredView : 'instances'
+           const resolvedView = persistentViewOptions.some((option) => option.value === preferredView) ? preferredView : 'instances'
+           currentView.value = resolvedView
          }
         ensureCatalogForView(currentView.value)
          ensureCompatibleInstanceForCatalog()
@@ -2143,15 +2181,17 @@ function openActivity(title: string, detail: string, visible = true) {
   activity.detail = detail
   activity.progress = 12
   activity.busy = true
+  activity.status = 'working'
   activity.cancelling = false
   activity.logs = []
   activity.verification_code = undefined
   activity.verification_uri = undefined
 }
 
-function finishActivity(detail: string, logs?: string[]) {
+function finishActivity(detail: string, logs?: string[], status: 'success' | 'error' | 'cancelled' = 'success') {
   activity.detail = detail
-  activity.progress = 100
+  activity.status = status
+  if (status === 'success') activity.progress = 100
   activity.busy = false
   activity.cancelling = false
   if (logs?.length && !activity.logs.length) activity.logs = logs.slice(-200)
@@ -2162,9 +2202,9 @@ function finishActivity(detail: string, logs?: string[]) {
   }, 1500)
 }
 
-function onBedrockActivity(payload: { title: string; detail: string; done?: boolean; logs?: string[] }) {
+function onBedrockActivity(payload: { title: string; detail: string; done?: boolean; logs?: string[]; status?: 'success' | 'error' | 'cancelled' }) {
   if (payload.done) {
-    finishActivity(payload.detail, payload.logs)
+    finishActivity(payload.detail, payload.logs, payload.status)
     return
   }
   if (activity.busy && activity.title === payload.title) {
@@ -2187,7 +2227,6 @@ async function pollActivityLog(instanceName: string) {
     const result = await bridge.instanceLog(instanceName)
     if (revision !== activityLogRevision || activityLogInstanceName !== instanceName) return
     activity.logs = result.lines.slice(-200)
-    if (result.running && activity.busy) activity.detail = 'Minecraft работает…'
   } catch {
   } finally {
     activityLogPollInFlight = false
@@ -2403,13 +2442,13 @@ async function installSelected() {
   const replaceExisting = state.instances.some((value) => value.name === name)
   if (!name) {
     busy.value = false
-    finishActivity('Укажите имя экземпляра.')
+    finishActivity('Укажите имя экземпляра.', undefined, 'error')
     showToast('Укажите имя экземпляра')
     return
   }
   if (replaceExisting && !(await confirmDestructive(`Экземпляр «${name}» уже существует. Заменить его полностью?`, { confirmLabel: 'Заменить', detail: 'Все файлы текущего экземпляра будут перезаписаны.' }))) {
     busy.value = false
-    finishActivity('Создание отменено.')
+    finishActivity('Создание отменено.', undefined, 'cancelled')
     return
   }
   try {
@@ -2458,7 +2497,7 @@ async function installSelected() {
     }
   } catch (error) {
     activity.logs.push(errorMessage(error))
-    finishActivity(isCancelled(error) ? 'Остановлено пользователем.' : 'Установка остановлена.')
+    finishActivity(isCancelled(error) ? 'Остановлено пользователем.' : 'Установка остановлена.', undefined, isCancelled(error) ? 'cancelled' : 'error')
     if (!isCancelled(error)) showToast(errorMessage(error))
   } finally {
     busy.value = false
@@ -2467,6 +2506,7 @@ async function installSelected() {
 
 async function createBedrockInstance() {
   let bedrockPendingVersionAfterLogin = false
+  let bedrockVersionFailed = false
   const name = creationName.value.trim()
   if (!name) {
     showToast('Укажите имя экземпляра')
@@ -2518,6 +2558,7 @@ async function createBedrockInstance() {
         versionNote = `Версия ${editionLabel}${bedrockCreationVersion.value} не установлена: нужен вход в Microsoft. В центре Bedrock нажмите «Подключить Microsoft Store» — после входа выбранная версия доустановится сама.`
         bedrockPendingVersionAfterLogin = true
       } else if (setup.failed || !setup.installed) {
+        bedrockVersionFailed = true
         const hint = setup.error_hint || 'проверьте подключение и лицензию Microsoft'
         versionNote = `Не удалось загрузить Minecraft ${editionLabel}${bedrockCreationVersion.value}: ${hint}. Версию можно выбрать в центре экземпляра.`
       } else {
@@ -2530,11 +2571,11 @@ async function createBedrockInstance() {
     if (bedrockPendingVersionAfterLogin && bedrockCreationVersion.value) {
       bedrockWorkspaceRef.value?.applyPendingVersion(bedrockCreationEdition.value, bedrockCreationVersion.value)
     }
-    finishActivity('Профиль Bedrock создан.', [`Экземпляр: ${result.instance.name}`, versionNote])
+    finishActivity('Профиль Bedrock создан.', [`Экземпляр: ${result.instance.name}`, versionNote], bedrockVersionFailed ? 'error' : 'success')
     showToast(bedrockPendingVersionAfterLogin ? 'Профиль создан — нужен вход в Microsoft для установки версии' : 'Профиль Bedrock создан')
   } catch (error) {
     activity.logs.push(errorMessage(error))
-    finishActivity('Не удалось создать профиль Bedrock.')
+    finishActivity('Не удалось создать профиль Bedrock.', undefined, 'error')
     showToast(errorMessage(error))
   } finally {
     busy.value = false
@@ -2629,7 +2670,7 @@ async function createServer() {
         ])
         showToast(`Сервер создан · ${serverCreation.core} установлен`)
       } catch (error) {
-        finishActivity('Сервер создан, но ядро не установлено.', [errorMessage(error), 'Откройте server workspace и повторите загрузку.'])
+        finishActivity('Сервер создан, но ядро не установлено.', [errorMessage(error), 'Откройте server workspace и повторите загрузку.'], 'error')
         showToast(`Сервер создан, но ядро не скачано: ${errorMessage(error)}`)
       }
     } else {
@@ -2637,7 +2678,7 @@ async function createServer() {
       showToast('Сервер создан')
     }
   } catch (error) {
-    finishActivity(errorMessage(error))
+    finishActivity(errorMessage(error), undefined, 'error')
     showToast(errorMessage(error))
   } finally {
     busy.value = false
@@ -2692,7 +2733,7 @@ async function loginMicrosoft(): Promise<boolean> {
     return true
   } catch (error) {
     activity.logs.push(errorMessage(error))
-    finishActivity(isCancelled(error) ? 'Вход остановлен.' : 'Вход не завершён.')
+    finishActivity(isCancelled(error) ? 'Вход остановлен.' : 'Вход не завершён.', undefined, isCancelled(error) ? 'cancelled' : 'error')
     if (firstRunPhase.value === 'account') firstRunError.value = isCancelled(error) ? 'Вход остановлен. Повторите попытку или создайте локальный профиль.' : errorMessage(error)
     if (!isCancelled(error)) showToast(errorMessage(error))
     return false
@@ -2735,7 +2776,7 @@ async function loginEly(): Promise<boolean> {
     return true
   } catch (error) {
     activity.logs.push(errorMessage(error))
-    finishActivity('Вход не завершён.')
+    finishActivity('Вход не завершён.', undefined, 'error')
     elyLoginError.value = errorMessage(error)
     showToast(errorMessage(error))
     return false
@@ -2869,11 +2910,11 @@ async function launchBedrockExisting(instance: InstanceInfo) {
     await minimizeForLaunch()
     attachOverlayForLaunch(instance.name)
     const result = await bridge.launchInstance(instance.name)
-    finishActivity(result.exit_code === 0 ? 'Bedrock завершил работу.' : 'Minecraft Bedrock завершил работу с ошибкой.', result.logs)
+    finishActivity(result.exit_code === 0 ? 'Bedrock завершил работу.' : 'Minecraft Bedrock завершил работу с ошибкой.', result.logs, result.exit_code === 0 ? 'success' : 'error')
     showToast(result.exit_code === 0 ? 'Игра завершила работу' : `Код выхода: ${result.exit_code}`)
   } catch (error) {
     activity.logs.push(errorMessage(error))
-    finishActivity(isCancelled(error) ? 'Остановлено пользователем.' : 'Не удалось запустить Bedrock.')
+    finishActivity(isCancelled(error) ? 'Остановлено пользователем.' : 'Не удалось запустить Bedrock.', undefined, isCancelled(error) ? 'cancelled' : 'error')
     if (!isCancelled(error)) {
       showToast(errorMessage(error))
       if (errorMessage(error).includes('Подключить аккаунт')) {
@@ -2913,6 +2954,23 @@ async function takeShortcutLaunchRequest() {
   } catch {
     // ярлык могли удалить, пока выполнялся запрос
   }
+  // цель из ссылки nivora://join с сайта Plicate Rates
+  try {
+    const { join } = await bridge.shortcutTakeJoinRequest()
+    if (join) await openExternalRatesJoin(join)
+  } catch {
+    // ссылка могла устареть, пока выполнялся запрос
+  }
+}
+
+/// открывает рейтинг серверов с диалогом выбора экземпляра для цели из nivora://join
+async function openExternalRatesJoin(target: PlicateJoinTarget) {
+  setView('rates')
+  for (let attempt = 0; attempt < 40 && state.instances.length === 0; attempt += 1) {
+    await new Promise((resolve) => window.setTimeout(resolve, 250))
+  }
+  await nextTick()
+  plicateRatesRef.value?.openExternalJoin(target)
 }
 
 async function launchFromShortcut(name: string) {
@@ -2979,7 +3037,7 @@ async function launchExisting(instance: InstanceInfo) {
     if (result.exit_code !== 0) await notifyPluginCrash(eventInstance, 'Minecraft exited with a non-zero status.', result.exit_code)
     if (result.crash) lastLaunchCrash.value = result.crash
     if (result.exit_code !== 0) offerAutoRepair(result.repair)
-    finishActivity(result.exit_code === 0 ? 'Игра завершила работу.' : 'Игра завершилась с ошибкой.', result.logs)
+    finishActivity(result.exit_code === 0 ? 'Игра завершила работу.' : 'Игра завершилась с ошибкой.', result.logs, result.exit_code === 0 ? 'success' : 'error')
     if (result.exit_code !== 0) {
       instanceWorkspaceFocus.value = 'overview'
       setView('instance-settings')
@@ -2988,7 +3046,7 @@ async function launchExisting(instance: InstanceInfo) {
   } catch (error) {
     activity.logs.push(errorMessage(error))
     if (launchRequested && !isCancelled(error)) await notifyPluginCrash(eventInstance, errorMessage(error))
-    finishActivity(isCancelled(error) ? 'Остановлено пользователем.' : 'Не удалось запустить игру.')
+    finishActivity(isCancelled(error) ? 'Остановлено пользователем.' : 'Не удалось запустить игру.', undefined, isCancelled(error) ? 'cancelled' : 'error')
     if (!isCancelled(error)) {
       showToast(errorMessage(error))
       if (launchRequested) void diagnoseLaunchFailure(instance.name, errorMessage(error))
@@ -3328,30 +3386,46 @@ onMounted(async () => {
     let trayHintShown = false
     try {
       const { listen } = await import('@tauri-apps/api/event')
-      await listen('nivora-hidden-to-tray', () => {
-        if (trayHintShown) return
-        trayHintShown = true
-        void bridge.systemNotify('Nivora Launcher', 'Лаунчер свернулся в трей и продолжает работать — глобальные клавиши и оверлей активны. Полный выход: «Выйти» в меню значка.').catch(() => undefined)
-      })
+      if (!appUnmounted) {
+        const unlisten = await listen('nivora-hidden-to-tray', () => {
+          if (trayHintShown) return
+          trayHintShown = true
+          void bridge.systemNotify('Nivora Launcher', 'Лаунчер свернулся в трей и продолжает работать — глобальные клавиши и оверлей активны. Полный выход: «Выйти» в меню значка.').catch(() => undefined)
+        })
+        if (appUnmounted) unlisten()
+        else unlistenHiddenToTray = unlisten
+      }
       // при уже запущенном лаунчере цель приходит отдельным событием
-      await listen<{ name: string | null }>('nivora-launch-request', (event) => {
-        const name = event.payload?.name
-        if (name) void launchFromShortcut(name)
-      })
+      if (!appUnmounted) {
+        const unlisten = await listen<{ name: string | null }>('nivora-launch-request', (event) => {
+          const name = event.payload?.name
+          if (name) void launchFromShortcut(name)
+        })
+        if (appUnmounted) unlisten()
+        else unlistenLaunchRequest = unlisten
+      }
+      // ссылка nivora://join с сайта приходит событием от живого лаунчера
+      if (!appUnmounted) {
+        const unlisten = await listen<{ join: PlicateJoinTarget | null }>('nivora-join-request', (event) => {
+          const join = event.payload?.join
+          if (join) void openExternalRatesJoin(join)
+        })
+        if (appUnmounted) unlisten()
+        else unlistenJoinRequest = unlisten
+      }
     } catch {
     }
     // при холодном старте цель ярлыка доступна после инициализации интерфейса
-    void takeShortcutLaunchRequest()
+    if (!appUnmounted) void takeShortcutLaunchRequest()
   }
+  if (appUnmounted) return
   void loadSettingsProfiles()
   pluginController.startDevelopmentPolling()
   window.addEventListener('keydown', handleGlobalKeydown)
   window.addEventListener('resize', scheduleWallpaperRender)
   window.addEventListener('focus', syncLauncherHidden)
   window.addEventListener('blur', syncLauncherHidden)
-  document.addEventListener('visibilitychange', () => {
-    syncLauncherHidden()
-  })
+  document.addEventListener('visibilitychange', handleVisibilityChange)
   syncLauncherHidden()
   systemThemeMedia = window.matchMedia('(prefers-color-scheme: dark)')
   systemDark.value = systemThemeMedia.matches
@@ -3375,14 +3449,31 @@ onMounted(async () => {
       if (event.kind === 'status' && event.event === 'workspace-changed' && event.instance_name === selectedInstanceName.value && currentView.value === 'mods' && !catalogInstallInProgress) {
         void searchMods()
       }
+      if (event.kind === 'status' && event.event === 'launch-preparing') {
+        if (event.instance_name === selectedInstanceName.value) {
+          activityLogRevision += 1
+          activity.open = shouldOpenActivityAfterSessionStart(settingsDraft.show_activity_panel, activityDismissedForRun)
+          activity.title = 'Подготовка запуска'
+          activity.detail = 'Проверяю Java и параметры экземпляра…'
+          activity.progress = 30
+          activity.busy = true
+          activity.status = 'working'
+          activity.cancelling = false
+          activity.logs = []
+          activity.verification_code = undefined
+          activity.verification_uri = undefined
+        }
+        return
+      }
       if (event.kind === 'status' && event.event === 'session-started') {
         if (event.instance_name === selectedInstanceName.value) {
           activityLogRevision += 1
           activity.open = shouldOpenActivityAfterSessionStart(settingsDraft.show_activity_panel, activityDismissedForRun)
           activity.title = 'Консоль запуска'
-          activity.detail = 'Minecraft работает…'
+          activity.detail = 'Java-процесс запущен, собираю вывод…'
           activity.progress = 68
           activity.busy = true
+          activity.status = 'working'
           activity.cancelling = false
           activity.logs = []
           activity.verification_code = undefined
@@ -3404,7 +3495,12 @@ onMounted(async () => {
       if (event.kind === 'status' && ['workspace-changed', 'server-config-changed', 'server-core-uploaded', 'server-core-downloaded'].includes(event.event || '')) return
       if (event.kind === 'status' && event.event === 'operation-finished') {
         if (!activity.busy && !activity.open) return
-        finishActivity(event.message || 'Операция завершена.')
+        const message = event.message || 'Операция завершена.'
+        const exitCode = message.match(/Игра завершила работу \(код (-?\d+)\)/i)?.[1]
+        const status = exitCode !== undefined ? (Number(exitCode) === 0 ? 'success' : 'error')
+          : /ошибк|не удалось|остановлен/i.test(message) ? (/остановлен/i.test(message) ? 'cancelled' : 'error')
+            : 'success'
+        finishActivity(message, undefined, status)
         return
       }
       if (event.kind === 'log' || !settingsDraft.show_activity_panel || !activity.busy) return
@@ -3441,6 +3537,13 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  appUnmounted = true
+  unlistenHiddenToTray?.()
+  unlistenHiddenToTray = undefined
+  unlistenLaunchRequest?.()
+  unlistenJoinRequest?.()
+  unlistenLaunchRequest = undefined
+  unlistenJoinRequest = undefined
   if (topbarMetricsTimer !== undefined) window.clearInterval(topbarMetricsTimer)
   stopOverlayWatcher()
   void detachOverlay()
@@ -3448,7 +3551,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('resize', scheduleWallpaperRender)
   window.removeEventListener('focus', syncLauncherHidden)
   window.removeEventListener('blur', syncLauncherHidden)
-  document.removeEventListener('visibilitychange', syncLauncherHidden)
+  document.removeEventListener('visibilitychange', handleVisibilityChange)
   if (wallpaperResizeTimer) window.clearTimeout(wallpaperResizeTimer)
   wallpaperRenderer.release()
   stopBackendEvents?.()
@@ -3473,7 +3576,7 @@ const settingsPageModel = {
   memoryUnitOptions, memoryValue, openGameFolder, openPluginLink, overwriteSettingsProfile, persistentViewOptions, pluginCatalogKindOptions,
   refreshBootstrap, refreshJavaOptions, removeLauncherProfile, removePluginCatalog, removeResourceCatalog, replayLauncherTour, resourceCatalogOptions,
   runPluginAction, savePluginConfig, saveSettings, saveSettingsProfileAs, selectActiveCatalog, setLanguageFromSettings, setView,
-  settingsDraft, settingsProfileBusy, settingsProfileName, settingsProfiles, settingsProfilesLoading, settingsSaveMessage, settingsSaveState,
+  settingsDraft, settingsProfileBusy, settingsProfileName, settingsProfiles, settingsProfilesLoading, settingsProfilesError, settingsSaveMessage, settingsSaveState,
   settingsSectionViews, shortcutRows, showToast, state,
 }
 </script>
@@ -3514,6 +3617,7 @@ const settingsPageModel = {
      <div v-if="wallpaperUrl && !wallpaperLoadFailed" class="wallpaper-layer" aria-hidden="true">
        <img :src="wallpaperDisplayUrl" alt="" @load="wallpaperLoadFailed = false" @error="wallpaperLoadFailed = true" />
       </div>
+     <PluginEffectsLayer />
      <AppSidebar
          :current="currentView === 'instance-settings' ? 'instances' : currentView"
         :mobile-open="mobileMenuOpen"
@@ -3541,6 +3645,7 @@ const settingsPageModel = {
       />
 
         <main class="main-panel">
+        <div v-if="browserPreview" class="browser-preview-banner" role="status">Демо-предпросмотр: показаны примерные данные; операции рабочего стола здесь не выполняются.</div>
         <header class="topbar">
         <button class="mobile-menu-button" type="button" aria-label="Открыть меню" @click="mobileMenuOpen = true">
           <Icon name="instances" :size="20" />
@@ -3567,8 +3672,8 @@ const settingsPageModel = {
             <Icon name="refresh" :size="18" />
           </button>
           <button v-if="settingsDraft.show_activity_panel" class="activity-trigger" type="button" @click="setActivityOpen(!activity.open, true)">
-            <span class="status-dot" :class="{ 'status-dot--busy': activity.busy }" />
-            <span>{{ activity.busy ? 'В работе' : 'Готово' }}</span>
+            <span class="status-dot" :class="{ 'status-dot--busy': activity.busy, 'status-dot--danger': activity.status === 'error' }" />
+            <span>{{ activity.busy ? 'В работе' : activity.status === 'error' ? 'Ошибка' : activity.status === 'cancelled' ? 'Остановлено' : 'Готово' }}</span>
           </button>
         </div>
       </header>
@@ -3576,6 +3681,7 @@ const settingsPageModel = {
        <div class="page-scroll">
            <div class="page-transition" :class="{ 'page-transition--animate': pageTransitionPulse }">
                <section data-page-view="instances" class="page-content">
+                 <PluginSlotHost slot-name="instances.top" />
                 <div class="section-intro library-intro"><div><h2>Экземпляры</h2><p>Профили игры и серверы Minecraft.</p></div><div class="section-intro-actions"><button class="button button--quiet" type="button" :disabled="externalImportBusy" @click="importExternalInstances"><Icon name="upload" :size="16" />{{ externalImportScanning ? 'Ищу источники…' : 'Импорт' }}</button><button class="button button--outline" type="button" @click="openCreateServer"><Icon name="server" :size="16" />Новый сервер</button><button class="button button--accent" type="button" @click="openCreateInstance"><Icon name="plus" :size="16" />Новый экземпляр</button></div></div>
                 <div v-if="homeWidgetViews.length" class="plugin-home-widgets">
                   <article v-for="entry in homeWidgetViews" :key="`${entry.pluginId}:${entry.view.id}`" class="plugin-home-widget panel">
@@ -3819,11 +3925,9 @@ const settingsPageModel = {
                   :runtime-views="pluginViews"
                   :runtime-commands="pluginCommands"
                   :runtime-shortcuts="pluginShortcuts"
-                  :github-install-busy="githubPluginInstallBusy"
                   :active="currentView === 'plugins'"
                   @toggle="togglePlugin"
                   @install-archive="installPluginArchive"
-                  @install-github="installGithubPlugin"
                   @uninstall="uninstallPlugin"
                   @update-grants="updatePluginGrants"
                   @allow-local-execution="allowLocalPluginExecution"
@@ -3837,6 +3941,33 @@ const settingsPageModel = {
                   @run-command="runPluginCommand"
                   @save-view-config="savePluginConfig"
                   @open-view-link="openPluginLink"
+                  @toast="showToast"
+                />
+              </section>
+
+              <section data-page-view="store" class="page-content">
+                <PlicateStore
+                  v-if="plicateServicesEnabled"
+                  :api="plicateStoreApi"
+                  :installed-themes="storeInstalledThemes"
+                  :installed-plugins="storeInstalledPlugins"
+                  :fallback-themes="availableThemes"
+                  :busy="themeOperationBusy || activity.busy || busy"
+                  @install-theme="importThemeArchive"
+                  @install-plugin="installPluginArchive"
+                  @apply-theme="applyTheme"
+                  @toast="showToast"
+                />
+              </section>
+
+              <section data-page-view="rates" class="page-content">
+                <PlicateRates
+                  v-if="plicateServicesEnabled"
+                  ref="plicateRatesRef"
+                  :api="plicateRatesApi"
+                  :instances="state.instances"
+                  @quick-join="quickJoinRates"
+                  @navigate-instances="setView('instances')"
                   @toast="showToast"
                 />
               </section>

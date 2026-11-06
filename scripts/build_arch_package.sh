@@ -13,9 +13,19 @@ pkgver="$(sed -n 's/^pkgver=//p' packaging/arch/PKGBUILD | tr -d '[:space:]')"
 command -v makepkg >/dev/null 2>&1 || { echo "makepkg не найден: установите pacman-package-group/base-devel" >&2; exit 1; }
 
 log() { printf '\033[1;34m==> %s\033[0m\n' "$*"; }
-die() { printf '\033[1;31mОшибка: %s\033[0m\n' "$*" >&2; exit 1; }
+die() {
+  printf '\033[1;31mОшибка: %s\033[0m\n' "$*" >&2
+  log_dest="${OUTPUT_DIR:-$PROJECT_ROOT/dist/arch}"
+  if [ -n "${LOG_FILE:-}" ] && [ -f "$LOG_FILE" ]; then
+    mkdir -p "$log_dest"
+    cp "$LOG_FILE" "$log_dest/last-build.log"
+    printf 'Полный лог сборки сохранён: %s\n' "$log_dest/last-build.log" >&2
+  fi
+  exit 1
+}
 
 BUILD_DIR="$(mktemp -d --tmpdir "${pkgname}-build.XXXXXX")"
+LOG_FILE="$BUILD_DIR/makepkg.log"
 trap 'rm -rf "$BUILD_DIR"' EXIT
 STAGE_DIR="$BUILD_DIR/$archive_root"
 OUTPUT_DIR="$PROJECT_ROOT/dist/arch"
@@ -60,9 +70,9 @@ run_makepkg() {
     chown -R "$build_user" "$BUILD_DIR"
     chmod -R u+rwX,go-rwx "$BUILD_DIR"
     runuser -u "$build_user" -- \
-      env HOME="$BUILD_DIR/home" NIVORA_LAUNCHER_SOURCE_SHA256="$archive_sha256" makepkg -f
+      env HOME="$BUILD_DIR/home" NIVORA_LAUNCHER_SOURCE_SHA256="$archive_sha256" makepkg -f 2>&1 | tee "$LOG_FILE"
   else
-    NIVORA_LAUNCHER_SOURCE_SHA256="$archive_sha256" makepkg -f
+    NIVORA_LAUNCHER_SOURCE_SHA256="$archive_sha256" makepkg -f 2>&1 | tee "$LOG_FILE"
   fi
 }
 run_makepkg || die "makepkg завершился с ошибкой — смотрите вывод выше"

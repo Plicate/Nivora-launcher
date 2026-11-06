@@ -36,7 +36,7 @@ type ModpackWorkflowDependencies = {
   activity: ActivityState
   showToast: (message: string, tone?: PluginUiTone) => void
   openActivity: (title: string, detail: string, visible?: boolean) => void
-  finishActivity: (detail: string, logs?: string[]) => void
+  finishActivity: (detail: string, logs?: string[], status?: 'success' | 'error' | 'cancelled') => void
   searchMods: (pageArgument?: unknown) => Promise<void>
   errorMessage: (error: unknown) => string
   isCancelled: (error: unknown) => boolean
@@ -146,7 +146,7 @@ async function importModpackArchive(file: { fileName: string; data: string; size
     await searchMods()
   } catch (error) {
     activity.logs.push(errorMessage(error))
-    finishActivity(isCancelled(error) ? 'Импорт остановлен.' : 'Импорт модпака остановлен.')
+    finishActivity(isCancelled(error) ? 'Импорт остановлен.' : 'Импорт модпака остановлен.', undefined, isCancelled(error) ? 'cancelled' : 'error')
     if (!isCancelled(error)) showToast(errorMessage(error))
   } finally {
     modBusy.value = false
@@ -367,7 +367,7 @@ async function createModpackInstance(mod?: ModResult, archive?: { fileName: stri
       created = undefined
     }
     activity.logs.push(errorMessage(error))
-    finishActivity(isCancelled(error) ? 'Создание остановлено.' : 'Не удалось создать экземпляр модпака.')
+    finishActivity(isCancelled(error) ? 'Создание остановлено.' : 'Не удалось создать экземпляр модпака.', undefined, isCancelled(error) ? 'cancelled' : 'error')
     if (!isCancelled(error)) showToast(errorMessage(error))
   } finally {
     busy.value = false

@@ -1,6 +1,7 @@
 import { convertFileSrc, invoke } from '@tauri-apps/api/core'
 import { DEFAULT_BUTTON_CUSTOMIZATION } from './buttonCustomization'
 import type { FileBrowserListing } from './fileBrowser'
+import type { PlicateJoinTarget } from './plicateRates'
 import { demoModpacksForCatalog, searchDemoModpacks } from './modpackMockCatalog'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { LAUNCHER_VERSION } from '../version'
@@ -55,7 +56,6 @@ import type {
   ServerCore,
   ServerDetails,
   ServerFile,
-  ServerMetrics,
   InstanceIconBlock,
   SettingsProfile,
   WorldBackup,
@@ -168,8 +168,8 @@ const fallbackSettings: SettingsInfo = {
     page_duration_ms: 140,
     surface_duration_ms: 140,
     surface_stagger_ms: 0,
-    page_styles: { instances: 'fade', 'instance-settings': 'fade', accounts: 'fade', mods: 'fade', modpacks: 'fade', plugins: 'fade', themes: 'fade', settings: 'fade' },
-    page_durations_ms: { instances: 140, 'instance-settings': 140, accounts: 140, mods: 140, modpacks: 140, plugins: 140, themes: 140, settings: 140 },
+    page_styles: { instances: 'fade', 'instance-settings': 'fade', accounts: 'fade', mods: 'fade', modpacks: 'fade', plugins: 'fade', themes: 'fade', store: 'fade', rates: 'fade', settings: 'fade' },
+    page_durations_ms: { instances: 140, 'instance-settings': 140, accounts: 140, mods: 140, modpacks: 140, plugins: 140, themes: 140, store: 140, rates: 140, settings: 140 },
   } as AnimationSettings,
   overlay_settings: {
     enabled: true,
@@ -201,8 +201,8 @@ const fallbackSettings: SettingsInfo = {
   instance_layout: 'default',
   ui_scale: 100,
   radius_tokens: { card: 7, button: 8, control: 10, sidebar: 0 },
-    page_themes: { instances: 'inherit', 'instance-settings': 'inherit', accounts: 'inherit', mods: 'inherit', modpacks: 'inherit', plugins: 'inherit', themes: 'inherit', settings: 'inherit' },
-    page_layouts: { instances: 'balanced', 'instance-settings': 'balanced', accounts: 'balanced', mods: 'wide', modpacks: 'wide', plugins: 'wide', themes: 'wide', settings: 'balanced' },
+    page_themes: { instances: 'inherit', 'instance-settings': 'inherit', accounts: 'inherit', mods: 'inherit', modpacks: 'inherit', plugins: 'inherit', themes: 'inherit', store: 'inherit', rates: 'inherit', settings: 'inherit' },
+    page_layouts: { instances: 'balanced', 'instance-settings': 'balanced', accounts: 'balanced', mods: 'wide', modpacks: 'wide', plugins: 'wide', themes: 'wide', store: 'wide', rates: 'wide', settings: 'balanced' },
   widget_visibility: { 'instances.workspace': true, 'accounts.status': true, 'mods.context': true },
   color_tokens: {
     accent: '#2f7ff6', accent_strong: '#6aa5ff', background: '#121417', panel: '#1a1d22', panel_raised: '#21252c', panel_soft: '#262b33',
@@ -270,7 +270,6 @@ const fallbackState: AppState = {
       path: '/home/player/.nivora/instances/fabric-smp',
       kind: 'client',
       game_edition: 'java',
-      running: true,
       tags: ['моды', 'онлайн'],
     },
     {
@@ -428,7 +427,7 @@ function requestTimeout(operation: string): number | undefined {
   if (operation === 'mod_audit_accept') return 30 * 60 * 1000
   // экспорт читает манифесты JAR и может занять время на больших сборках
   if (operation === 'instance_shortcut_status' || operation === 'instance_shortcut_create' || operation === 'instance_shortcut_remove') return 15000
-  if (operation === 'shortcut_take_launch_request') return 10000
+  if (operation === 'shortcut_take_launch_request' || operation === 'shortcut_take_join_request') return 10000
   if (operation === 'instance_mod_list_export') return 60000
   // сравнение и автонастройка читают манифесты JAR двух каталогов
   if (operation === 'instance_compare') return 120000
@@ -512,45 +511,6 @@ async function request<T>(operation: string, payload: Record<string, unknown> = 
   } finally {
     activeOperationIds.delete(id)
   }
-}
-
-function fallbackServerConfig(server?: InstanceInfo): ServerConfig {
-  return {
-    core: server?.server_core || 'paper',
-    version: server?.server_core_version || server?.minecraft_version || '1.21.1',
-    build: '',
-    port: server?.server_port || 25565,
-    max_players: 20,
-    motd: server?.display_name || server?.name || 'Demo server',
-    memory: '4GiB',
-    java_path: '',
-    security_profile: 'strict',
-    security_permissions: ['network:game', 'files:instance'],
-    eula_accepted: Boolean(server?.server_eula),
-    auto_restart: false,
-    restart_schedule: { enabled: false, time: '04:00', warn_minutes: 1, last_run: '' },
-    snapshot_retention_hours: 5,
-    snapshot_max_count: 1,
-  }
-}
-
-function fallbackServerStatus(name: string, running: boolean): ServerStatus {
-  const server = fallbackState.instances.find((item) => item.name === name)
-  const config = fallbackServerConfig(server)
-  const now = Date.now() / 1000
-  const metrics: ServerMetrics = {
-    timestamp: now,
-    pid: 0,
-    running,
-    uptime_seconds: 0,
-    ram_bytes: 0,
-    cpu_percent: 0,
-    storage_bytes: 0,
-    players: 0,
-    max_players: config.max_players,
-    tps: running ? 20 : 0,
-  }
-  return { running, pid: 0, started_at: running ? now : 0, players: 0, max_players: config.max_players, tps: metrics.tps, uptime_seconds: 0, metrics, last_metrics: {} }
 }
 
 // данные тем для предпросмотра
@@ -698,6 +658,10 @@ const MOCK_MODRINTH_HITS: ModResult[] = [
   { project_id: 'waystones', title: 'Waystones', author: 'BlayTheNinth', description: 'Set up waystones and travel between them.', downloads: 643510, follows: 892, categories: ['forge', 'neoforge', 'fabric', 'transport'], display_categories: ['transport'], client_side: 'required', server_side: 'required', project_type: 'mod' },
 ]
 
+function rejectBrowserPreviewOperation(feature: string): never {
+  throw new Error(`Операция «${feature}» недоступна в браузерном предпросмотре; используйте desktop launcher.`)
+}
+
 async function mockRequest<T>(operation: string, payload: Record<string, unknown>): Promise<T> {
   await new Promise((resolve) => window.setTimeout(resolve, 220))
   if (operation === 'bootstrap') return structuredClone(fallbackState) as T
@@ -812,16 +776,8 @@ async function mockRequest<T>(operation: string, payload: Record<string, unknown
     mockFsData.set(path, decodeURIComponent(escape(window.atob(data))))
     return { written: true, path, size: data.length } as T
   }
-  if (operation === 'fs_open_file') {
-    const path = String(payload.path || '')
-    return { opened: Boolean(path), path } as T
-  }
-  if (operation === 'fs_reveal') {
-    // в предпросмотре нет системного проводника, поэтому возвращаем исходный путь
-    const path = String(payload.path || MOCK_FS_ROOT)
-    return { opened: true, path } as T
-  }
-  if (operation === 'settings_profiles_list') return { profiles: [] } as T
+  if (operation === 'fs_open_file' || operation === 'fs_reveal') return rejectBrowserPreviewOperation('Открытие системного файла или папки')
+  if (operation === 'settings_profiles_list') return rejectBrowserPreviewOperation('Получение профилей настроек')
   if (operation === 'create_offline_account') {
     const username = String(payload.username || 'Player').trim().replace(/[^\p{L}\p{N}_-]/gu, '').slice(0, 16)
     if (!username) throw new Error('Имя offline-аккаунта пустое')
@@ -854,42 +810,26 @@ async function mockRequest<T>(operation: string, payload: Record<string, unknown
   if (operation.startsWith('github_plugin_')) {
     throw new Error('Эта функция доступна только в установленном desktop launcher')
   }
-  if (operation === 'plugin_network_dns') return { host: String(payload.host || ''), port: payload.port ?? null, addresses: [] } as T
+  if (operation === 'plugin_network_dns') return rejectBrowserPreviewOperation('DNS-диагностика сети')
   if (operation === 'plugin_network_ping' || operation === 'plugin_network_port_check') {
     return { host: String(payload.host || ''), port: Number(payload.port || 25565), reachable: false, latency_ms: 0, error: 'Диагностика доступна только в desktop launcher' } as T
   }
-  if (operation === 'plugin_server_list_get' || operation === 'plugin_server_list_save') return { servers: [] } as T
-  if (operation === 'plugin_server_list_add') return { server: payload.server, servers: [payload.server] } as T
-  if (operation === 'plugin_server_list_remove') return { removed: false, servers: [] } as T
+  if (['plugin_server_list_get', 'plugin_server_list_save', 'plugin_server_list_add', 'plugin_server_list_remove'].includes(operation)) return rejectBrowserPreviewOperation('Списки серверов плагина')
   if (operation === 'save_settings') {
     const values = JSON.parse(JSON.stringify(payload.values || {})) as Record<string, unknown>
     Object.assign(fallbackState.settings, values)
     return { settings: structuredClone(fallbackState.settings) } as T
   }
   if (operation === 'cloud_status') return { status: { provider: 'webdav', configured: false, endpoint: '', username: '', remote_path: 'nivora-launcher', include_accounts: false, last_sync: 0 } } as T
-  if (operation === 'cloud_configure') {
-    const values = payload as { url?: string; username?: string; remote_path?: string; include_accounts?: boolean }
-    Object.assign(fallbackState.settings, {
-      cloud_url: values.url || '',
-      cloud_username: values.username || '',
-      cloud_remote_path: values.remote_path || 'nivora-launcher',
-      cloud_include_accounts: Boolean(values.include_accounts),
-    })
-    return { status: { provider: 'webdav', configured: false, endpoint: fallbackState.settings.cloud_url, username: fallbackState.settings.cloud_username, remote_path: fallbackState.settings.cloud_remote_path, include_accounts: fallbackState.settings.cloud_include_accounts, last_sync: 0 }, settings: structuredClone(fallbackState.settings) } as T
-  }
-  if (operation === 'cloud_test' || operation === 'cloud_list' || operation === 'cloud_sync' || operation === 'cloud_restore' || operation === 'cloud_delete') {
-    return { status: { provider: 'webdav', configured: false, endpoint: fallbackState.settings.cloud_url, username: fallbackState.settings.cloud_username, remote_path: fallbackState.settings.cloud_remote_path, include_accounts: fallbackState.settings.cloud_include_accounts, last_sync: fallbackState.settings.cloud_last_sync }, files: [] } as T
-  }
-  if (operation === 'cloud_disconnect') {
-    Object.assign(fallbackState.settings, { cloud_url: '', cloud_username: '', cloud_remote_path: 'nivora-launcher', cloud_include_accounts: false, cloud_last_sync: 0 })
-    return { status: { provider: 'webdav', configured: false, endpoint: '', username: '', remote_path: 'nivora-launcher', include_accounts: false, last_sync: 0 }, settings: structuredClone(fallbackState.settings) } as T
-  }
+  if (operation === 'cloud_configure') return rejectBrowserPreviewOperation('Настройка облачной синхронизации')
+  if (operation === 'cloud_test' || operation === 'cloud_list' || operation === 'cloud_sync' || operation === 'cloud_restore' || operation === 'cloud_delete') return rejectBrowserPreviewOperation('Облачная синхронизация')
+  if (operation === 'cloud_disconnect') return rejectBrowserPreviewOperation('Отключение облачной синхронизации')
   if (operation === 'instance_groups') return { groups: [...fallbackState.settings.instance_groups] } as T
-  if (operation === 'external_instances_scan') return { candidates: [] } as T
+  if (operation === 'external_instances_scan') return rejectBrowserPreviewOperation('Поиск внешних экземпляров')
   if (operation === 'external_instance_import') throw new Error('Импорт экземпляров доступен только в desktop launcher')
   if (operation === 'bedrock_runtime_status') return { status: { available: false, supported: false, version: '', message: 'Minecraft Bedrock доступен только в desktop launcher.' } } as T
-  if (operation === 'bedrock_versions') return { versions: [], current_edition: '', current_version: '' } as T
-  if (operation === 'bedrock_content_list') return { items: [] as BedrockContentItem[] } as T
+  if (operation === 'bedrock_versions') return rejectBrowserPreviewOperation('Получение версий Minecraft Bedrock')
+  if (operation === 'bedrock_content_list') return rejectBrowserPreviewOperation('Получение файлов Minecraft Bedrock')
   if (operation.startsWith('bedrock_')) throw new Error('Minecraft Bedrock доступен только в desktop launcher')
   if (operation === 'create_instance_group') {
     const name = String(payload.name || '').trim().slice(0, 40)
@@ -995,11 +935,7 @@ async function mockRequest<T>(operation: string, payload: Record<string, unknown
       })),
     } as T
   }
-  if (operation === 'java_options') {
-    return {
-      options: [{ value: 'auto', label: 'Автоматически', meta: 'Mojang runtime → системная Java' }],
-    } as T
-  }
+  if (operation === 'java_options') return rejectBrowserPreviewOperation('Получение списка Java')
   if (operation === 'security_status') {
     return {
       platform: 'linux',
@@ -1011,7 +947,7 @@ async function mockRequest<T>(operation: string, payload: Record<string, unknown
       permissions: ['network:game', 'files:instance', 'files:host-read', 'files:host-write', 'process:spawn', 'chat:read', 'input:capture', 'native:load'],
     } as T
   }
-  if (operation === 'java_validate') return { path: String(payload.path || ''), version: 21 } as T
+  if (operation === 'java_validate') return rejectBrowserPreviewOperation('Проверка Java')
   if (operation === 'loader_choices') {
     return {
       choices: [
@@ -1019,36 +955,9 @@ async function mockRequest<T>(operation: string, payload: Record<string, unknown
       ],
     } as T
   }
-  if (operation === 'install') {
-    const version = String(payload.version || '1.21.1')
-    const requestedLoader = String(payload.loader || 'vanilla')
-    const loader = (['vanilla', 'fabric', 'forge', 'neoforge', 'quilt'].includes(requestedLoader) ? requestedLoader : 'vanilla') as LoaderId
-    const loaderVersion = String(payload.loader_version || 'latest')
-    const name = String(payload.instance_name || `${loader}-${version}`)
-    const versionId = loader === 'vanilla' ? version : `${loader}-${loaderVersion}-${version}`
-    const instance: InstanceInfo = {
-      name,
-      display_name: name,
-      description: '',
-      group: '',
-      icon: '',
-      banner: '',
-      played_seconds: 0,
-      version_id: versionId,
-      minecraft_version: version,
-      loader,
-      path: `~/.local/share/nivora-launcher/game/instances/${name}`,
-      kind: 'client',
-    }
-    fallbackState.instances = [...fallbackState.instances.filter((item) => item.name !== name), instance]
-    return { version_id: versionId, instance_dir: instance.path, instances: structuredClone(fallbackState.instances) } as T
-  }
-  if (operation === 'instance_repair_version') {
-    const instance = fallbackState.instances.find((item) => item.name === String(payload.instance_name || ''))
-    if (!instance) throw new Error('Экземпляр не найден')
-    return { version_id: instance.version_id, instance_dir: instance.path, instances: structuredClone(fallbackState.instances) } as T
-  }
-  if (operation === 'auto_repair_diagnose') return { instance_name: String(payload.instance_name || ''), exit_code: null, issues: [], muted_issues: [], manual: Boolean(payload.manual) } as T
+  if (operation === 'install') return rejectBrowserPreviewOperation('Установка экземпляра')
+  if (operation === 'instance_repair_version') return rejectBrowserPreviewOperation('Проверка версии экземпляра')
+  if (operation === 'auto_repair_diagnose') return rejectBrowserPreviewOperation('Диагностика экземпляра')
   if (operation === 'auto_repair_apply') throw new Error('Авто-починка доступна только в desktop launcher')
   if (operation === 'auto_repair_mute') {
     const kinds = Array.isArray(payload.kinds) ? payload.kinds.map(String) : []
@@ -1056,23 +965,13 @@ async function mockRequest<T>(operation: string, payload: Record<string, unknown
     fallbackSettings.auto_repair_muted = payload.muted === false ? current.filter((kind) => !kinds.includes(kind)) : [...new Set([...current, ...kinds])]
     return { settings: structuredClone(fallbackSettings) } as T
   }
-  if (operation === 'skins_list') return { skins: [] } as T
-  if (operation === 'check_remote_release') {
-    return { update_available: false, latest_version: LAUNCHER_VERSION, current_version: LAUNCHER_VERSION, release_url: '', published_at: '', notes: '', assets: [] } as T
-  }
-  if (operation === 'skins_export') return { path: '/tmp/skin.png', folder: '/tmp' } as T
-  if (operation === 'instance_log') return { lines: [], running: false, metrics: { timestamp: Date.now() / 1000, pid: 0, running: false, uptime_seconds: 0, ram_bytes: 0, cpu_percent: 0, storage_bytes: 0, players: 0, max_players: 0, tps: 0 } } as T
-  if (operation === 'instance_versions') return { components: [], minecraft_version: '', loader: 'vanilla', loader_version: '', lwjgl_versions: [], library_overrides: {} } as InstanceVersionsPayload as T
-  if (operation === 'shader_analyze') return null as unknown as T
-  if (operation === 'shader_benchmark_status') return { phase: 'idle' } as ShaderBenchmarkState as T
-  if (operation === 'instance_file_list') return { files: [] as InstanceFile[] } as T
-  if (operation === 'instance_file_read') return { content: '', encoding: payload.encoding === 'base64' ? 'base64' : 'text' } as InstanceFileReadResult as T
-  if (operation === 'instance_file_write') return { saved: true } as T
-  if (operation === 'instance_file_mkdir') return { created: true } as T
-  if (operation === 'instance_file_upload') return { uploaded: true } as T
-  if (operation === 'instance_file_delete') return { removed: true } as T
-  if (operation === 'instance_log_archives') return { logs: [] as InstanceLogArchive[], next_offset: null } as T
-  if (operation === 'instance_log_archive_read') return { content: '', next_offset: Number(payload.offset || 0), eof: true } as InstanceLogArchiveReadResult as T
+  if (operation === 'skins_list') return rejectBrowserPreviewOperation('Получение списка скинов')
+  if (operation === 'check_remote_release') return rejectBrowserPreviewOperation('Проверка обновлений лаунчера')
+  if (operation === 'skins_export') return rejectBrowserPreviewOperation('Экспорт скина')
+  if (operation === 'instance_log') return rejectBrowserPreviewOperation('Чтение журнала экземпляра')
+  if (operation === 'instance_versions') return rejectBrowserPreviewOperation('Получение версий экземпляра')
+  if (operation === 'shader_analyze' || operation === 'shader_benchmark_status') return rejectBrowserPreviewOperation('Диагностика шейдеров')
+  if (['instance_file_list', 'instance_file_read', 'instance_file_write', 'instance_file_mkdir', 'instance_file_upload', 'instance_file_delete', 'instance_log_archives', 'instance_log_archive_read'].includes(operation)) return rejectBrowserPreviewOperation('Операции с файлами экземпляра')
   if (operation === 'microsoft_login_status') return { status: 'idle' } as T
   if (operation === 'mods_search') {
     const query = String(payload.query || '')
@@ -1097,42 +996,18 @@ async function mockRequest<T>(operation: string, payload: Record<string, unknown
   }
   if (operation === 'modpack_import') throw new Error('Импорт модпака доступен только в desktop launcher')
   if (operation === 'server_cores') return { cores: fallbackState.server_cores || [] } as T
-  if (operation === 'server_core_versions') return { core: String(payload.core || 'custom'), versions: [] } as T
+  if (operation === 'server_core_versions') return rejectBrowserPreviewOperation('Получение версий серверного ядра')
   if (operation === 'server_plugin_catalogs') return { catalogs: fallbackState.settings.plugin_catalogs, active_catalog_id: fallbackState.settings.active_plugin_catalog_id } as T
-  if (operation === 'save_server_plugin_catalogs') return { catalogs: fallbackState.settings.plugin_catalogs, active_catalog_id: fallbackState.settings.active_plugin_catalog_id } as T
-  if (operation === 'server_create') {
-    const name = String(payload.name || 'demo-server')
-    if (fallbackState.instances.some((item) => item.name === name)) {
-      throw new Error('Это имя уже занято. Создание сервера не заменяет существующие экземпляры.')
-    }
-    const server: InstanceInfo = { name, display_name: String(payload.display_name || name), description: 'Серверный экземпляр', group: '', icon: '', banner: '', played_seconds: 0, version_id: '', minecraft_version: String(payload.version || '1.21.1'), loader: 'vanilla', path: `~/.local/share/nivora-launcher/game/instances/${name}`, kind: 'server', server_core: String(payload.core || 'paper'), server_core_version: String(payload.version || '1.21.1'), server_port: Number(payload.port || 25565), server_eula: Boolean(payload.eula_accepted) }
-    fallbackState.instances = [...fallbackState.instances, server]
-    return { server, instances: fallbackState.instances } as T
-  }
-  if (operation === 'server_save_config') {
-    const server = fallbackState.instances.find((item) => item.name === payload.name)
-    if (server) {
-      const values = (payload.values || {}) as Partial<ServerConfig>
-      Object.assign(server, { server_core: values.core || server.server_core, server_core_version: values.version || server.server_core_version, server_port: values.port || server.server_port, server_eula: values.eula_accepted ?? server.server_eula })
-      return { config: { ...fallbackServerConfig(server), ...values }, server } as T
-    }
-  }
+  if (operation === 'save_server_plugin_catalogs') return rejectBrowserPreviewOperation('Сохранение каталогов плагинов сервера')
+  if (operation === 'server_create') return rejectBrowserPreviewOperation('Создание сервера')
+  if (operation === 'server_save_config') return rejectBrowserPreviewOperation('Сохранение настроек сервера')
   if (operation.startsWith('server_network_')) throw new Error('Открытие сервера в интернет доступно только в desktop launcher')
   if (['server_start', 'server_stop', 'server_restart', 'server_command'].includes(operation)) throw new Error('Запуск и управление процессом сервера доступны только в desktop launcher; браузерный preview не запускает Java')
-  if (operation === 'server_status') return fallbackServerStatus(String(payload.name || ''), false) as T
-  if (operation === 'server_log') return { lines: [], running: false } as T
-  if (operation === 'server_details') {
-    const server = payload.name ? fallbackState.instances.find((item) => item.name === payload.name) : undefined
-    return { server, config: fallbackServerConfig(server), memory_total_kib: 16 * 1024 * 1024, memory_limit_kib: 12 * 1024 * 1024, status: fallbackServerStatus(String(payload.name || ''), false), files: [], plugin_files: [], logs: { lines: [], running: false }, snapshots: { mods: [], plugins: [] } } as T
-  }
-  if (operation === 'server_file_list') return { files: [] } as T
-  if (operation === 'server_file_read') return { content: '' } as T
-  if (operation === 'server_core_download') return { download: { core: String(payload.core || 'paper'), version: String(payload.version || '1.21.1'), build: 'latest', path: 'server.jar', url: '' }, server: fallbackState.instances.find((item) => item.name === payload.name) } as T
-  if (operation === 'server_snapshot_list' || operation === 'server_snapshot_create' || operation === 'server_snapshot_restore' || operation === 'server_snapshot_delete') return { snapshots: [] } as T
-  if (operation === 'server_plugin_search') return { results: [] } as T
-  if (operation === 'server_plugin_details') return { details: {}, catalog_id: String(payload.catalog_id || '') } as T
-  if (operation === 'server_plugin_updates') return { updates: [], files: [] } as T
-  if (operation === 'server_plugin_update') return { plugin: {}, files: [], catalog_id: String(payload.catalog_id || '') } as T
+  if (['server_status', 'server_log', 'server_details'].includes(operation)) return rejectBrowserPreviewOperation('Получение состояния сервера')
+  if (['server_file_list', 'server_file_read', 'server_file_write', 'server_file_mkdir', 'server_file_upload', 'server_file_delete'].includes(operation)) return rejectBrowserPreviewOperation('Операции с файлами сервера')
+  if (operation === 'server_core_download') return rejectBrowserPreviewOperation('Загрузка ядра сервера')
+  if (['server_snapshot_list', 'server_snapshot_create', 'server_snapshot_restore', 'server_snapshot_delete'].includes(operation)) return rejectBrowserPreviewOperation('Операции со снапшотами сервера')
+  if (['server_plugin_search', 'server_plugin_details', 'server_plugin_updates', 'server_plugin_update'].includes(operation)) return rejectBrowserPreviewOperation('Каталог и обновление плагинов сервера')
   if (operation === 'mods_details') {
     const catalogId = String(payload.catalog_id || '')
     const catalog = fallbackState.settings.resource_catalogs.find((item) => item.id === catalogId)
@@ -1148,40 +1023,22 @@ async function mockRequest<T>(operation: string, payload: Record<string, unknown
   if (operation === 'instance_shortcut_status') return { supported: false, platform: 'web', desktop: { exists: false, path: '' }, menu: { exists: false, path: '' } } as T
   if (operation === 'instance_shortcut_create' || operation === 'instance_shortcut_remove') throw new Error('Ярлыки доступны только в desktop launcher')
   if (operation === 'shortcut_take_launch_request') return { name: null } as T
-  if (operation === 'instance_mod_list_export') {
-    const name = String(payload.name || 'demo')
-    const format = String(payload.format || 'markdown')
-    const fileName = format === 'csv' ? 'mods.csv' : format === 'text' ? 'mods.txt' : 'mods.md'
-    const content = format === 'markdown'
-      ? `# Моды: ${name}\n\nЭкземпляр: \`${name}\` · модов: 2\n\n| Мод | Версия | ID | Загрузчик | Файл | Состояние |\n|---|---|---|---|---|---|\n| Sodium | 0.6.0 | sodium | fabric | \`sodium.jar\` | включен |\n| Iris | 1.8.0 | iris | fabric | \`iris.jar\` | выключен |\n`
-      : format === 'csv'
-        ? 'mod,version,mod_id,loader,file,enabled\nSodium,0.6.0,sodium,fabric,sodium.jar,true\n'
-        : `Моды: ${name}, всего 2\n- Sodium 0.6.0\n- Iris 1.8.0\n`
-    return { content, format, count: 2, file_name: fileName, path: `/home/player/.local/share/nivora-launcher/game/instances/${name}/exports/${fileName}`, dir: `/home/player/.local/share/nivora-launcher/game/instances/${name}/exports` } as T
-  }
-  if (operation === 'mods_check_updates') return { updates: [], project_type: String(payload.project_type || 'mod'), instance_name: String(payload.instance_name || ''), catalog_id: String(payload.catalog_id || '') } as T
-  if (operation === 'mods_update') return { project_id: String(payload.project_id || ''), name: '', version: '', version_id: '', file_name: '', dependencies: [], details: {}, instance_name: String(payload.instance_name || '') } as T
+  if (operation === 'shortcut_take_join_request') return { join: null } as T
+  if (operation === 'instance_mod_list_export') return rejectBrowserPreviewOperation('Экспорт списка модов')
+  if (operation === 'mods_check_updates') return rejectBrowserPreviewOperation('Проверка обновлений модов')
+  if (operation === 'mods_update') return rejectBrowserPreviewOperation('Обновление мода')
   if (operation === 'instance_compare') throw new Error('Сравнение экземпляров доступно только в desktop launcher: браузерный preview не читает каталоги сборок')
   if (operation === 'instance_port_changes') throw new Error('Перенос правок доступен только в desktop launcher')
   if (operation === 'instance_autotune') throw new Error('Автонастройка доступна только в desktop launcher')
   if (operation === 'plugin_dev_init' || operation === 'plugin_dev_lint' || operation === 'plugin_dev_pack' || operation === 'plugin_dev_verify' || operation === 'plugin_dev_keypair') {
     throw new Error('Инструменты автора плагинов доступны только в desktop launcher')
   }
-  if (operation === 'world_backup_list') return { backups: [], schedule: { enabled: false, interval_hours: 24, keep: 5, destination: 'local' } } as T
-  if (operation === 'world_backup_create') {
-    const name = String(payload.name || 'demo')
-    const backupId = `2026-10-22-manual`
-    return { backup: { backup_id: backupId, size_bytes: 240_000_000, files: 861, path: `/home/player/.local/share/nivora-launcher/game/backups/${name}/${backupId}.zip`, dir: `/home/player/.local/share/nivora-launcher/game/backups/${name}` }, schedule: { enabled: false, interval_hours: 24, keep: 5, destination: 'local' } } as T
-  }
-  if (operation === 'world_backup_restore') return { restored: ['world'], backups: [] } as T
-  if (operation === 'world_backup_delete') return { backups: [] } as T
-  if (operation === 'world_backup_schedule_get' || operation === 'world_backup_schedule_set') return { schedule: { enabled: false, interval_hours: 24, keep: 5, destination: 'local' } } as T
-  if (operation === 'instance_pins_get') return { pins: [] } as T
-  if (operation === 'instance_pin_toggle') return { pinned: true, pins: [{ kind: String(payload.kind || 'mod'), value: String(payload.value || '') }] } as T
+  if (['world_backup_list', 'world_backup_create', 'world_backup_restore', 'world_backup_delete', 'world_backup_schedule_get', 'world_backup_schedule_set'].includes(operation)) return rejectBrowserPreviewOperation('Операции с резервными копиями миров')
+  if (operation === 'instance_pins_get' || operation === 'instance_pin_toggle') return rejectBrowserPreviewOperation('Закрепление ресурсов')
   if (operation === 'mods_update_all_safe') throw new Error('Безопасное обновление доступно только в desktop launcher')
   if (operation === 'mods_update_rollback') throw new Error('Откат обновлений доступен только в desktop launcher')
-  if (operation === 'mods_update_sessions') return { sessions: [], instance_name: String(payload.instance_name || '') } as T
-  return {} as T
+  if (operation === 'mods_update_sessions') return rejectBrowserPreviewOperation('История обновлений модов')
+  throw new Error(`Операция ${operation} недоступна в браузерном предпросмотре`)
 }
 
 export const bridge = {
@@ -1276,6 +1133,7 @@ export const bridge = {
   instanceShortcutRemove: (name: string, location?: 'desktop' | 'menu') =>
     request<{ removed: string[] }>('instance_shortcut_remove', { name, location }),
   shortcutTakeLaunchRequest: () => request<{ name: string | null }>('shortcut_take_launch_request'),
+  shortcutTakeJoinRequest: () => request<{ join: PlicateJoinTarget | null }>('shortcut_take_join_request'),
   instanceModListExport: (name: string, format: 'markdown' | 'csv' | 'text' = 'markdown', includeDisabled = true, save = false) =>
     request<{ content: string; format: string; count: number; file_name: string; path?: string; dir?: string }>('instance_mod_list_export', { name, format, include_disabled: includeDisabled, save: save || undefined }),
   duplicateInstance: (source: string, target: string) =>

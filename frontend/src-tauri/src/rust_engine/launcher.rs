@@ -25,7 +25,7 @@ use super::optimization;
 use super::platform;
 use super::platform_support;
 use super::process_guard::InstanceProcessLock;
-use super::runtime::{java_version, safe_process_environment, JavaRuntimeManager};
+use super::runtime::{java_version, java_version_output, safe_process_environment, JavaRuntimeManager};
 use super::security::{self};
 use super::state::launcher_roots;
 
@@ -38,6 +38,9 @@ const WAYLAND_GLFW_URL: &str = "https://github.com/jdkeke142/glfw-wayland-minecr
 const WAYLAND_GLFW_SHA256: &str = "1fa075ea4f595bd6917a7f304f2fe5d583ec82d8f1ac0f0350bd38b32a20a46e";
 const WAYLAND_GLFW_SIZE: u64 = 662_440;
 const MAX_SESSION_LOG_LINES: usize = 500;
+const MAX_SESSION_STATES: usize = 32;
+const MAX_PROCESS_LOG_LINE_BYTES: usize = 4096;
+const MAX_PROCESS_LOG_LINE_CHARS: usize = 1024;
 const USER_COMMAND_TIMEOUT_SECONDS: u64 = 120;
 const USER_COMMAND_OUTPUT_LINES: usize = 40;
 
@@ -48,6 +51,22 @@ struct SessionState {
     logs: VecDeque<String>,
     running: bool,
     started_at: f64,
+}
+
+fn prune_finished_sessions(states: &mut HashMap<String, SessionState>) {
+    if states.len() <= MAX_SESSION_STATES {
+        return;
+    }
+    let mut finished: Vec<(f64, String)> = states
+        .iter()
+        .filter(|(_, state)| !state.running)
+        .map(|(name, state)| (state.started_at, name.clone()))
+        .collect();
+    finished.sort_by(|left, right| left.0.total_cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+    let remove_count = states.len().saturating_sub(MAX_SESSION_STATES);
+    for (_, name) in finished.into_iter().take(remove_count) {
+        states.remove(&name);
+    }
 }
 
 fn sessions() -> &'static Mutex<HashMap<String, SessionState>> {
@@ -65,6 +84,7 @@ pub(crate) fn session_start(instance_name: &str) {
             started_at: epoch_seconds(),
         },
     );
+    prune_finished_sessions(&mut guard);
 }
 
 pub(crate) fn session_append(instance_name: &str, line: &str) {
@@ -92,6 +112,24 @@ pub(crate) fn session_snapshot(instance_name: &str) -> (Vec<String>, bool) {
     match guard.get(instance_name) {
         Some(state) => (state.logs.iter().cloned().collect(), state.running),
         None => (Vec::new(), false),
+    }
+}
+
+fn record_launch_log_line(
+    log_path: &Path,
+    line: &str,
+    sink: &Arc<Mutex<dyn FnMut(&str) + Send>>,
+) {
+    let mut characters = line.chars();
+    let mut bounded: String = characters.by_ref().take(MAX_PROCESS_LOG_LINE_CHARS).collect();
+    if characters.next().is_some() {
+        bounded.push_str(" … [строка лога сокращена]");
+    }
+    if let Ok(mut file) = OpenOptions::new().write(true).create(true).append(true).open(log_path) {
+        let _ = writeln!(file, "{bounded}");
+    }
+    if let Ok(mut guard) = sink.lock() {
+        guard(&bounded);
     }
 }
 
@@ -498,20 +536,6 @@ fn java_probe(java_path: &Path) -> (Option<i64>, Option<i32>) {
     (major, bitness)
 }
 
-fn java_version_output(java_path: &Path) -> Option<String> {
-    let mut command = platform::command(java_path);
-    command
-        .arg("-version")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let output = command.output().ok()?;
-    let mut text = String::from_utf8_lossy(&output.stderr).to_string();
-    text.push('\n');
-    text.push_str(&String::from_utf8_lossy(&output.stdout));
-    Some(text)
-}
-
 fn apply_memory_setting(arguments: &[String], memory: &str) -> Result<Vec<String>, String> {
     let mut result: Vec<String> = arguments.iter().filter(|value| !value.starts_with("-Xmx")).cloned().collect();
     if !memory.trim().is_empty() {
@@ -737,6 +761,24 @@ fn run_user_launch_command(
     emit: &mut dyn FnMut(&str),
     required: bool,
 ) -> Result<(), String> {
+    run_user_launch_command_with_timeout(
+        launch_settings,
+        key,
+        instance_dir,
+        emit,
+        required,
+        Duration::from_secs(USER_COMMAND_TIMEOUT_SECONDS),
+    )
+}
+
+fn run_user_launch_command_with_timeout(
+    launch_settings: &Value,
+    key: &str,
+    instance_dir: &Path,
+    emit: &mut dyn FnMut(&str),
+    required: bool,
+    timeout: Duration,
+) -> Result<(), String> {
     let command = launch_settings.get(key).and_then(Value::as_str).unwrap_or("").trim().to_owned();
     if command.is_empty() {
         return Ok(());
@@ -779,35 +821,45 @@ fn run_user_launch_command(
     for (name, value) in &merged {
         process.env(name, value);
     }
-    let spawned = process
-        .spawn()
-        .and_then(|mut child| {
-            let deadline = Instant::now() + Duration::from_secs(USER_COMMAND_TIMEOUT_SECONDS);
-            loop {
-                match child.try_wait() {
-                    Ok(Some(status)) => return Ok((status, child)),
-                    Ok(None) if Instant::now() >= deadline => {
-                        let _ = platform_support::terminate_process_tree(child.id() as i32, true);
-                        return Err(std::io::Error::other("истёк таймаут 120 с"));
-                    }
-                    Ok(None) => std::thread::sleep(Duration::from_millis(100)),
-                    Err(error) => return Err(error),
+    platform_support::prepare_process_group(&mut process);
+    let spawned = (|| -> std::io::Result<(std::process::ExitStatus, Vec<String>)> {
+        let mut child = process.spawn()?;
+        let pid = child.id() as i32;
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let mut readers = Vec::new();
+        if let Some(stdout) = child.stdout.take() {
+            readers.push(spawn_process_output_reader(stdout, output.clone()));
+        }
+        if let Some(stderr) = child.stderr.take() {
+            readers.push(spawn_process_output_reader(stderr, output.clone()));
+        }
+
+        let deadline = Instant::now() + timeout;
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break status,
+                Ok(None) if Instant::now() >= deadline => {
+                    let _ = platform_support::terminate_process_tree(pid, true);
+                    let _ = child.wait();
+                    let _ = join_process_readers(readers, pid, "команды пользователя");
+                    return Err(std::io::Error::other(format!(
+                        "истёк таймаут {} с",
+                        timeout.as_secs()
+                    )));
+                }
+                Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+                Err(error) => {
+                    let _ = platform_support::terminate_process_tree(pid, true);
+                    let _ = child.wait();
+                    let _ = join_process_readers(readers, pid, "команды пользователя");
+                    return Err(error);
                 }
             }
-        })
-        .and_then(|(status, mut child)| {
-            let mut output = String::new();
-            if let Some(mut stream) = child.stdout.take() {
-                let _ = std::io::Read::read_to_string(&mut stream, &mut output);
-            }
-            if let Some(mut stream) = child.stderr.take() {
-                let mut stderr = String::new();
-                let _ = std::io::Read::read_to_string(&mut stream, &mut stderr);
-                output.push('\n');
-                output.push_str(&stderr);
-            }
-            Ok((status, output))
-        });
+        };
+        join_process_readers(readers, pid, "команды пользователя").map_err(std::io::Error::other)?;
+        let lines = output.lock().unwrap_or_else(|poison| poison.into_inner()).clone();
+        Ok((status, lines))
+    })();
     let (status, output) = match spawned {
         Ok(value) => value,
         Err(error) => {
@@ -820,7 +872,7 @@ fn run_user_launch_command(
         }
     };
     let label = if required { "до запуска" } else { "после запуска" };
-    for line in output.lines().take(USER_COMMAND_OUTPUT_LINES) {
+    for line in output {
         emit(&format!("[{key}] {line}"));
     }
     let code = status.code().unwrap_or(-1);
@@ -833,6 +885,50 @@ fn run_user_launch_command(
         return Ok(());
     }
     emit(&format!("Команда {label} выполнена: {}", tokens[0]));
+    Ok(())
+}
+
+fn spawn_process_output_reader<R: std::io::Read + Send + 'static>(
+    stream: R,
+    output: Arc<Mutex<Vec<String>>>,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        let _ = read_process_lines(BufReader::new(stream), |line| {
+            let mut output = output.lock().unwrap_or_else(|poison| poison.into_inner());
+            if output.len() < USER_COMMAND_OUTPUT_LINES {
+                output.push(line);
+            }
+            false
+        });
+    })
+}
+
+fn join_process_readers(
+    readers: Vec<std::thread::JoinHandle<()>>,
+    pid: i32,
+    description: &str,
+) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_millis(300);
+    while readers.iter().any(|reader| !reader.is_finished()) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    if readers.iter().any(|reader| !reader.is_finished()) {
+        platform_support::terminate_descendants_after_exit(pid);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while readers.iter().any(|reader| !reader.is_finished()) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+    if readers.iter().any(|reader| !reader.is_finished()) {
+        return Err(format!(
+            "Не удалось закрыть потоки вывода {description} после завершения процесса"
+        ));
+    }
+    for reader in readers {
+        reader
+            .join()
+            .map_err(|_| format!("Поток чтения вывода {description} аварийно завершился"))?;
+    }
     Ok(())
 }
 
@@ -1016,26 +1112,72 @@ impl Recorder {
 }
 
 fn read_process_lines<R: BufRead>(mut reader: R, mut on_line: impl FnMut(String) -> bool) -> std::io::Result<()> {
-    let mut bytes = Vec::new();
+    let mut bytes = Vec::with_capacity(MAX_PROCESS_LOG_LINE_BYTES);
+    let mut truncated = false;
     loop {
-        bytes.clear();
-        if reader.read_until(b'\n', &mut bytes)? == 0 {
+        let (consumed, ended, eof) = {
+            let available = reader.fill_buf()?;
+            if available.is_empty() {
+                (0, false, true)
+            } else {
+                let newline = available.iter().position(|byte| *byte == b'\n');
+                let consumed = newline.map_or(available.len(), |index| index + 1);
+                let content_len = consumed - if newline.is_some() { 1 } else { 0 };
+                let retained = content_len.min(MAX_PROCESS_LOG_LINE_BYTES.saturating_sub(bytes.len()));
+                bytes.extend_from_slice(&available[..retained]);
+                truncated |= retained < content_len;
+                (consumed, newline.is_some(), false)
+            }
+        };
+
+        if eof {
+            if bytes.last() == Some(&b'\r') {
+                bytes.pop();
+            }
+            if !bytes.is_empty() || truncated {
+                if emit_process_line(&mut bytes, truncated, &mut on_line) {
+                    break;
+                }
+            }
             break;
         }
-        if bytes.last() == Some(&b'\n') {
-            bytes.pop();
-        }
-        if bytes.last() == Some(&b'\r') {
-            bytes.pop();
-        }
-        if on_line(String::from_utf8_lossy(&bytes).into_owned()) {
-            break;
+        reader.consume(consumed);
+        if ended {
+            if bytes.last() == Some(&b'\r') {
+                bytes.pop();
+            }
+            if emit_process_line(&mut bytes, truncated, &mut on_line) {
+                break;
+            }
+            bytes.clear();
+            truncated = false;
         }
     }
     Ok(())
 }
 
+fn emit_process_line(
+    bytes: &mut Vec<u8>,
+    truncated: bool,
+    on_line: &mut impl FnMut(String) -> bool,
+) -> bool {
+    let decoded = String::from_utf8_lossy(bytes);
+    let mut chars = decoded.chars();
+    let mut line: String = chars.by_ref().take(MAX_PROCESS_LOG_LINE_CHARS).collect();
+    if truncated || chars.next().is_some() {
+        line.push_str(" … [строка лога сокращена]");
+    }
+    on_line(line)
+}
+
 fn run_process(run: RunProcess<'_>) -> Result<i32, String> {
+    run_process_with_termination_grace(run, Duration::from_secs(8))
+}
+
+fn run_process_with_termination_grace(
+    run: RunProcess<'_>,
+    termination_grace: Duration,
+) -> Result<i32, String> {
     // обёртка (gamemoderun/mangohud/…) оборачивает итоговую команду снаружи
     // без песочницы не работают D-Bus gamemoded и LD_PRELOAD
     let mut active_command = run.process_command.clone();
@@ -1068,12 +1210,20 @@ fn run_process(run: RunProcess<'_>) -> Result<i32, String> {
         .spawn()
         .map_err(|error| format!("Не удалось запустить Java: {error}"))?;
     let pid = child.id() as i32;
+    if let Some(instance_name) = run.instance_dir.file_name() {
+        events::emit_instance_status_event(
+            "session-started",
+            "",
+            &instance_name.to_string_lossy(),
+        );
+    }
     if let Some(slot) = run.pid_slot {
         if let Ok(mut guard) = slot.lock() {
             *guard = Some(pid);
         }
     }
-    write_live_state(run.instance_dir, true, pid, None, epoch_seconds(), run.log_id, run.launch_id);
+    let started_at = epoch_seconds();
+    write_live_state(run.instance_dir, true, pid, None, started_at, run.log_id, run.launch_id);
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     let stop_flag = Arc::new(AtomicBool::new(false));
@@ -1085,13 +1235,13 @@ fn run_process(run: RunProcess<'_>) -> Result<i32, String> {
         stop_requested: false,
     };
     let recorder_lock = Arc::new(Mutex::new((recorder, Some(log_file))));
-    let mut handles = Vec::new();
+    let mut reader_handles = Vec::new();
     for stream in [stdout.map(|stream| Box::new(stream) as Box<dyn std::io::Read + Send>), stderr.map(|stream| Box::new(stream) as Box<dyn std::io::Read + Send>)] {
         let Some(stream) = stream else { continue };
         let recorder_lock = recorder_lock.clone();
         let sink = run.sink.clone();
         let stop_flag = stop_flag.clone();
-        handles.push(std::thread::spawn(move || {
+        reader_handles.push(std::thread::spawn(move || {
             let _ = read_process_lines(BufReader::new(stream), |line| {
                 let stop = {
                     let mut guard = recorder_lock.lock().unwrap_or_else(|poison| poison.into_inner());
@@ -1106,16 +1256,18 @@ fn run_process(run: RunProcess<'_>) -> Result<i32, String> {
             });
         }));
     }
+    let mut monitor_handle = None;
     // проверяем отмену каждые 100 мс
     if let Some(cancellation) = run.cancellation.clone() {
         let stop_flag = stop_flag.clone();
         let monitor_finished = monitor_finished.clone();
         let monitor_slot = run.pid_slot.cloned();
-        handles.push(std::thread::spawn(move || loop {
+        monitor_handle = Some(std::thread::spawn(move || loop {
             if stop_flag.load(Ordering::SeqCst) || monitor_finished.load(Ordering::SeqCst) {
                 break;
             }
             if cancellation.cancelled() {
+                stop_flag.store(true, Ordering::SeqCst);
                 if let Some(slot) = &monitor_slot {
                     if let Ok(guard) = slot.lock() {
                         if let Some(pid) = *guard {
@@ -1140,9 +1292,12 @@ fn run_process(run: RunProcess<'_>) -> Result<i32, String> {
         }
     }
     monitor_finished.store(true, Ordering::SeqCst);
+    if let Some(handle) = monitor_handle {
+        let _ = handle.join();
+    }
     if stop_flag.load(Ordering::SeqCst) {
         platform_support::terminate_process_tree(pid, false);
-        let deadline = Instant::now() + Duration::from_secs(8);
+        let deadline = Instant::now() + termination_grace;
         let mut exited = false;
         while Instant::now() < deadline {
             match child.try_wait() {
@@ -1161,10 +1316,24 @@ fn run_process(run: RunProcess<'_>) -> Result<i32, String> {
             platform_support::terminate_process_tree(pid, true);
         }
     }
-    for handle in handles {
-        let _ = handle.join();
-    }
     let status = child.wait().map_err(|error| format!("Не удалось дождаться завершения Java: {error}"))?;
+    let reader_result = join_process_readers(reader_handles, pid, "Java");
+    let code = exit_code(&status);
+    if let Some(slot) = run.pid_slot {
+        if let Ok(mut guard) = slot.lock() {
+            *guard = None;
+        }
+    }
+    write_live_state(
+        run.instance_dir,
+        false,
+        pid,
+        Some(code as i64),
+        started_at,
+        run.log_id,
+        run.launch_id,
+    );
+    reader_result?;
     if let Some(error) = wait_error {
         return Err(format!("Не удалось проверить состояние Java: {error}"));
     }
@@ -1174,12 +1343,6 @@ fn run_process(run: RunProcess<'_>) -> Result<i32, String> {
         *run.captured = std::mem::take(&mut recorder.captured);
         *run.wrong_nvidia_renderer = recorder.wrong_nvidia_renderer;
     }
-    if let Some(slot) = run.pid_slot {
-        if let Ok(mut guard) = slot.lock() {
-            *guard = None;
-        }
-    }
-    let code = exit_code(&status);
     if let Some(cancellation) = run.cancellation.as_ref() {
         cancellation.check()?;
     }
@@ -1571,7 +1734,7 @@ fn launch_session(
     );
     let launch_id = random_hex(16);
     session_start(&session_name);
-    events::emit_instance_status_event("session-started", "", &session_name);
+    events::emit_instance_status_event("launch-preparing", "", &session_name);
     let lines_log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let sink_lines = lines_log.clone();
     let session_for_logs = session_name.clone();
@@ -1648,13 +1811,14 @@ fn launch_session(
             &snapshot_lines(&lines_log),
         );
         let lines = snapshot_lines(&lines_log);
-        crash = Some(crash_reports::analyze_crash(
+        crash = Some(crash_reports::analyze_crash_with_started_at(
             &lines,
             Some(exit_code as i64),
             info.as_ref().map(|info| info.path.as_path()),
             launch_settings.get("memory").and_then(Value::as_str).unwrap_or(""),
             info.as_ref().map(|info| info.minecraft_version.as_str()).unwrap_or(""),
             info.as_ref().map(|info| info.loader.as_str()).unwrap_or(""),
+            Some(session_started_at(&session_name)),
         ));
         // отчёт о ремонте включается в результат запуска, если функция включена в настройках
         repair = info.as_ref().and_then(|info| {
@@ -1691,6 +1855,40 @@ fn launch_session(
 mod tests {
     use super::*;
 
+    fn run_process_for_test(
+        directory: &Path,
+        process_command: Vec<String>,
+        cancellation: Option<Arc<CancellationToken>>,
+        pid_slot: Option<&Arc<Mutex<Option<i32>>>>,
+        termination_grace: Duration,
+    ) -> Result<i32, String> {
+        let log_path = directory.join("game.log");
+        let sink: Arc<Mutex<dyn FnMut(&str) + Send>> = Arc::new(Mutex::new(|_: &str| {}));
+        let mut captured = Vec::new();
+        let mut wrong_nvidia_renderer = false;
+        run_process_with_termination_grace(
+            RunProcess {
+                log_path: &log_path,
+                instance_dir: directory,
+                log_id: "process-test",
+                launch_id: "process-test-launch",
+                captured: &mut captured,
+                sink: &sink,
+                wrapper_tokens: &[],
+                process_command,
+                process_cwd: directory.to_path_buf(),
+                process_environment: BTreeMap::new(),
+                argument_fd: None,
+                cancellation,
+                pid_slot,
+                append_log: false,
+                wrong_nvidia_renderer: &mut wrong_nvidia_renderer,
+                nvidia_mode: false,
+            },
+            termination_grace,
+        )
+    }
+
     #[test]
     fn process_output_keeps_reading_after_invalid_utf8() {
         let mut lines = Vec::new();
@@ -1700,6 +1898,21 @@ mod tests {
         })
         .unwrap();
         assert_eq!(lines, vec!["bad: �", "valid line", "last: �"]);
+    }
+
+    #[test]
+    fn process_output_bounds_long_lines_and_continues() {
+        let input = format!("{}\nnext line\n", "x".repeat(MAX_PROCESS_LOG_LINE_BYTES * 3));
+        let mut lines = Vec::new();
+        read_process_lines(std::io::Cursor::new(input.into_bytes()), |line| {
+            lines.push(line);
+            false
+        })
+        .unwrap();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains("строка лога сокращена"));
+        assert!(lines[0].len() < MAX_PROCESS_LOG_LINE_CHARS + 64);
+        assert_eq!(lines[1], "next line");
     }
 
     #[test]
@@ -1772,6 +1985,133 @@ mod tests {
                 "the cancellation monitor must finish for every child exit status"
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_completion_does_not_wait_for_descendant_holding_output_pipe() {
+        let directory = std::env::temp_dir().join(format!(
+            "launcher-descendant-test-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        let started = Instant::now();
+        let result = run_process_for_test(
+            &directory,
+            vec![
+                "/bin/sh".to_owned(),
+                "-c".to_owned(),
+                "sleep 30 & exit 0".to_owned(),
+            ],
+            None,
+            None,
+            Duration::from_millis(100),
+        );
+        assert_eq!(result.unwrap(), 0);
+        assert!(started.elapsed() < Duration::from_secs(3));
+        let _ = fs::remove_dir_all(&directory);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cancellation_escalates_when_java_ignores_term() {
+        let operation_id = format!("launcher-ignore-term-{}", std::process::id());
+        let cancellation = Arc::new(CancellationToken::new(&operation_id));
+        let directory = std::env::temp_dir().join(&operation_id);
+        fs::create_dir_all(&directory).unwrap();
+        let pid_slot = Arc::new(Mutex::new(None::<i32>));
+        let thread_cancellation = cancellation.clone();
+        let thread_pid_slot = pid_slot.clone();
+        let thread_directory = directory.clone();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = run_process_for_test(
+                &thread_directory,
+                vec![
+                    "/bin/sh".to_owned(),
+                    "-c".to_owned(),
+                    "trap '' TERM; while :; do sleep 1; done".to_owned(),
+                ],
+                Some(thread_cancellation),
+                Some(&thread_pid_slot),
+                Duration::from_millis(150),
+            );
+            let _ = done_tx.send(result);
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let pid = loop {
+            if let Some(pid) = *pid_slot.lock().unwrap() {
+                break pid;
+            }
+            assert!(Instant::now() < deadline, "Java process did not start");
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert!(super::super::operations::request_cancel(&operation_id));
+        let result = done_rx
+            .recv_timeout(Duration::from_secs(4))
+            .expect("run_process did not escalate cancellation");
+        assert!(matches!(result, Err(error) if error.contains("Операция остановлена пользователем")));
+        assert!(!platform_support::process_exists(pid));
+        cancellation.cleanup();
+        let _ = fs::remove_dir_all(&directory);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn launch_hook_drains_large_output_without_retaining_it_all() {
+        let directory = std::env::temp_dir().join(format!(
+            "launcher-hook-output-test-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        let settings = json!({"pre_launch_command": "/bin/sh -c 'yes x | head -c 1048576'"});
+        let mut emitted = Vec::new();
+        run_user_launch_command_with_timeout(
+            &settings,
+            "pre_launch_command",
+            &directory,
+            &mut |line| emitted.push(line.to_owned()),
+            true,
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        assert_eq!(
+            emitted.iter().filter(|line| line.starts_with("[pre_launch_command]")).count(),
+            USER_COMMAND_OUTPUT_LINES
+        );
+        let _ = fs::remove_dir_all(&directory);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn launch_hook_timeout_terminates_and_reaps_child() {
+        let directory = std::env::temp_dir().join(format!(
+            "launcher-hook-timeout-test-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        let pid_file = directory.join("pid");
+        let script = format!("echo $$ > {}; exec sleep 30", pid_file.display());
+        let settings = json!({"pre_launch_command": format!("/bin/sh -c '{script}'")});
+        let started = Instant::now();
+        let result = run_user_launch_command_with_timeout(
+            &settings,
+            "pre_launch_command",
+            &directory,
+            &mut |_| {},
+            true,
+            Duration::from_millis(500),
+        );
+        assert!(result.is_err());
+        assert!(started.elapsed() < Duration::from_secs(3));
+        let pid = fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse::<i32>()
+            .unwrap();
+        assert!(!platform_support::process_exists(pid));
+        let _ = fs::remove_dir_all(&directory);
     }
 
     #[test]
@@ -1971,6 +2311,79 @@ mod tests {
         session_finish(&name);
         let (_, running) = session_snapshot(&name);
         assert!(!running);
+        sessions().lock().unwrap().remove(&name);
+    }
+
+    #[test]
+    fn finished_session_cache_is_pruned_but_active_sessions_are_kept() {
+        let mut states = HashMap::new();
+        states.insert(
+            "active".to_owned(),
+            SessionState {
+                logs: VecDeque::new(),
+                running: true,
+                started_at: 0.0,
+            },
+        );
+        for index in 0..(MAX_SESSION_STATES + 4) {
+            states.insert(
+                format!("finished-{index:03}"),
+                SessionState {
+                    logs: VecDeque::new(),
+                    running: false,
+                    started_at: index as f64,
+                },
+            );
+        }
+        prune_finished_sessions(&mut states);
+        assert_eq!(states.len(), MAX_SESSION_STATES);
+        assert!(
+            states
+                .get("active")
+                .is_some_and(|state| state.running)
+        );
+        assert!(!states.contains_key("finished-000"));
+        assert!(states.contains_key(&format!("finished-{:03}", MAX_SESSION_STATES + 3)));
+    }
+
+    #[test]
+    fn preflight_errors_are_written_to_launch_log_and_published() {
+        let directory = std::env::temp_dir().join(format!("launch-log-test-{}", random_hex(4)));
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("launch.log");
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let captured = output.clone();
+        let sink: Arc<Mutex<dyn FnMut(&str) + Send>> = Arc::new(Mutex::new(move |line: &str| {
+            captured.lock().unwrap().push(line.to_owned());
+        }));
+        record_launch_log_line(&path, "Не удалось подготовить команду Java: Java не найдена", &sink);
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "Не удалось подготовить команду Java: Java не найдена\n"
+        );
+        assert_eq!(
+            output.lock().unwrap().as_slice(),
+            ["Не удалось подготовить команду Java: Java не найдена"]
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn launch_log_events_are_bounded_for_disk_and_ui() {
+        let directory = std::env::temp_dir().join(format!("launch-log-bound-test-{}", random_hex(4)));
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("launch.log");
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let captured = output.clone();
+        let sink: Arc<Mutex<dyn FnMut(&str) + Send>> = Arc::new(Mutex::new(move |line: &str| {
+            captured.lock().unwrap().push(line.to_owned());
+        }));
+        record_launch_log_line(&path, &"x".repeat(MAX_PROCESS_LOG_LINE_CHARS * 3), &sink);
+        let saved = fs::read_to_string(&path).unwrap();
+        assert_eq!(saved.trim_end(), output.lock().unwrap()[0]);
+        assert!(saved.len() < MAX_PROCESS_LOG_LINE_CHARS + 64);
+        assert!(saved.contains("строка лога сокращена"));
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

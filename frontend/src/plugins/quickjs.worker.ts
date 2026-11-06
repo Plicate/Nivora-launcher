@@ -704,6 +704,57 @@ function facadeSource(manifestJson: string, names: { start: string; dispatch: st
           const registrationId = 'theme-' + (++nextRegistrationId);
           return subscribe('theme.register', 'theme.unregister', { registration_id: registrationId, definition }, { registration_id: registrationId });
         },
+        style: Object.freeze({
+          set(scope, patch) { return request('theme.style.set', { scope, patch }); },
+          reset(scope) { return request('theme.style.reset', { scope }); },
+        }),
+        slots: Object.freeze({
+          set(slot, node) { return request('theme.slots.set', { slot, view: expand(cloneJson(node, MAX_VIEW_CHARS)) }); },
+          reset(slot) { return request('theme.slots.reset', { slot }); },
+        }),
+        particles: Object.freeze({
+          spawn(spec) { return request('theme.particles.spawn', { spec }); },
+          burst(spec) { return request('theme.particles.burst', { spec }); },
+          stop(id) { return request('theme.particles.stop', { id }); },
+          stopAll() { return request('theme.particles.stopAll', {}); },
+          active() { return request('theme.particles.active', {}).then((value) => value.ids || []); },
+        }),
+        sounds: Object.freeze({
+          register(name, audio) { return request('theme.sounds.register', { name, audio }); },
+          play(name, options) { return request('theme.sounds.play', { name, options: options || {} }); },
+          list() { return request('theme.sounds.list', {}).then((value) => value.names || []); },
+          unregister(name) { return request('theme.sounds.unregister', { name }); },
+        }),
+        cursor: Object.freeze({
+          set(spec) { return request('theme.cursor.set', { spec }); },
+          reset() { return request('theme.cursor.reset', {}); },
+        }),
+        wallpaper: Object.freeze({
+          set(spec) { return request('theme.wallpaper.set', { spec }); },
+          reset() { return request('theme.wallpaper.reset', {}); },
+        }),
+        effects: Object.freeze({
+          set(spec) { return request('theme.effects.set', { spec }); },
+          reset() { return request('theme.effects.reset', {}); },
+        }),
+        hud: Object.freeze({
+          add(node, options) { return request('theme.hud.add', { view: expand(cloneJson(node, MAX_VIEW_CHARS)), options: options || {} }); },
+          remove(id) { return request('theme.hud.remove', { id }); },
+          list() { return request('theme.hud.list', {}).then((value) => value.widgets || []); },
+        }),
+        transitions: Object.freeze({
+          set(preset) { return request('theme.transitions.set', { preset }); },
+          reset() { return request('theme.transitions.reset', {}); },
+        }),
+        fonts: Object.freeze({
+          register(name, font) { return request('theme.fonts.register', { name, font }); },
+          unregister(name) { return request('theme.fonts.unregister', { name }); },
+          list() { return request('theme.fonts.list', {}).then((value) => value.fonts || []); },
+        }),
+        tokens: Object.freeze({
+          set(overrides) { return request('theme.tokens.set', { overrides }); },
+          reset() { return request('theme.tokens.reset', {}); },
+        }),
       }),
       actions: Object.freeze({
         register(definition, handler) { return registerHandler(actionHandlers, 'actions.register', 'actions.unregister', definition, handler); },

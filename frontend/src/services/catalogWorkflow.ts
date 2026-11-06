@@ -44,7 +44,7 @@ type CatalogWorkflowDependencies = {
   activity: ActivityState
   showToast: (message: string, tone?: PluginUiTone, action?: { label: string; run: () => void } | null) => void
   openActivity: (title: string, detail: string, visible?: boolean) => void
-  finishActivity: (detail: string, logs?: string[]) => void
+  finishActivity: (detail: string, logs?: string[], status?: 'success' | 'error' | 'cancelled') => void
   errorMessage: (error: unknown) => string
   isCancelled: (error: unknown) => boolean
   confirmDestructive: (message: string) => Promise<boolean>
@@ -275,7 +275,7 @@ export function createCatalogWorkflow(deps: CatalogWorkflowDependencies) {
       modError.value = errorMessage(error)
       modSearchPerformed.value = true
       activity.logs.push(errorMessage(error))
-      finishActivity(isCancelled(error) ? 'Поиск остановлен.' : 'Каталог недоступен.')
+      finishActivity(isCancelled(error) ? 'Поиск остановлен.' : 'Каталог недоступен.', undefined, isCancelled(error) ? 'cancelled' : 'error')
       if (!isCancelled(error)) showToast(errorMessage(error))
     } finally {
       if (requestId === modSearchRequestId) modBusy.value = false
@@ -361,7 +361,7 @@ export function createCatalogWorkflow(deps: CatalogWorkflowDependencies) {
       succeeded = true
     } catch (error) {
       activity.logs.push(errorMessage(error))
-      finishActivity(isCancelled(error) ? 'Установка остановлена.' : 'Установка ресурса остановлена.')
+      finishActivity(isCancelled(error) ? 'Установка остановлена.' : 'Установка ресурса остановлена.', undefined, isCancelled(error) ? 'cancelled' : 'error')
       if (!isCancelled(error)) showToast(errorMessage(error))
     } finally {
       modBusy.value = false
@@ -418,7 +418,7 @@ export function createCatalogWorkflow(deps: CatalogWorkflowDependencies) {
       showToast(projectType === 'plugin' ? 'Плагин удалён из сервера' : 'Ресурс удалён из экземпляра')
     } catch (error) {
       activity.logs.push(errorMessage(error))
-      finishActivity(isCancelled(error) ? 'Удаление остановлено.' : 'Удаление ресурса остановлено.')
+      finishActivity(isCancelled(error) ? 'Удаление остановлено.' : 'Удаление ресурса остановлено.', undefined, isCancelled(error) ? 'cancelled' : 'error')
       if (!isCancelled(error)) showToast(errorMessage(error))
     } finally {
       modBusy.value = false

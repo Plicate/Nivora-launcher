@@ -3,7 +3,7 @@ use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Stdio};
 use std::sync::{Arc, Condvar, LazyLock, Mutex, MutexGuard, OnceLock};
@@ -31,6 +31,7 @@ const MAX_METRICS_JSON_BYTES: u64 = 512 * 1024;
 const MAX_LIVE_STATE_JSON_BYTES: u64 = 64 * 1024;
 const MAX_LOG_LINES: usize = 500;
 const MAX_LOG_LINE_CHARS: usize = 2048;
+const MAX_LOG_LINE_BYTES: usize = MAX_LOG_LINE_CHARS * 4;
 const UNKNOWN_RAM_SERVER_LIMIT_KIB: i64 = 2 * 1024 * 1024;
 const SERVER_SECURITY_KEYS: [&str; 3] = ["java_path", "security_profile", "security_permissions"];
 const SERVER_CORE_IDS: [&str; 10] = [
@@ -620,20 +621,43 @@ fn terminate_tree(key: &str, launch_id: &str, force: bool) {
 }
 
 fn read_output_stream(key: String, launch_id: String, stream: ChildStdout) {
-    for line in BufReader::new(stream).lines() {
-        match line {
-            Ok(text) => append_log(&key, &launch_id, &text),
-            Err(_) => break,
-        }
-    }
+    let _ = read_bounded_lines(BufReader::new(stream), |text| append_log(&key, &launch_id, &text));
 }
 
 fn drain_output_stream(key: String, launch_id: String, stream: ChildStderr) {
-    for line in BufReader::new(stream).lines() {
-        match line {
-            Ok(text) => append_log(&key, &launch_id, &text),
-            Err(_) => break,
+    let _ = read_bounded_lines(BufReader::new(stream), |text| append_log(&key, &launch_id, &text));
+}
+
+fn read_bounded_lines(reader: impl BufRead, mut on_line: impl FnMut(String)) -> io::Result<()> {
+    let mut reader = reader;
+    let mut line = VecDeque::with_capacity(MAX_LOG_LINE_BYTES);
+    let mut has_line_data = false;
+    loop {
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            if has_line_data {
+                on_line(String::from_utf8_lossy(line.make_contiguous()).into_owned());
+            }
+            return Ok(());
         }
+        let consumed = available
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(available.len(), |index| index + 1);
+        for byte in available[..consumed].iter().copied() {
+            if byte == b'\n' {
+                on_line(String::from_utf8_lossy(line.make_contiguous()).into_owned());
+                line.clear();
+                has_line_data = false;
+            } else {
+                has_line_data = true;
+                if line.len() == MAX_LOG_LINE_BYTES {
+                    line.pop_front();
+                }
+                line.push_back(byte);
+            }
+        }
+        reader.consume(consumed);
     }
 }
 
@@ -1103,52 +1127,36 @@ struct LocalTime {
     minute: i64,
 }
 
-#[cfg(unix)]
 fn local_time() -> Option<LocalTime> {
-    unsafe {
-        let now = libc::time(std::ptr::null_mut());
-        let mut tm: libc::tm = std::mem::zeroed();
-        if libc::localtime_r(&now, &mut tm).is_null() {
-            return None;
-        }
-        Some(LocalTime {
-            year: tm.tm_year as i64 + 1900,
-            month: tm.tm_mon as i64 + 1,
-            day: tm.tm_mday as i64,
-            hour: tm.tm_hour as i64,
-            minute: tm.tm_min as i64,
-        })
-    }
+    use chrono::{Datelike, Local, Timelike};
+
+    let now = Local::now();
+    Some(LocalTime {
+        year: now.year() as i64,
+        month: now.month() as i64,
+        day: now.day() as i64,
+        hour: now.hour() as i64,
+        minute: now.minute() as i64,
+    })
 }
 
-#[cfg(not(unix))]
-fn local_time() -> Option<LocalTime> {
-    None
-}
-
-#[cfg(unix)]
 fn today_epoch_at(hour: i64, minute: i64) -> Option<f64> {
-    unsafe {
-        let now = libc::time(std::ptr::null_mut());
-        let mut tm: libc::tm = std::mem::zeroed();
-        if libc::localtime_r(&now, &mut tm).is_null() {
-            return None;
-        }
-        tm.tm_hour = hour as libc::c_int;
-        tm.tm_min = minute as libc::c_int;
-        tm.tm_sec = 0;
-        tm.tm_isdst = -1;
-        let stamp = libc::mktime(&mut tm);
-        if stamp == -1 {
-            None
-        } else {
-            Some(stamp as f64)
+    use chrono::{Duration as ChronoDuration, Local, LocalResult, NaiveTime, TimeZone};
+
+    let hour = u32::try_from(hour).ok()?;
+    let minute = u32::try_from(minute).ok()?;
+    let time = NaiveTime::from_hms_opt(hour, minute, 0)?;
+    let start = Local::now().date_naive().and_time(time);
+    for offset in 0..=180 {
+        let candidate = start + ChronoDuration::minutes(offset);
+        match Local.from_local_datetime(&candidate) {
+            LocalResult::Single(value) => return Some(value.timestamp() as f64),
+            LocalResult::Ambiguous(first, second) => {
+                return Some(first.timestamp().min(second.timestamp()) as f64)
+            }
+            LocalResult::None => {}
         }
     }
-}
-
-#[cfg(not(unix))]
-fn today_epoch_at(_hour: i64, _minute: i64) -> Option<f64> {
     None
 }
 
@@ -2780,6 +2788,28 @@ mod tests {
     }
 
     #[test]
+    fn output_reader_replaces_invalid_utf8_and_continues_to_later_lines() {
+        let mut input = b"before\ninvalid: ".to_vec();
+        input.push(0xff);
+        input.extend_from_slice(b" bytes\nafter\n");
+        let mut lines = Vec::new();
+        read_bounded_lines(std::io::Cursor::new(input), |line| lines.push(line)).unwrap();
+        assert_eq!(lines, vec!["before", "invalid: \u{fffd} bytes", "after"]);
+    }
+
+    #[test]
+    fn output_reader_bounds_long_lines_and_keeps_their_suffix() {
+        let mut input = vec![b'x'; MAX_LOG_LINE_BYTES + 10_000];
+        input.extend_from_slice(b"END\nnext\n");
+        let mut lines = Vec::new();
+        read_bounded_lines(std::io::Cursor::new(input), |line| lines.push(line)).unwrap();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].as_bytes().len() <= MAX_LOG_LINE_BYTES);
+        assert!(lines[0].ends_with("END"));
+        assert_eq!(lines[1], "next");
+    }
+
+    #[test]
     fn core_versions_sort_and_filter_like_python() {
         let versions = unique_core_versions(&[
             "1.20.4".to_owned(),
@@ -2907,6 +2937,15 @@ mod tests {
         assert_eq!(parse_schedule_time("04:00"), Some((4, 0)));
         assert_eq!(parse_schedule_time("4:0"), None);
         assert_eq!(parse_schedule_time("abc"), None);
+    }
+
+    #[test]
+    fn local_restart_schedule_is_supported_on_each_platform() {
+        let now = local_time().expect("local clock should be available");
+        assert!((1..=12).contains(&now.month));
+        assert!((1..=31).contains(&now.day));
+        assert!(today_epoch_at(now.hour, now.minute).is_some());
+        assert!(today_epoch_at(25, 99).is_none());
     }
 
     #[test]

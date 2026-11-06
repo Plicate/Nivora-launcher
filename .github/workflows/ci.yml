@@ -20,9 +20,16 @@ jobs:
       - name: Install Tauri Linux dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential curl file \
+          sudo apt-get install -y build-essential curl file zlib1g-dev \
             libayatana-appindicator3-dev libssl-dev \
             libwebkit2gtk-4.1-dev librsvg2-dev libxdo-dev
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go-modcat/go.mod
+      - name: Build Tauri helper resources
+        run: |
+          bash scripts/build_modcat.sh
+          bash scripts/build_turbo.sh
       - name: Run Tauri Rust tests
         working-directory: frontend/src-tauri
         run: cargo test --locked
@@ -65,16 +72,25 @@ jobs:
           build-warnings: allow
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.23"
+          go-version-file: go-modcat/go.mod
       # nivora-turbo.exe требует mingw-g++ с posix-потоками; используем UCRT64 из Git Bash
       - uses: msys2/setup-msys2@v2
         with:
           msystem: UCRT64
           update: false
-          install: git
+          install: git mingw-w64-ucrt-x86_64-gcc
       - name: Expose MSYS2 UCRT64 g++ to Git Bash
         shell: bash
         run: echo "C:\msys64\ucrt64\bin" >> "$GITHUB_PATH"
+      - name: Build Windows helper resources
+        shell: bash
+        env:
+          GOOS: windows
+          GOARCH: amd64
+          TURBO_TARGET: windows
+        run: |
+          bash scripts/build_modcat.sh frontend/src-tauri/resources/backend/nivora-modcat.exe
+          bash scripts/build_turbo.sh frontend/src-tauri/resources/backend/nivora-turbo.exe
       - name: Run Tauri Rust tests
         working-directory: frontend/src-tauri
         run: cargo test --locked
@@ -152,7 +168,15 @@ jobs:
           build-warnings: allow
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.23"
+          go-version-file: go-modcat/go.mod
+      - name: Build macOS helper resources
+        env:
+          GOOS: darwin
+          GOARCH: ${{ matrix.arch == 'arm64' && 'arm64' || 'amd64' }}
+        run: |
+          CXXFLAGS_EXTRA="-arch ${{ matrix.arch }} -mmacosx-version-min=10.15" \
+            bash scripts/build_turbo.sh frontend/src-tauri/resources/backend/nivora-turbo
+          bash scripts/build_modcat.sh frontend/src-tauri/resources/backend/nivora-modcat
       - name: Run Tauri Rust tests
         working-directory: frontend/src-tauri
         run: cargo test --locked
@@ -203,11 +227,11 @@ jobs:
           build-warnings: allow
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.23"
+          go-version-file: go-modcat/go.mod
       - name: Install Tauri and RPM build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential curl file libayatana-appindicator3-dev libssl-dev libwebkit2gtk-4.1-dev librsvg2-dev libxdo-dev patchelf rpm xvfb
+          sudo apt-get install -y build-essential curl file zlib1g-dev libayatana-appindicator3-dev libssl-dev libwebkit2gtk-4.1-dev librsvg2-dev libxdo-dev patchelf rpm xvfb
       - name: Build deb and rpm (helpers included)
         run: bash scripts/build_all.sh deb rpm
         timeout-minutes: 60

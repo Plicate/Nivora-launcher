@@ -1,6 +1,6 @@
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
-use std::fs::{self, File};
+use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -188,15 +188,12 @@ fn walk_v2_package(
 pub(super) fn read_regular_package_file(path: &Path, size_limit: usize) -> Result<Vec<u8>, String> {
     #[cfg(unix)]
     {
-        use std::os::unix::ffi::OsStrExt;
-        use std::os::unix::io::FromRawFd;
-        let c_path = std::ffi::CString::new(path.as_os_str().as_bytes())
+        use std::os::unix::fs::OpenOptionsExt;
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(path)
             .map_err(|_| "Could not securely read plugin package file".to_owned())?;
-        let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
-        if fd < 0 {
-            return Err("Could not securely read plugin package file".to_owned());
-        }
-        let file = unsafe { File::from_raw_fd(fd) };
         // проверяем тип и размер файла до чтения
         let metadata = file
             .metadata()

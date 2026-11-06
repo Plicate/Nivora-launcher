@@ -10,7 +10,7 @@ use tauri::{Emitter, Manager};
 
 const LOCK_FILE: &str = "nivora-instance.lock";
 const SHOW_FILE: &str = "nivora-show-request";
-/// запрос запуска от второй копии; содержит имя экземпляра и время изменения
+/// запрос запуска от второй копии; содержит имя экземпляра или ссылку nivora://join
 const LAUNCH_FILE: &str = "nivora-launch-request";
 /// интервал heartbeat меньше STALE_AFTER, чтобы задержки файловой системы не снимали живую блокировку
 const HEARTBEAT: Duration = Duration::from_millis(400);
@@ -62,7 +62,8 @@ pub fn acquire(app: tauri::AppHandle, launch_request: Option<&str>) -> Result<()
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                 let heartbeat_age = now_micros().saturating_sub(read_heartbeat(&lock)) / 1_000_000;
                 if heartbeat_age < STALE_AFTER {
-                    // ярлык второй копии передаёт имя экземпляра живому лаунчеру
+                    // ярлык второй копии передаёт имя экземпляра живому лаунчеру,
+                    // а ссылка с сайта — цель подключения nivora://join
                     if let Some(name) = launch_request {
                         let _ = fs::write(&launch, name);
                     }
@@ -111,7 +112,7 @@ fn spawn_watcher(app: tauri::AppHandle, lock: PathBuf, show: PathBuf, launch: Pa
         if let Ok(mut file) = OpenOptions::new().write(true).truncate(true).open(&lock) {
             let _ = write!(file, "{}", now_micros());
         }
-        // запрос запуска экземпляра от второй копии (ярлык)
+        // запрос запуска от второй копии: имя экземпляра из ярлыка или ссылка nivora://join с сайта
         if launch.exists() {
             let requested_at = fs::metadata(&launch)
                 .and_then(|meta| meta.modified())
@@ -122,11 +123,18 @@ fn spawn_watcher(app: tauri::AppHandle, lock: PathBuf, show: PathBuf, launch: Pa
             let name = fs::read_to_string(&launch).unwrap_or_default();
             let _ = fs::remove_file(&launch);
             let fresh = now_micros().saturating_sub(requested_at) <= SHOW_REQUEST_TTL;
-            // проверяем имя, чтобы содержимое каталога кеша не стало командой запуска
-            if fresh && super::shortcuts::set_pending_launch(name.trim()) {
-                let pending = name.trim().to_owned();
-                bring_to_front(&app);
-                let _ = app.emit("nivora-launch-request", serde_json::json!({ "name": pending }));
+            if fresh {
+                let payload = name.trim();
+                if let Some(join) = super::shortcuts::parse_join_url(payload) {
+                    // проверяем содержимое, чтобы файлы каталога кеша не стали командой запуска
+                    super::shortcuts::set_pending_join(join.clone());
+                    bring_to_front(&app);
+                    let _ = app.emit("nivora-join-request", serde_json::json!({ "join": join }));
+                } else if super::shortcuts::set_pending_launch(payload) {
+                    let pending = payload.to_owned();
+                    bring_to_front(&app);
+                    let _ = app.emit("nivora-launch-request", serde_json::json!({ "name": pending }));
+                }
             }
         }
         // запрос показа окна от второй копии

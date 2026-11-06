@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import { plicateServicesEnabled } from '../services/plicateServices'
 import Icon from './Icon.vue'
 import BrandLogo from './BrandLogo.vue'
 import CustomSelect from './CustomSelect.vue'
+import PluginSlotHost from './PluginSlotHost.vue'
 import type { InstanceInfo, SelectOption, SidebarPosition, SidebarWidthMode, ViewName } from '../types'
 import { LAUNCHER_VERSION_LABEL } from '../version'
 
@@ -41,6 +43,12 @@ const libraryItems: Array<{ view: ViewName; label: string; icon: string }> = [
   { view: 'mods', label: 'Каталог', icon: 'mods' },
   { view: 'modpacks', label: 'Модпаки', icon: 'archive' },
 ]
+
+const ecosystemItems: Array<{ view: ViewName; label: string; icon: string }> = [
+  { view: 'rates', label: 'Рейтинг серверов', icon: 'globe' },
+  { view: 'store', label: 'Маркет Plicate', icon: 'archive' },
+]
+const visibleEcosystemItems = computed(() => (plicateServicesEnabled.value ? ecosystemItems : []))
 
 const toolItems: Array<{ view: ViewName; label: string; icon: string }> = [
   { view: 'plugins', label: 'Плагины', icon: 'plug' },
@@ -84,6 +92,20 @@ const groupFilters = computed(() => [
       <span class="nav-section-label">Библиотека</span>
       <button
         v-for="item in libraryItems"
+        :key="item.view"
+        class="nav-item"
+        :class="{ 'nav-item--active': current === item.view }"
+        :data-tour="item.view"
+        type="button"
+        v-tooltip="buttonLabel(item.view, item.label)"
+        @click="emit('navigate', item.view)"
+      >
+        <Icon class="nav-item-icon" :name="item.icon" :size="17" />
+        <span>{{ buttonLabel(item.view, item.label) }}</span>
+      </button>
+      <span v-if="plicateServicesEnabled" class="nav-section-label nav-section-label--tools">Plicate</span>
+      <button
+        v-for="item in visibleEcosystemItems"
         :key="item.view"
         class="nav-item"
         :class="{ 'nav-item--active': current === item.view }"
@@ -160,6 +182,7 @@ const groupFilters = computed(() => [
     </div>
 
     <div class="sidebar-spacer" />
+    <PluginSlotHost slot-name="sidebar.footer" />
     <div class="sidebar-account">
       <span class="sidebar-account-caption">Запуск от имени</span>
       <div class="sidebar-account-control">

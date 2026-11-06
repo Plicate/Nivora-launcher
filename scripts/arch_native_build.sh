@@ -61,7 +61,8 @@ else
   read -r -a rustflags_raw <<< "${RUSTFLAGS:-}"
 fi
 skip_next=0
-for flag in "${rustflags_raw[@]:-}"; do
+for flag in ${rustflags_raw[@]+"${rustflags_raw[@]}"}; do
+  [ -z "$flag" ] && continue
   [ "$skip_next" = 1 ] && { skip_next=0; continue; }
   case "$flag" in
     -C|--codegen) skip_next=1 ;;

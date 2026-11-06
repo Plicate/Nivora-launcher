@@ -5,6 +5,7 @@ import type {
   PluginUiNode,
   PluginUiView,
 } from '../../../plugins/api'
+import { pluginThemeEffects as clearPluginThemeEffectsRef } from './pluginThemeEffects.ts'
 import type { RuntimePluginManifest } from '../plugins/runtimeManifest'
 
 const MAX_TIMEOUT_MS = 5000
@@ -792,6 +793,7 @@ export class PluginRuntimeService {
   private terminateRuntime(record: RuntimeRecord, error: Error, rejectWithError: boolean) {
     if (record.terminated) return
     record.terminated = true
+    try { clearPluginThemeEffectsRef.clearPlugin(record.pluginId) } catch { /* эффекты плагина могло уже не быть */ }
     for (const timer of record.polls.values()) clearInterval(timer)
     record.polls.clear()
     if (this.runtimes.get(record.pluginId) === record) this.runtimes.delete(record.pluginId)

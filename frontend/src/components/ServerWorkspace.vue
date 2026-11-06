@@ -113,6 +113,7 @@ const coreDownloadBusy = ref(false)
 const statusBusy = ref(false)
 const logBusy = ref(false)
 const actionBusy = ref(false)
+let logRequestId = 0
 const activeAction = ref<'start' | 'stop' | 'restart' | ''>('')
 const launchError = ref('')
 const securityProfileOptions = [
@@ -226,6 +227,8 @@ function syncDetails(value: ServerDetails) {
   settingsSaveMessage.value = 'Изменения сохранены'
   void nextTick(() => { syncingSettings.value = false })
   void refreshCoreVersions(value.config.core, false)
+  logRequestId += 1
+  logBusy.value = false
   logs.value = value.logs.lines || []
   logCursor.value = value.logs.cursor || 0
   metricHistory.value = value.status.metrics ? [value.status.metrics] : []
@@ -405,53 +408,62 @@ async function refreshStatus() {
   }
 }
 
-async function refreshLogs() {
-  if (!instance.value || logBusy.value) return
+async function refreshLogs(finalFetch = false, expectedName = instance.value?.name) {
+  if (!expectedName || instance.value?.name !== expectedName || logBusy.value && !finalFetch) return
+  if (finalFetch && logBusy.value) {
+    logRequestId += 1
+    logBusy.value = false
+  }
+  const requestId = ++logRequestId
+  const cursor = logCursor.value
   logBusy.value = true
   try {
-    const value = await bridge.serverLog(instance.value.name, logCursor.value)
-    logs.value = value.reset || !logCursor.value ? (value.lines || []).slice(-1000) : [...logs.value, ...(value.lines || [])].slice(-1000)
+    const value = await bridge.serverLog(expectedName, cursor)
+    if (requestId !== logRequestId || instance.value?.name !== expectedName) return
+    logs.value = value.reset || !cursor ? (value.lines || []).slice(-1000) : [...logs.value, ...(value.lines || [])].slice(-1000)
     logCursor.value = value.cursor ?? logCursor.value
     if (details.value) details.value.status.running = value.running
   } catch {
     // запасной вариант остаётся через опрос статуса
   } finally {
-    logBusy.value = false
+    if (requestId === logRequestId) logBusy.value = false
   }
 }
 
 async function start() {
   if (!instance.value || actionBusy.value || running.value) return
+  const name = instance.value.name
   actionBusy.value = true
   activeAction.value = 'start'
   launchError.value = ''
   try {
     if (!details.value?.config.eula_accepted) throw new Error('Сначала примите EULA в настройках сервера')
-    const status = await bridge.startServer(instance.value.name)
+    const status = await bridge.startServer(name)
     if (details.value) details.value.status = status
     recordMetric(status.metrics)
     launchError.value = status.running ? '' : status.start_error || 'Процесс уже завершился. Причина и код завершения доступны в консоли.'
-    await refreshLogs()
+    if (status.running) await refreshLogs()
     emit('toast', status.running ? 'Сервер запускается — следите за консолью' : launchError.value)
     emit('changed')
   } catch (error) {
     launchError.value = errorMessage(error)
-    await refreshLogs()
     emit('toast', launchError.value)
   } finally {
     actionBusy.value = false
     activeAction.value = ''
+    if (instance.value?.name === name && !running.value) await refreshLogs(true, name)
   }
 }
 
 async function stop() {
   if (!instance.value || actionBusy.value || !running.value) return
+  const name = instance.value.name
   actionBusy.value = true
   activeAction.value = 'stop'
   try {
     if (props.confirmDestructive !== false && !(await confirmDialog('Остановить сервер?', { danger: true, confirmLabel: 'Остановить' }))) return
     if (details.value) {
-      details.value.status = await bridge.stopServer(instance.value.name)
+      details.value.status = await bridge.stopServer(name)
       recordMetric(details.value.status.metrics)
     }
     emit('changed')
@@ -460,21 +472,23 @@ async function stop() {
   } finally {
     actionBusy.value = false
     activeAction.value = ''
+    if (instance.value?.name === name && !running.value) await refreshLogs(true, name)
   }
 }
 
 async function restart() {
   if (!instance.value || actionBusy.value || !running.value) return
+  const name = instance.value.name
   actionBusy.value = true
   activeAction.value = 'restart'
   launchError.value = ''
   try {
     if (props.confirmDestructive !== false && !(await confirmDialog('Перезапустить сервер? Игроки будут отключены; лаунчер сначала отправит stop и дождётся завершения. Созданный через лаунчер UPnP-проброс будет закрыт — откройте его снова после запуска.', { danger: true, confirmLabel: 'Перезапустить' }))) return
-    const status = await bridge.restartServer(instance.value.name)
+    const status = await bridge.restartServer(name)
     if (details.value) details.value.status = status
     metricHistory.value = []
     recordMetric(status.metrics)
-    await refreshLogs()
+    if (status.running) await refreshLogs()
     emit('toast', status.running ? 'Сервер перезапускается — следите за консолью' : 'Процесс завершился; проверьте консоль')
     emit('changed')
   } catch (error) {
@@ -484,6 +498,7 @@ async function restart() {
   } finally {
     actionBusy.value = false
     activeAction.value = ''
+    if (instance.value?.name === name && !running.value) await refreshLogs(true, name)
   }
 }
 
@@ -845,6 +860,8 @@ watch(() => instance.value?.name, () => {
   pluginResults.value = []
   pluginUpdates.value = []
   closePluginDetails()
+  logRequestId += 1
+  logBusy.value = false
   logCursor.value = 0
   metricHistory.value = []
   launchError.value = ''
@@ -864,6 +881,10 @@ watch(tab, (value) => {
   if (value !== 'overview' && value !== 'console') return
   void refreshStatus()
   void refreshLogs()
+})
+
+watch(running, (value, previous) => {
+  if (previous && !value && !actionBusy.value) void refreshLogs(true)
 })
 
 async function loadProfileGroups() {
@@ -909,6 +930,7 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  logRequestId += 1
   if (refreshTimer) window.clearInterval(refreshTimer)
   if (logTimer) window.clearInterval(logTimer)
   if (profileIconPreview.value.startsWith('blob:')) URL.revokeObjectURL(profileIconPreview.value)

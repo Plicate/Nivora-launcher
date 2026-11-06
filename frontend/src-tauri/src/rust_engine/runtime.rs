@@ -5,7 +5,8 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::process::{Child, Stdio};
+use std::thread::{self, JoinHandle};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -20,6 +21,8 @@ pub(crate) struct JavaRuntimeManager {
     configured_java: String,
     http: Arc<HttpClient>,
 }
+
+const MAX_JAVA_VERSION_OUTPUT_BYTES: usize = 64 * 1024;
 
 impl JavaRuntimeManager {
     pub(crate) fn new(config: &ConfigStore, http: Option<Arc<HttpClient>>) -> Result<Self, String> {
@@ -48,8 +51,14 @@ impl JavaRuntimeManager {
         if !configured.is_empty() {
             let path = validate_java_path(Path::new(&configured), true)?;
             let actual = java_version(&path);
+            if required_major.is_some() && actual.is_none() {
+                return Err(format!(
+                    "Не удалось проверить настроенную Java ({}): команда java -version не завершилась успешно или не вернула версию",
+                    path.display()
+                ));
+            }
             if let (Some(required), Some(actual)) = (required_major, actual) {
-                if actual > 0 && actual < required {
+                if actual < required {
                     return Err(format!(
                         "Настроенная Java {actual} слишком старая для этой версии; требуется Java {required}"
                     ));
@@ -85,9 +94,18 @@ impl JavaRuntimeManager {
             }
         }
         if let Some(path) = system_path {
-            if let (Some(required), Some(actual)) = (required_major, system_major) {
-                if actual > 0 && actual < required {
-                    return Err(format!("Java {actual} слишком старая; требуется Java {required}"));
+            if let Some(required) = required_major {
+                match system_major {
+                    Some(actual) if actual < required => {
+                        return Err(format!("Java {actual} слишком старая; требуется Java {required}"));
+                    }
+                    None => {
+                        return Err(format!(
+                            "Не удалось проверить системную Java ({}): команда java -version не завершилась успешно или не вернула версию; требуется Java {required}",
+                            path.display()
+                        ));
+                    }
+                    _ => {}
                 }
             }
             return Ok(path);
@@ -625,8 +643,7 @@ pub(crate) fn java_version(java_path: &Path) -> Option<i64> {
             executable = console_java;
         }
     }
-    let (stdout, stderr) = run_version_command(&executable)?;
-    let output = format!("{stderr}{stdout}");
+    let output = java_version_output(&executable)?;
     static VERSION: OnceLock<Regex> = OnceLock::new();
     let regex = VERSION.get_or_init(|| Regex::new(r#"version\s+"([^"]+)"#).unwrap());
     let captures = regex.captures(&output)?;
@@ -637,39 +654,90 @@ pub(crate) fn java_version(java_path: &Path) -> Option<i64> {
     value.split('.').next()?.parse::<i64>().ok()
 }
 
-/// запускает `java -version` с таймаутом 10 секунд
+/// проверяет версию JVM с таймаутом и ограниченным захватом вывода
+pub(crate) fn java_version_output(executable: &Path) -> Option<String> {
+    let (stdout, stderr) = run_version_command(executable)?;
+    Some(format!("{stderr}\n{stdout}"))
+}
+
 fn run_version_command(executable: &Path) -> Option<(String, String)> {
-    let mut child = super::platform::command(executable)
+    let mut command = super::platform::command(executable);
+    command
         .arg("-version")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .ok()?;
+        .stderr(Stdio::piped());
+    super::platform_support::prepare_process_group(&mut command);
+    let mut child = command.spawn().ok()?;
+    let pid = child.id() as i32;
+    let stdout_reader = child.stdout.take().map(spawn_version_output_reader)?;
+    let stderr_reader = child.stderr.take().map(spawn_version_output_reader)?;
     let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
+    let status = loop {
         match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) => {
-                if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return None;
-                }
-                std::thread::sleep(Duration::from_millis(20));
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() >= deadline => {
+                terminate_version_probe(&mut child, pid, stdout_reader, stderr_reader);
+                return None;
             }
-            Err(_) => return None,
+            Ok(None) => thread::sleep(Duration::from_millis(20)),
+            Err(_) => {
+                terminate_version_probe(&mut child, pid, stdout_reader, stderr_reader);
+                return None;
+            }
+        }
+    };
+    let (stdout, stderr) = finish_version_output_readers(pid, stdout_reader, stderr_reader)?;
+    status.success().then_some((stdout, stderr))
+}
+
+fn spawn_version_output_reader<R: Read + Send + 'static>(mut reader: R) -> JoinHandle<String> {
+    thread::spawn(move || {
+        let mut output = Vec::with_capacity(MAX_JAVA_VERSION_OUTPUT_BYTES);
+        let mut buffer = [0u8; 8192];
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(count) => {
+                    let remaining = MAX_JAVA_VERSION_OUTPUT_BYTES.saturating_sub(output.len());
+                    output.extend_from_slice(&buffer[..count.min(remaining)]);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            }
+        }
+        String::from_utf8_lossy(&output).into_owned()
+    })
+}
+
+fn finish_version_output_readers(
+    pid: i32,
+    stdout: JoinHandle<String>,
+    stderr: JoinHandle<String>,
+) -> Option<(String, String)> {
+    let readers = [stdout, stderr];
+    let deadline = Instant::now() + Duration::from_millis(300);
+    while readers.iter().any(|reader| !reader.is_finished()) && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    if readers.iter().any(|reader| !reader.is_finished()) {
+        super::platform_support::terminate_descendants_after_exit(pid);
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while readers.iter().any(|reader| !reader.is_finished()) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
         }
     }
-    let mut stdout = String::new();
-    let mut stderr = String::new();
-    if let Some(mut pipe) = child.stdout.take() {
-        let _ = pipe.read_to_string(&mut stdout);
+    if readers.iter().any(|reader| !reader.is_finished()) {
+        return None;
     }
-    if let Some(mut pipe) = child.stderr.take() {
-        let _ = pipe.read_to_string(&mut stderr);
-    }
-    Some((stdout, stderr))
+    let mut readers = readers.into_iter();
+    Some((readers.next()?.join().ok()?, readers.next()?.join().ok()?))
+}
+
+fn terminate_version_probe(child: &mut Child, pid: i32, stdout: JoinHandle<String>, stderr: JoinHandle<String>) {
+    super::platform_support::terminate_process_tree(pid, true);
+    let _ = child.wait();
+    let _ = finish_version_output_readers(pid, stdout, stderr);
 }
 
 pub(crate) fn validate_java_path(value: &Path, allow_directory: bool) -> Result<PathBuf, String> {
@@ -832,6 +900,34 @@ mod tests {
     #[test]
     fn java_version_of_missing_binary_is_none() {
         assert!(java_version(Path::new("/nonexistent-java-binary")).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn java_version_rejects_nonzero_probe_even_when_output_has_a_version() {
+        let root = temp_root("version-nonzero");
+        let java = make_java(&root);
+        fs::write(&java, "#!/bin/sh\nprintf '%s\\n' 'openjdk version \"17.0.1\"' >&2\nexit 1\n").unwrap();
+
+        assert!(java_version(&java).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn java_version_probe_bounds_output_and_keeps_draining_pipes() {
+        let root = temp_root("version-output");
+        let java = make_java(&root);
+        fs::write(
+            &java,
+            "#!/bin/sh\nprintf '%s\\n' 'openjdk version \"21.0.1\"' >&2\ni=0\nwhile [ $i -lt 10000 ]; do printf '0123456789abcdef\\n'; i=$((i+1)); done\n",
+        )
+        .unwrap();
+
+        let (stdout, stderr) = run_version_command(&java).unwrap();
+
+        assert!(stdout.len() <= MAX_JAVA_VERSION_OUTPUT_BYTES);
+        assert!(stderr.len() <= MAX_JAVA_VERSION_OUTPUT_BYTES);
+        assert_eq!(java_version(&java), Some(21));
     }
 
     #[test]

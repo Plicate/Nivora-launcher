@@ -9,12 +9,14 @@ use std::time::{Duration, Instant};
 
 use super::config::ConfigStore;
 use super::events::emit_status_event;
-use super::net::{client_from_settings, HttpClient};
+use super::net::{client_from_settings, plugin_request_client_from_settings, HttpClient};
 use super::plugins::PluginStore;
 
 const PLUGIN_MAX_ARCHIVE_BYTES: usize = 64 * 1024 * 1024;
 const INSTANCE_LIVE_STATE_FILE: &str = ".nivora-launcher-live.json";
 const MAX_INSTANCE_LIVE_STATE_JSON_BYTES: u64 = 64 * 1024;
+const MAX_PLUGIN_SQL_RESULT_BYTES: usize = 1024 * 1024;
+const MAX_PLUGIN_SQL_VALUE_BYTES: usize = MAX_PLUGIN_SQL_RESULT_BYTES;
 
 fn plugin_store() -> Result<PluginStore, String> {
     let config = ConfigStore::load()?;
@@ -477,17 +479,23 @@ fn request_body_bytes(body: Option<&Value>, method: &str, allowed_methods: &[&st
     Ok(Some(bytes))
 }
 
-fn http_client() -> Result<std::sync::Arc<HttpClient>, String> {
+fn http_client(operation_id: &str) -> Result<std::sync::Arc<HttpClient>, String> {
     // клиент не сохраняется: запросы плагинов краткосрочные
     let settings = ConfigStore::load()?.settings().clone();
-    client_from_settings(&settings, "plugin-network")
+    client_from_settings(&settings, operation_id)
+}
+
+fn http_client_with_timeout(operation_id: &str, timeout: Duration) -> Result<std::sync::Arc<HttpClient>, String> {
+    let settings = ConfigStore::load()?.settings().clone();
+    plugin_request_client_from_settings(&settings, operation_id, timeout)
 }
 
 pub fn plugin_network_fetch(request: &Value) -> Result<Value, String> {
     let store = plugin_store()?;
     let plugin_id = plugin_id_of(request);
     let manifest = require_permission_any(&store, &plugin_id, &["network:fetch", "network:https"])?;
-    let http = http_client()?;
+    let operation_id = request.get("operation_id").and_then(Value::as_str).unwrap_or_default();
+    let http = http_client(operation_id)?;
     if !http.proxy().is_empty() {
         return Err("Сетевые запросы плагинов через прокси запрещены: адрес узла невозможно проверить на стороне соединения".to_owned());
     }
@@ -524,24 +532,8 @@ pub fn plugin_network_fetch(request: &Value) -> Result<Value, String> {
     if body.is_some() && !headers.iter().any(|(name, _)| name.eq_ignore_ascii_case("content-type")) {
         headers.push(("Content-Type".to_owned(), "application/json".to_owned()));
     }
-    let validate_redirect = |target: &str| -> Result<(), String> {
-        let redirected = url::Url::parse(target).map_err(|_| "Сервис плагина вернул некорректный redirect".to_owned())?;
-        let redirected_host = redirected.host_str().unwrap_or_default().to_lowercase().trim_end_matches('.').to_owned();
-        let redirected_port = redirected.port();
-        if redirected.scheme().to_lowercase() != "https"
-            || redirected_host.is_empty()
-            || !redirected.username().is_empty()
-            || redirected.password().is_some()
-            || redirected_port.is_some()
-        {
-            return Err("Redirect плагина должен оставаться HTTPS без credentials и нестандартного порта".to_owned());
-        }
-        if !allowlist.contains(&redirected_host) {
-            return Err("Redirect плагина вышел за пределы allowlist".to_owned());
-        }
-        resolve_public_plugin_host(&manifest, &redirected_host, Some(443))?;
-        Ok(())
-    };
+    let initial_url = parsed.clone();
+    let validate_redirect = |target: &str| validate_plugin_http_redirect(&manifest, &initial_url, target);
     let raw = http.request_detailed(
         &url,
         &method,
@@ -571,6 +563,37 @@ fn require_plugin_direct_network(proxy: &str) -> Result<(), String> {
     } else {
         Err("HTTP-запросы плагинов через прокси запрещены: адрес узла невозможно проверить на стороне соединения".to_owned())
     }
+}
+
+fn validate_plugin_http_redirect(
+    manifest: &Value,
+    initial: &url::Url,
+    target: &str,
+) -> Result<(), String> {
+    let redirected = url::Url::parse(target).map_err(|_| "Некорректный адрес redirect плагина".to_owned())?;
+    let host = redirected
+        .host_str()
+        .unwrap_or_default()
+        .to_lowercase()
+        .trim_end_matches('.')
+        .to_owned();
+    if redirected.scheme() != "https"
+        || host.is_empty()
+        || !redirected.username().is_empty()
+        || redirected.password().is_some()
+    {
+        return Err("Redirect плагина должен оставаться HTTPS без credentials".to_owned());
+    }
+    let host_value = json!(host);
+    plugin_network_host(manifest, Some(&host_value))?;
+    let initial_host = initial.host_str().unwrap_or_default().to_lowercase();
+    if host != initial_host.trim_end_matches('.')
+        || redirected.port_or_known_default() != initial.port_or_known_default()
+    {
+        return Err("Redirect плагина должен оставаться в пределах исходного origin".to_owned());
+    }
+    resolve_public_plugin_host(manifest, &host, redirected.port_or_known_default())?;
+    Ok(())
 }
 
 pub fn plugin_http_request(request: &Value) -> Result<Value, String> {
@@ -603,6 +626,7 @@ pub fn plugin_http_request(request: &Value) -> Result<Value, String> {
         return Err("HTTP-метод плагина не поддерживается".to_owned());
     }
     let timeout_ms = plugin_timeout_ms(request_options.get("timeout_ms"))?;
+    let operation_id = request.get("operation_id").and_then(Value::as_str).unwrap_or_default();
     let mut headers = validated_headers(request_options.get("headers"), Vec::new())?;
     let body: Option<Vec<u8>> = match request_options.get("body") {
         None => None,
@@ -622,16 +646,11 @@ pub fn plugin_http_request(request: &Value) -> Result<Value, String> {
             return Err("Тело HTTP-запроса плагина слишком большое".to_owned());
         }
     }
-    let http = http_client()?;
+    let http = http_client_with_timeout(operation_id, Duration::from_millis(timeout_ms as u64))?;
     let proxy = http.proxy();
     require_plugin_direct_network(&proxy)?;
-    let validate_redirect = |target: &str| -> Result<(), String> {
-        let redirected = url::Url::parse(target).map_err(|_| "Некорректный адрес плагина".to_owned())?;
-        let redirected_host = redirected.host_str().unwrap_or_default().to_lowercase().trim_end_matches('.').to_owned();
-        let redirected_port = redirected.port().unwrap_or(if redirected.scheme().to_lowercase() == "https" { 443 } else { 80 });
-        resolve_public_plugin_host(&manifest, &redirected_host, Some(redirected_port))?;
-        Ok(())
-    };
+    let initial_url = parsed.clone();
+    let validate_redirect = |target: &str| validate_plugin_http_redirect(&manifest, &initial_url, target);
     let raw = http.request_detailed(
         &url,
         &method,
@@ -1305,6 +1324,15 @@ pub fn plugin_database_execute(request: &Value) -> Result<Value, String> {
 fn query_plugin_database(connection: &Connection, request: &Value, read_only: bool) -> Result<Value, String> {
     use rusqlite::types::Value as SqlValue;
     let sql = safe_plugin_sql(request.get("sql").and_then(Value::as_str).unwrap_or_default(), read_only)?;
+    if read_only {
+        unsafe {
+            rusqlite::ffi::sqlite3_limit(
+                connection.handle(),
+                rusqlite::ffi::SQLITE_LIMIT_LENGTH,
+                MAX_PLUGIN_SQL_VALUE_BYTES as i32,
+            );
+        }
+    }
     let parameters = request.get("parameters").cloned().unwrap_or_else(|| json!([]));
     let Some(items) = parameters.as_array() else {
         return Err("Параметры SQL должны быть списком".to_owned());
@@ -1334,17 +1362,28 @@ fn query_plugin_database(connection: &Connection, request: &Value, read_only: bo
                 .query(rusqlite::params_from_iter(params.iter()))
                 .map_err(|_| "SQL-запрос плагина не выполнен".to_owned())?;
             let mut result_rows: Vec<Value> = Vec::new();
+            let mut result_bytes = 11usize;
             while let Some(row) = rows.next().map_err(|_| "SQL-запрос плагина не выполнен".to_owned())? {
                 if result_rows.len() >= 500 {
                     break;
                 }
                 let mut object = Map::new();
+                let mut row_bytes = 2usize.saturating_add(usize::from(!result_rows.is_empty()));
                 for (index, column) in columns.iter().enumerate() {
                     let value: SqlValue = row
                         .get(index)
                         .map_err(|_| "SQL-запрос плагина не выполнен".to_owned())?;
+                    row_bytes = row_bytes
+                        .saturating_add(usize::from(index > 0))
+                        .saturating_add(json_string_encoded_len(column))
+                        .saturating_add(1)
+                        .saturating_add(sqlite_value_json_encoded_len(&value));
+                    if result_bytes.saturating_add(row_bytes) > MAX_PLUGIN_SQL_RESULT_BYTES {
+                        return Err("Результат SQL-запроса плагина слишком большой".to_owned());
+                    }
                     object.insert((*column).to_owned(), sqlite_value_to_json(value));
                 }
+                result_bytes = result_bytes.saturating_add(row_bytes);
                 result_rows.push(Value::Object(object));
             }
             return Ok(json!({ "rows": result_rows }));
@@ -1356,6 +1395,34 @@ fn query_plugin_database(connection: &Connection, request: &Value, read_only: bo
     })();
     connection.progress_handler(1000, None::<fn() -> bool>);
     result
+}
+
+fn json_string_encoded_len(value: &str) -> usize {
+    value.chars().fold(2usize, |size, character| {
+        size.saturating_add(match character {
+            '"' | '\\' | '\u{0008}' | '\u{0009}' | '\u{000a}' | '\u{000c}' | '\u{000d}' => 2,
+            '\u{0000}'..='\u{001f}' => 6,
+            _ => character.len_utf8(),
+        })
+    })
+}
+
+fn sqlite_value_json_encoded_len(value: &rusqlite::types::Value) -> usize {
+    use rusqlite::types::Value as SqlValue;
+    match value {
+        SqlValue::Null => 4,
+        SqlValue::Integer(number) => number.to_string().len(),
+        SqlValue::Real(number) => serde_json::to_vec(number).map_or(4, |encoded| encoded.len()),
+        SqlValue::Text(text) => json_string_encoded_len(text),
+        SqlValue::Blob(bytes) => {
+            let digits = bytes.iter().fold(0usize, |size, byte| {
+                size.saturating_add(if *byte >= 100 { 3 } else if *byte >= 10 { 2 } else { 1 })
+            });
+            2usize
+                .saturating_add(digits)
+                .saturating_add(bytes.len().saturating_sub(1))
+        },
+    }
 }
 
 fn sqlite_value_to_json(value: rusqlite::types::Value) -> Value {
@@ -1423,6 +1490,44 @@ mod tests {
         assert!(require_plugin_https("http").is_err());
         assert!(require_plugin_direct_network("").is_ok());
         assert!(require_plugin_direct_network("http://127.0.0.1:8080").is_err());
+    }
+
+    #[test]
+    fn plugin_http_rejects_unlisted_redirect_before_following() {
+        let manifest = json!({ "network_hosts": ["allowed.example"] });
+        let initial = url::Url::parse("https://allowed.example/start").unwrap();
+        let target = "https://public-unlisted.example/secret";
+        let mut requested_hosts = vec![initial.host_str().unwrap().to_owned()];
+
+        if validate_plugin_http_redirect(&manifest, &initial, target).is_ok() {
+            requested_hosts.push(url::Url::parse(target).unwrap().host_str().unwrap().to_owned());
+        }
+        assert_eq!(requested_hosts, ["allowed.example"]);
+        assert!(validate_plugin_http_redirect(
+            &manifest,
+            &initial,
+            "https://allowed.example:8443/other-port",
+        )
+        .is_err());
+        assert!(validate_plugin_http_redirect(&manifest, &initial, "http://allowed.example/insecure").is_err());
+    }
+
+    #[test]
+    fn plugin_sql_rejects_values_over_sqlite_length_limit() {
+        let connection = Connection::open_in_memory().unwrap();
+        let result = query_plugin_database(&connection, &json!({ "sql": "SELECT zeroblob(50000000)" }), true);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn plugin_sql_caps_cumulative_encoded_result_bytes() {
+        let connection = Connection::open_in_memory().unwrap();
+        let result = query_plugin_database(
+            &connection,
+            &json!({ "sql": "SELECT zeroblob(160000) AS first, zeroblob(160000) AS second" }),
+            true,
+        );
+        assert_eq!(result.unwrap_err(), "Результат SQL-запроса плагина слишком большой");
     }
 
     #[test]

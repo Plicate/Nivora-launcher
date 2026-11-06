@@ -43,6 +43,8 @@ const query = ref('')
 const response = ref<SearchResponse | null>(null)
 const searching = ref(false)
 let searchTimer: number | undefined
+let activeSearch: AbortController | null = null
+let searchGeneration = 0
 
 const groupTitles: Record<string, string> = {
   mods: 'Моды и плагины',
@@ -66,31 +68,56 @@ const groups = computed(() => {
     .filter((group) => group.items.length > 0)
 })
 
+function cancelSearch() {
+  if (searchTimer !== undefined) {
+    window.clearTimeout(searchTimer)
+    searchTimer = undefined
+  }
+  activeSearch?.abort()
+  activeSearch = null
+  searchGeneration += 1
+}
+
 function scheduleSearch() {
-  if (searchTimer) window.clearTimeout(searchTimer)
+  cancelSearch()
   const trimmed = query.value.trim()
   if (trimmed.length < 2) {
     response.value = null
     searching.value = false
     return
   }
+  response.value = null
   searching.value = true
+  const generation = searchGeneration
   searchTimer = window.setTimeout(async () => {
+    searchTimer = undefined
+    const controller = new AbortController()
+    activeSearch = controller
     try {
-      response.value = await bridge.globalSearch(trimmed)
+      const nextResponse = await bridge.globalSearch(trimmed, controller.signal)
+      if (generation === searchGeneration && !controller.signal.aborted) response.value = nextResponse
     } catch {
-      response.value = null
+      if (generation === searchGeneration && !controller.signal.aborted) response.value = null
     } finally {
-      searching.value = false
+      if (generation === searchGeneration) {
+        searching.value = false
+        if (activeSearch === controller) activeSearch = null
+      }
     }
   }, 250)
 }
 
-watch(query, scheduleSearch)
+watch(query, scheduleSearch, { flush: 'sync' })
+
+function closeDialog() {
+  cancelSearch()
+  searching.value = false
+  emit('close')
+}
 
 function choose(entry: SearchEntry) {
   emit('open-instance', entry.instance)
-  emit('close')
+  closeDialog()
 }
 
 function showInFolder(entry: SearchEntry) {
@@ -112,7 +139,7 @@ function entryTitle(entry: SearchEntry): string {
 function onKeydown(event: KeyboardEvent) {
   if (event.key === 'Escape') {
     event.preventDefault()
-    emit('close')
+    closeDialog()
     return
   }
   if (event.key === 'Enter') {
@@ -130,13 +157,14 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
-  if (searchTimer) window.clearTimeout(searchTimer)
+  cancelSearch()
+  searching.value = false
 })
 </script>
 
 <template>
   <Teleport to="body">
-      <div class="dialog-scrim" role="presentation" @click.self="emit('close')">
+      <div class="dialog-scrim" role="presentation" @click.self="closeDialog">
         <section class="dialog-card global-search-card" role="dialog" tabindex="-1" aria-modal="true" aria-label="Глобальный поиск">
           <div class="global-search-head">
             <Icon name="search" :size="17" />
@@ -150,7 +178,7 @@ onBeforeUnmount(() => {
               spellcheck="false"
               @keydown="onKeydown"
             />
-            <button class="icon-button" type="button" aria-label="Закрыть" @click="emit('close')"><Icon name="close" :size="16" /></button>
+            <button class="icon-button" type="button" aria-label="Закрыть" @click="closeDialog"><Icon name="close" :size="16" /></button>
           </div>
 
           <div v-if="searching" class="global-search-state">Ищу по всем экземплярам…</div>

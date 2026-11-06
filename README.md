@@ -15,6 +15,10 @@ A desktop launcher for Minecraft Java Edition, servers and Bedrock on supported 
 
 Bedrock requires a valid Microsoft license. Nivora does not distribute game files.
 
+### Plicate Store and Rates
+
+The embedded Store and Rates use `https://plicate.art/api` by default. Override it with `VITE_PLICATE_API_BASE_URL` using an HTTPS origin or a URL with the exact `/api` path. The API host must allow the Tauri client origin and localhost during development.
+
 ## Install
 
 Use a package provided for your platform: Windows installer, Linux package, or macOS disk image. Bedrock is supported only on Windows and Linux.
@@ -48,7 +52,7 @@ Platform packaging scripts are in `scripts/`; see [build instructions](docs/BUIL
 
 ## Project documentation
 
-- [Security model](docs/security.md)
+- [Security model](SECURITY.md)
 - [Plugin API](docs/plugin-api.md)
 - [Theme format](docs/theme-format.md)
 - [Server runtime](docs/server-runtime.md) and [networking](docs/server-network.md)

@@ -58,7 +58,7 @@ V3 добавляет расширенные host-секции `runtime`, `permi
 - `api.runtime.getInfo()`, `getCapabilities()`, `getQuotaUsage()`, `assertCapability()`;
 - `api.permissions.get()` и `set()`; `set()` может только отозвать выданные разрешения, новые выдаются пользователем в менеджере плагинов;
 - `api.config.readProjected(schemaId)` для схем `launcher-public-config` и `network-diagnostics`;
-- `api.http.request(...)` для HTTPS-запросов к разрешённым доменам; HTTP и настроенные прокси блокируются, чтобы не обходить проверку адреса;
+- `api.http.request(...)` для HTTPS-запросов к разрешённым доменам; HTTP и настроенные прокси блокируются, чтобы не обходить проверку адреса. `timeout_ms` принимает 100–5000 мс и задаёт таймаут подключения и операций чтения/записи; тело ответа ограничено 4 MiB. Отмена запроса передаётся нативному клиенту и проверяется при чтении ответа;
 - `api.instances.list()` и `api.instances.getProcessMetrics(instanceName)`;
 - `api.os.openUrl(url)`;
 - `api.proxy.listRoutes()`, `saveRoutes()`, `addRoute()`, `removeRoute()`.
@@ -215,7 +215,7 @@ V3 adds the extended host sections `runtime`, `permissions`, `config.readProject
 - `api.runtime.getInfo()`, `getCapabilities()`, `getQuotaUsage()`, `assertCapability()`;
 - `api.permissions.get()` and `set()`; `set()` may only revoke existing grants, while new grants require a user action in Plugin Center;
 - `api.config.readProjected(schemaId)` for the `launcher-public-config` and `network-diagnostics` schemas;
-- `api.http.request(...)` for HTTPS requests to allowlisted domains; HTTP and configured proxies are blocked to preserve address validation;
+- `api.http.request(...)` for HTTPS requests to allowlisted domains; HTTP and configured proxies are blocked to preserve address validation. `timeout_ms` accepts 100–5000 ms and sets connect/read/write timeouts; response bodies are capped at 4 MiB. Request cancellation is propagated to the native client and checked while reading the response;
 - `api.instances.list()` and `api.instances.getProcessMetrics(instanceName)`;
 - `api.os.openUrl(url)`;
 - `api.proxy.listRoutes()`, `saveRoutes()`, `addRoute()`, `removeRoute()`.

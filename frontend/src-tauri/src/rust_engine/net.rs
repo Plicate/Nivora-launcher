@@ -14,6 +14,16 @@ use super::operations::CancellationToken;
 
 pub const MAX_RESPONSE_BYTES: u64 = 32 * 1024 * 1024;
 pub const MAX_DOWNLOAD_BYTES: u64 = 512 * 1024 * 1024;
+const RESPONSE_TOO_LARGE: &str = "Ответ сервиса слишком большой";
+const HTML_CATALOG_ERROR: &str = "API каталога вернул HTML вместо JSON. Укажите HTTPS-адрес совместимого API, а не обычную страницу сайта или панель хостинга.";
+
+fn is_html_response(content_type: Option<&str>, body: &[u8]) -> bool {
+    if content_type.is_some_and(|value| value.to_ascii_lowercase().contains("text/html")) {
+        return true;
+    }
+    let prefix = String::from_utf8_lossy(&body[..body.len().min(512)]).trim_start().to_ascii_lowercase();
+    prefix.starts_with("<!doctype html") || prefix.starts_with("<html")
+}
 
 const MAX_REDIRECTS: usize = 5;
 // сегменты включаются для файлов заведомо известного размера: client.jar,
@@ -201,12 +211,31 @@ impl HttpClient {
         proxy: &str,
         cancellation: Option<Arc<CancellationToken>>,
     ) -> Result<Self, String> {
-        let proxy = proxy.trim();
         let idle = Duration::from_secs(timeout_seconds.max(1) as u64);
+        Self::new_with_timeouts(idle, Duration::from_secs(15), retries, proxy, cancellation)
+    }
+
+    pub(crate) fn new_for_plugin_request(
+        timeout: Duration,
+        proxy: &str,
+        cancellation: Option<Arc<CancellationToken>>,
+    ) -> Result<Self, String> {
+        let timeout = timeout.max(Duration::from_millis(1));
+        Self::new_with_timeouts(timeout, timeout, 1, proxy, cancellation)
+    }
+
+    fn new_with_timeouts(
+        idle: Duration,
+        connect_timeout: Duration,
+        retries: u32,
+        proxy: &str,
+        cancellation: Option<Arc<CancellationToken>>,
+    ) -> Result<Self, String> {
+        let proxy = proxy.trim();
         // таймаут срабатывает после N секунд без байтов, а не по длительности загрузки
         let mut builder = ureq::AgentBuilder::new()
             .try_proxy_from_env(false)
-            .timeout_connect(Duration::from_secs(15))
+            .timeout_connect(connect_timeout)
             .timeout_read(idle)
             .timeout_write(idle)
             .resolver(PreferIpv4Resolver { strict: proxy.is_empty() })
@@ -326,6 +355,7 @@ impl HttpClient {
         method: &str,
         data: Option<&[u8]>,
         headers: &[(String, String)],
+        max_bytes: u64,
         redirect_validator: Option<RedirectValidator<'_>>,
     ) -> Result<DetailedResponse, String> {
         let mut current = url::Url::parse(url).map_err(|error| format!("Некорректный сетевой адрес: {error}"))?;
@@ -354,7 +384,7 @@ impl HttpClient {
             if (300..400).contains(&status) {
                 let location = response.header("location").unwrap_or_default().to_owned();
                 if location.is_empty() {
-                    return finish_response(response, current, status);
+                    return finish_response(response, current, status, max_bytes, self.cancellation.as_deref());
                 }
                 let target = current
                     .join(&location)
@@ -375,7 +405,7 @@ impl HttpClient {
                 current = target;
                 continue;
             }
-            return finish_response(response, current, status);
+            return finish_response(response, current, status, max_bytes, self.cancellation.as_deref());
         }
         Err(format!("Слишком много редиректов при запросе {url}"))
     }
@@ -428,14 +458,14 @@ impl HttpClient {
             ("Accept".into(), "application/json".into()),
         ];
         headers_vec.extend(headers.unwrap_or(&[]).to_vec());
-        let limit = max_bytes.unwrap_or(MAX_RESPONSE_BYTES);
+        let limit = max_bytes.unwrap_or(MAX_RESPONSE_BYTES).min(MAX_RESPONSE_BYTES);
         let fatal = SourceError::Fatal;
         let mut last_error = String::new();
         for attempt in 1..=self.retries {
             self.check_cancelled().map_err(fatal)?;
             self.rate_limit_before(url).map_err(fatal)?;
             self.notify_request("start", url, attempt);
-            match self.open_once(url, method, data, &headers_vec, redirect_validator) {
+            match self.open_once(url, method, data, &headers_vec, limit, redirect_validator) {
                 Ok(response) => {
                     if let Some(declared) = declared_length(&response) {
                         if declared > limit {
@@ -468,13 +498,16 @@ impl HttpClient {
                         continue;
                     }
                     if response.status >= 400 {
-                        return Err(SourceError::Failed {
-                            message: format!("HTTP {} при запросе {}", response.status, response.url),
-                            status: Some(response.status),
-                        });
+                        let message = if response.status == 404 && is_html_response(response.header("content-type"), &response.body) {
+                            HTML_CATALOG_ERROR.to_owned()
+                        } else {
+                            format!("HTTP {} при запросе {}", response.status, response.url)
+                        };
+                        return Err(SourceError::Failed { message, status: Some(response.status) });
                     }
                     return Ok(response.body);
                 }
+                Err(message) if message == RESPONSE_TOO_LARGE => return Err(fatal(message)),
                 Err(error) => {
                     last_error = error;
                     if attempt < self.retries {
@@ -517,12 +550,12 @@ impl HttpClient {
             ("Accept".into(), "*/*".into()),
         ];
         headers_vec.extend(headers.unwrap_or(&[]).to_vec());
-        let limit = max_bytes.unwrap_or(MAX_RESPONSE_BYTES);
+        let limit = max_bytes.unwrap_or(MAX_RESPONSE_BYTES).min(MAX_RESPONSE_BYTES);
         for attempt in 1..=self.retries {
             self.check_cancelled()?;
             self.rate_limit_before(url)?;
             self.notify_request("start", url, attempt);
-            match self.open_once(url, method, data, &headers_vec, redirect_validator) {
+            match self.open_once(url, method, data, &headers_vec, limit, redirect_validator) {
                 Ok(mut response) => {
                     if let Some(declared) = declared_length(&response) {
                         if declared > limit {
@@ -535,6 +568,7 @@ impl HttpClient {
                     }
                     return Ok(response);
                 }
+                Err(error) if error == RESPONSE_TOO_LARGE => return Err(error),
                 Err(error) => {
                     if attempt < self.retries {
                         self.notify_request("retry", url, attempt);
@@ -550,7 +584,10 @@ impl HttpClient {
 
     pub fn get_json(&self, url: &str, headers: Option<&[(String, String)]>) -> Result<Value, String> {
         let raw = self.request(url, "GET", None, headers, None, None)?;
-        serde_json::from_slice(&raw).map_err(|_| format!("Сервер вернул некорректный JSON: {url}"))
+        serde_json::from_slice(&raw).map_err(|_| {
+            if is_html_response(None, &raw) { HTML_CATALOG_ERROR.to_owned() }
+            else { format!("Сервер вернул некорректный JSON: {url}") }
+        })
     }
 
     pub fn post_form(&self, url: &str, values: &[(String, String)]) -> Result<Value, String> {
@@ -575,7 +612,7 @@ impl HttpClient {
             self.check_cancelled()?;
             self.rate_limit_before(url)?;
             self.notify_request("start", url, attempt);
-            match self.open_once(url, "POST", Some(body.as_bytes()), &headers, None) {
+            match self.open_once(url, "POST", Some(body.as_bytes()), &headers, MAX_RESPONSE_BYTES, None) {
                 Ok(mut response) => {
                     response.body.truncate(MAX_RESPONSE_BYTES as usize);
                     let parsed = serde_json::from_slice(&response.body)
@@ -622,7 +659,7 @@ impl HttpClient {
             self.check_cancelled()?;
             self.rate_limit_before(url)?;
             self.notify_request("start", url, attempt);
-            match self.open_once(url, "POST", Some(&body), &headers, None) {
+            match self.open_once(url, "POST", Some(&body), &headers, MAX_RESPONSE_BYTES, None) {
                 Ok(mut response) => {
                     response.body.truncate(MAX_RESPONSE_BYTES as usize);
                     let parsed = serde_json::from_slice(&response.body)
@@ -1151,19 +1188,57 @@ fn into_stream(response: ureq::Response, _url: url::Url, status: u16) -> Result<
     Ok(StreamResponse { reader: response.into_reader(), total_size, status })
 }
 
-fn finish_response(response: ureq::Response, url: url::Url, status: u16) -> Result<DetailedResponse, String> {
+fn read_limited_response_body(
+    reader: &mut impl Read,
+    url: &url::Url,
+    limit: u64,
+    cancellation: Option<&CancellationToken>,
+) -> Result<Vec<u8>, String> {
+    let mut body = Vec::new();
+    let mut buffer = [0u8; 16 * 1024];
+    loop {
+        if let Some(token) = cancellation {
+            token.check()?;
+        }
+        let remaining = limit.saturating_sub(body.len() as u64).saturating_add(1);
+        let read_size = remaining.min(buffer.len() as u64) as usize;
+        let count = reader
+            .read(&mut buffer[..read_size])
+            .map_err(|error| format!("Не удалось прочитать ответ {url}: {error}"))?;
+        if count == 0 {
+            break;
+        }
+        body.extend_from_slice(&buffer[..count]);
+        if body.len() as u64 > limit {
+            return Err("Ответ сервиса слишком большой".to_owned());
+        }
+    }
+    Ok(body)
+}
+
+fn finish_response(
+    response: ureq::Response,
+    url: url::Url,
+    status: u16,
+    max_bytes: u64,
+    cancellation: Option<&CancellationToken>,
+) -> Result<DetailedResponse, String> {
+    let limit = max_bytes.min(MAX_RESPONSE_BYTES);
+    if response
+        .header("content-length")
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .is_some_and(|length| length > limit)
+    {
+        return Err("Ответ сервиса слишком большой".to_owned());
+    }
     let mut headers = HashMap::new();
     for name in response.headers_names() {
         if let Some(value) = response.header(&name) {
             headers.insert(name.to_ascii_lowercase(), value.to_owned());
         }
     }
-    let mut body = Vec::new();
     let mut reader = response.into_reader();
-    let mut capped = reader.by_ref().take(MAX_RESPONSE_BYTES + 1);
-    capped
-        .read_to_end(&mut body)
-        .map_err(|error| format!("Не удалось прочитать ответ {url}: {error}"))?;
+    let body = read_limited_response_body(&mut reader, &url, limit, cancellation)?;
     Ok(DetailedResponse {
         status,
         headers,
@@ -1220,6 +1295,20 @@ fn percent_encode(value: &str) -> String {
         }
     }
     out
+}
+
+pub(crate) fn plugin_request_client_from_settings(
+    settings: &Value,
+    operation_id: &str,
+    timeout: Duration,
+) -> Result<Arc<HttpClient>, String> {
+    let proxy = settings.get("http_proxy").and_then(Value::as_str).unwrap_or("");
+    let cancellation = if operation_id.trim().is_empty() {
+        None
+    } else {
+        Some(Arc::new(CancellationToken::new(operation_id)))
+    };
+    Ok(Arc::new(HttpClient::new_for_plugin_request(timeout, proxy, cancellation)?))
 }
 
 pub(crate) fn client_from_settings(settings: &Value, operation_id: &str) -> Result<Arc<HttpClient>, String> {
@@ -1517,6 +1606,40 @@ pub fn atomic_json_write(path: &Path, value: &Value, private: bool) -> Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn html_catalog_responses_are_diagnosed_without_echoing_page_contents() {
+        assert!(is_html_response(Some("text/html; charset=utf-8"), b"not html"));
+        assert!(is_html_response(None, b"  <!doctype html><title>404</title>private body"));
+        assert!(!is_html_response(Some("application/json"), br#"{"hits":[]}"#));
+        assert!(HTML_CATALOG_ERROR.contains("совместимого API"));
+        assert!(!HTML_CATALOG_ERROR.contains("<!doctype"));
+    }
+
+    #[test]
+    fn response_body_is_bounded_while_reading() {
+        let url = url::Url::parse("https://example.com/").unwrap();
+        let mut within_limit = std::io::Cursor::new(b"1234".to_vec());
+        assert_eq!(
+            read_limited_response_body(&mut within_limit, &url, 4, None)
+                .unwrap()
+                .as_slice(),
+            b"1234"
+        );
+
+        let mut oversized = std::io::Cursor::new(b"12345".to_vec());
+        assert_eq!(
+            read_limited_response_body(&mut oversized, &url, 4, None).unwrap_err(),
+            "Ответ сервиса слишком большой"
+        );
+    }
+
+    #[test]
+    fn plugin_request_client_applies_timeout_and_disables_retries() {
+        let client = HttpClient::new_for_plugin_request(Duration::from_millis(250), "", None).unwrap();
+        assert_eq!(client.timeout, Duration::from_millis(250));
+        assert_eq!(client.retries, 1);
+    }
 
     #[test]
     fn local_ipv4_matrix() {

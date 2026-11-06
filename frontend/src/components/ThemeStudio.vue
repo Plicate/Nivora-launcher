@@ -46,7 +46,9 @@ const labelOptions: Array<{ key: ButtonLabelKey; label: string }> = [
   { key: 'accounts', label: 'Аккаунты' },
   { key: 'mods', label: 'Каталог' },
   { key: 'modpacks', label: 'Модпаки' },
-  { key: 'themes', label: 'Темы' },
+  { key: 'themes', label: 'Студия тем' },
+  { key: 'store', label: 'Маркет Plicate' },
+  { key: 'rates', label: 'Рейтинг серверов' },
   { key: 'settings', label: 'Настройки' },
 ]
 const themeOptions: SelectOption[] = [

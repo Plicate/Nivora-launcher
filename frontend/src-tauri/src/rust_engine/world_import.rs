@@ -418,23 +418,71 @@ fn extract_zip(archive: &Path, destination: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// ограничивает размер распакованных данных XZ, которые буферизуются в памяти
-struct CappedWriter {
-    buffer: Vec<u8>,
-    cap: usize,
+struct CappedWriter<W> {
+    writer: W,
+    written: u64,
+    cap: u64,
+    exceeded: bool,
 }
 
-impl Write for CappedWriter {
+impl<W: Write> Write for CappedWriter<W> {
     fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
-        if self.buffer.len().saturating_add(data.len()) > self.cap {
+        if self.written.saturating_add(data.len() as u64) > self.cap {
+            self.exceeded = true;
             return Err(std::io::Error::other("Распакованный мир слишком большой"));
         }
-        self.buffer.extend_from_slice(data);
-        Ok(data.len())
+        let written = self.writer.write(data)?;
+        self.written += written as u64;
+        Ok(written)
     }
+
     fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
+        self.writer.flush()
     }
+}
+
+fn decompress_xz_file(
+    archive: &Path,
+    tar_path: &Path,
+    compressed_cap: u64,
+    expanded_cap: u64,
+) -> Result<(), String> {
+    let result = (|| -> Result<(), String> {
+        let metadata = fs::symlink_metadata(archive)
+            .map_err(|_| "Файл не похож на ZIP или TAR-архив либо повреждён".to_owned())?;
+        if metadata.is_symlink() || !metadata.is_file() {
+            return Err("Файл не похож на ZIP или TAR-архив либо повреждён".to_owned());
+        }
+        if metadata.len() > compressed_cap {
+            return Err("Архив мира слишком большой".to_owned());
+        }
+        let input = fs::File::open(archive)
+            .map_err(|_| "Файл не похож на ZIP или TAR-архив либо повреждён".to_owned())?;
+        let mut input = std::io::BufReader::new(input);
+        let output = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(tar_path)
+            .map_err(|_| "Не удалось распаковать архив мира".to_owned())?;
+        let mut writer = CappedWriter {
+            writer: output,
+            written: 0,
+            cap: expanded_cap,
+            exceeded: false,
+        };
+        let decompressed = lzma_rs::xz_decompress(&mut input, &mut writer);
+        let exceeded = writer.exceeded;
+        writer.flush().map_err(|_| "Не удалось распаковать архив мира".to_owned())?;
+        drop(writer);
+        if exceeded {
+            return Err("Распакованный мир слишком большой".to_owned());
+        }
+        decompressed.map_err(|_| "Не удалось распаковать архив: повреждённый TAR".to_owned())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(tar_path);
+    }
+    result
 }
 
 fn extract_tar(archive: &Path, destination: &Path, kind: &str) -> Result<(), String> {
@@ -455,22 +503,19 @@ fn extract_tar(archive: &Path, destination: &Path, kind: &str) -> Result<(), Str
             extract_tar_entries(entries, destination)
         }
         "tar.xz" => {
-            let mut compressed = Vec::new();
-            let mut reader = std::io::BufReader::new(file);
-            reader
-                .read_to_end(&mut compressed)
-                .map_err(|_| "Файл не похож на ZIP или TAR-архив либо повреждён".to_owned())?;
-            let mut writer = CappedWriter {
-                buffer: Vec::new(),
-                cap: MAX_EXTRACTED_BYTES.min(u32::MAX as u64) as usize,
-            };
-            lzma_rs::xz_decompress(&mut reader, &mut writer)
-                .map_err(|_| "Не удалось распаковать архив: повреждённый TAR".to_owned())?;
-            let mut archive = tar::Archive::new(std::io::Cursor::new(writer.buffer));
-            let entries = archive
-                .entries()
-                .map_err(|_| "Не удалось распаковать архив: повреждённый TAR".to_owned())?;
-            extract_tar_entries(entries, destination)
+            drop(file);
+            let tar_path = destination.join(".nivora-xz-expanded.tar.tmp");
+            let result = (|| -> Result<(), String> {
+                decompress_xz_file(archive, &tar_path, MAX_UPLOAD_BYTES, MAX_EXTRACTED_BYTES)?;
+                let tar_file = fs::File::open(&tar_path).map_err(|_| "Не удалось распаковать архив мира".to_owned())?;
+                let mut archive = tar::Archive::new(tar_file);
+                let entries = archive
+                    .entries()
+                    .map_err(|_| "Не удалось распаковать архив: повреждённый TAR".to_owned())?;
+                extract_tar_entries(entries, destination)
+            })();
+            let _ = fs::remove_file(tar_path);
+            result
         }
         _ => {
             let mut archive = tar::Archive::new(file);
@@ -783,6 +828,53 @@ mod tests {
         assert_eq!(second["bytes"], json!(11));
         cancel_upload(&root, &upload_id);
         assert!(chunk_upload(&root, &upload_id, "world/level.dat", b"!", 11).is_err());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    fn tar_xz_with_world(path: &Path) {
+        let mut builder = tar::Builder::new(Vec::new());
+        let mut header = tar::Header::new_gnu();
+        header.set_size(3);
+        header.set_mode(0o600);
+        header.set_cksum();
+        builder.append_data(&mut header, "Cool World/level.dat", &b"nbt"[..]).unwrap();
+        let tar_bytes = builder.into_inner().unwrap();
+        let mut compressed = Vec::new();
+        lzma_rs::xz_compress(&mut &tar_bytes[..], &mut compressed).unwrap();
+        fs::write(path, compressed).unwrap();
+    }
+
+    #[test]
+    fn tar_xz_archive_upload_is_extracted() {
+        let root = std::env::temp_dir().join(format!("nivora-tar-xz-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let upload_id = begin_upload(&root, "archive", "Cool.World.tar.xz").unwrap();
+        let payload = root.join(STAGING_DIRECTORY).join(&upload_id).join("payload");
+        tar_xz_with_world(&payload.join("Cool.World.tar.xz"));
+        let imported = finish_upload(&root, &upload_id).unwrap();
+        assert_eq!(imported, vec!["Cool World".to_owned()]);
+        assert_eq!(fs::read(root.join("saves/Cool World/level.dat")).unwrap(), b"nbt");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn tar_xz_rejects_compressed_input_over_cap() {
+        let root = std::env::temp_dir().join(format!("nivora-tar-xz-limit-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let archive = root.join("world.tar.xz");
+        tar_xz_with_world(&archive);
+        let compressed_bytes = fs::metadata(&archive).unwrap().len();
+        assert!(compressed_bytes > 1);
+        let result = decompress_xz_file(
+            &archive,
+            &root.join("expanded.tar"),
+            compressed_bytes - 1,
+            MAX_EXTRACTED_BYTES,
+        );
+        assert!(result.is_err());
+        assert!(!root.join("expanded.tar").exists());
         let _ = fs::remove_dir_all(&root);
     }
 

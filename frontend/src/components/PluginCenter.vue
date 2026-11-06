@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { pickFile } from '../services/fileBrowser'
-import GitHubPluginCatalog from './GitHubPluginCatalog.vue'
 import Icon from './Icon.vue'
 import Collapsible from './Collapsible.vue'
 import PluginViewRenderer from './PluginViewRenderer.vue'
@@ -18,14 +17,12 @@ const props = defineProps<{
   runtimeViews: RuntimeView[]
   runtimeCommands: RuntimeCommand[]
   runtimeShortcuts: RuntimeShortcut[]
-  githubInstallBusy: boolean
   active: boolean
 }>()
 const emit = defineEmits<{
   toggle: [plugin: PluginManifest]
   installArchive: [payload: { name: string; data: string }]
   uninstall: [plugin: PluginManifest]
-  installGithub: [payload: { owner: string; repo: string; replace: boolean }]
   updateGrants: [payload: { pluginId: string; permissions: PluginPermission[] }]
   allowLocalExecution: [payload: { pluginId: string; allowed: boolean }]
   pinPublisher: [plugin: PluginManifest]
@@ -135,14 +132,15 @@ async function importRevocationData(file: { fileName: string; data: string; size
       <span class="count-badge">{{ installedPlugins.length }} на устройстве</span>
     </div>
 
-    <GitHubPluginCatalog :active="props.active" :plugins="props.plugins" :install-busy="props.githubInstallBusy" @install="emit('installGithub', $event)">
-      <template #import-control>
-        
-        <button class="button button--outline" type="button" :disabled="props.githubInstallBusy" @click="pickArchive"><Icon name="upload" :size="15" />Импортировать ZIP</button>
-        
+    <section class="panel plugin-import-panel" aria-labelledby="plugin-import-title">
+      <div class="panel-heading">
+        <div><h2 id="plugin-import-title">Установка расширений</h2><p>Новые расширения приходят из Маркета Plicate или из подписанного ZIP-архива. Скачанный код запускается только после вашего явного доверия.</p></div>
+      </div>
+      <div class="plugin-import-actions">
+        <button class="button button--outline" type="button" @click="pickArchive"><Icon name="upload" :size="15" />Импортировать ZIP</button>
         <button class="button button--outline" type="button" :disabled="!canImportRevocations" v-tooltip="'Требуется закреплённый ключ с полномочием на списки отзыва'" @click="pickRevocationDocument"><Icon name="upload" :size="15" />Импортировать список отзыва</button>
-      </template>
-    </GitHubPluginCatalog>
+      </div>
+    </section>
 
     <section v-if="props.runtimeViews.length" class="panel plugin-runtime-panel" aria-labelledby="plugin-runtime-title">
       <div class="panel-heading plugin-library-heading">
@@ -228,6 +226,7 @@ async function importRevocationData(file: { fileName: string; data: string; size
 </template>
 
 <style scoped>
+.plugin-import-actions { display: flex; flex-wrap: wrap; gap: 9px; margin-top: 12px; }
 .plugin-center { display: grid; min-width: 0; gap: 14px; }
 .plugin-catalog-intro { margin-bottom: 0; }
 .plugin-library-panel { display: grid; gap: 14px; padding: 20px; }

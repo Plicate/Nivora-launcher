@@ -298,6 +298,32 @@ fn diagnostic_log_hint() -> String {
         .to_string()
 }
 
+/// Windows: ассоциирует протокол nivora:// с текущим exe (HKCU, без прав администратора),
+/// чтобы кнопка «Быстрый вход» на сайте Plicate Rates открывала лаунчер
+#[cfg(windows)]
+fn register_nivora_protocol(executable: &str) {
+    let command = format!("\"{executable}\" \"%1\"");
+    let entries: [(&str, Option<&str>, &str); 3] = [
+        (r"HKCU\Software\Classes\nivora", None, "URL:Nivora Launcher"),
+        (r"HKCU\Software\Classes\nivora", Some("URL Protocol"), ""),
+        (r"HKCU\Software\Classes\nivora\shell\open\command", None, command.as_str()),
+    ];
+    for (key, value_name, value) in entries {
+        let mut call = std::process::Command::new("reg");
+        call.arg("add").arg(key);
+        match value_name {
+            Some(name) => {
+                call.arg("/v").arg(name);
+            }
+            None => {
+                call.arg("/ve");
+            }
+        }
+        call.arg("/t").arg("REG_SZ").arg("/d").arg(value).arg("/f");
+        let _ = call.output();
+    }
+}
+
 pub fn run() {
     install_panic_hook();
     #[cfg(windows)]
@@ -306,13 +332,29 @@ pub fn run() {
         .map(|path| path.display().to_string())
         .unwrap_or_else(|_| "?".to_owned());
     startup_trace(&format!("запуск: exe={executable}"));
+    let arguments: Vec<String> = std::env::args().skip(1).collect();
     // --launch-instance передаёт проверенное имя экземпляра в UI или запущенную копию
-    let launch_argument = rust_engine::shortcuts::launch_argument(std::env::args().skip(1));
+    let launch_argument = rust_engine::shortcuts::launch_argument(arguments.iter().cloned());
     if let Some(name) = &launch_argument {
         if !rust_engine::shortcuts::set_pending_launch(name) {
             startup_trace(&format!("run: --launch-instance отброшен (невалидное имя): {name}"));
         }
     }
+    // ссылка nivora://join с сайта Plicate Rates открывает выбор экземпляра в UI
+    let join_url = arguments.iter().find(|argument| argument.starts_with("nivora://join?")).cloned();
+    match join_url.as_deref().and_then(rust_engine::shortcuts::parse_join_url) {
+        Some(join) => {
+            rust_engine::shortcuts::set_pending_join(join);
+        }
+        None => {
+            if let Some(url) = &join_url {
+                startup_trace(&format!("run: nivora://join отброшен (невалидная ссылка): {url}"));
+            }
+        }
+    }
+    // Windows: связываем протокол nivora:// с лаунчером для кнопки «Быстрый вход» на сайте
+    #[cfg(windows)]
+    register_nivora_protocol(&executable);
     let app = match tauri::Builder::default()
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
@@ -328,8 +370,9 @@ pub fn run() {
         })
         .setup(move |app| {
             // второй запуск будит существующий процесс и передаёт ему цель запуска
+            let forwarded_request = join_url.as_deref().or(launch_argument.as_deref());
             if let Err(reason) =
-                rust_engine::instance_guard::acquire(app.handle().clone(), launch_argument.as_deref())
+                rust_engine::instance_guard::acquire(app.handle().clone(), forwarded_request)
             {
                 if reason == "already-running" {
                     startup_trace("run: уже запущено — показываю окно первой копии и выхожу");

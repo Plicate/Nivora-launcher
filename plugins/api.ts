@@ -14,7 +14,8 @@ export type PluginPermission =
   | "files:plugin"
   | "files:instance"
   | "ui:compose"
-  | "events:launcher";
+  | "events:launcher"
+  | "theme:effects";
 
 export type PluginJsonPrimitive = string | number | boolean | null;
 export type PluginJsonValue =
@@ -188,6 +189,100 @@ export interface PluginUiDefinition {
 export interface PluginI18nDefinition {
   default_locale: string;
   messages: Readonly<Record<string, Readonly<Record<string, string>>>>;
+}
+
+export type PluginParticleShape = "circle" | "square" | "star" | "heart" | "diamond";
+export type PluginParticleZone = "full" | "top" | "bottom" | "left" | "right" | "center";
+export type PluginParticleLayer = "behind" | "above";
+export type PluginParticleBlend = "normal" | "lighter";
+
+export interface PluginParticleSpec {
+  preset?: string;
+  shape?: PluginParticleShape;
+  color?: string;
+  colors?: readonly string[];
+  count?: number;
+  size?: number;
+  sizeVariance?: number;
+  speed?: number;
+  speedVariance?: number;
+  direction?: number;
+  spread?: number;
+  sway?: number;
+  swaySpeed?: number;
+  gravity?: number;
+  wind?: number;
+  opacity?: number;
+  opacityVariance?: number;
+  lifetime?: number;
+  zone?: PluginParticleZone;
+  layer?: PluginParticleLayer;
+  respawn?: boolean;
+  blend?: PluginParticleBlend;
+  image?: string;
+  label?: string;
+}
+
+export interface PluginParticleBurstSpec {
+  x: number;
+  y: number;
+  count?: number;
+  speed?: number;
+  spread?: number;
+  shape?: PluginParticleShape;
+  color?: string;
+  colors?: readonly string[];
+  image?: string;
+  size?: number;
+  sizeVariance?: number;
+  spreadVariance?: number;
+  gravity?: number;
+  lifetime?: number;
+  blend?: PluginParticleBlend;
+  layer?: PluginParticleLayer;
+}
+
+export type PluginStyleScope = "window" | "sidebar" | "cards" | "buttons" | "inputs" | "header" | "scrollbars";
+export type PluginStylePatch = Record<string, string>;
+export type PluginSlotName = "sidebar.footer" | "instances.top" | "settings.footer";
+export type PluginHudPosition = "top-left" | "top-right" | "bottom-left" | "bottom-right" | "top-center" | "bottom-center";
+
+export interface PluginHudOptions {
+  position?: PluginHudPosition;
+  width?: number;
+  margin?: number;
+}
+
+export interface PluginCursorSpec {
+  image: string;
+  hotspotX?: number;
+  hotspotY?: number;
+  size?: number;
+}
+
+export interface PluginWallpaperSpec {
+  image: string;
+  fit?: "cover" | "contain" | "tile";
+  blur?: number;
+  dim?: number;
+}
+
+export interface PluginEffectSpec {
+  panelGlow?: string;
+  panelBlur?: number;
+  gradient?: { from: string; to: string; angle: number };
+  vignette?: number;
+  noise?: number;
+  scanlines?: boolean;
+  shimmer?: boolean;
+}
+
+export type PluginTransitionPreset = "instant" | "swift" | "smooth" | "cinematic";
+
+export interface PluginSoundOptions {
+  volume?: number;
+  rate?: number;
+  loop?: boolean;
 }
 
 export interface PluginThemeDefinition {

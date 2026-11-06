@@ -704,7 +704,7 @@ int main(int argc, char **argv) {
                 all_ok = false;
             }
         }
-    } else {gh
+    } else {
         std::vector<FileResult> results(paths.size());
         CompressFn compress = pick_compress();
         unsigned workers = std::thread::hardware_concurrency();

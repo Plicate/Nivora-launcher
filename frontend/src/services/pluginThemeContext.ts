@@ -105,9 +105,11 @@ export function buildPluginThemeContext(
 
 interface PluginThemeHostContext {
   theme(): PluginThemeContext
-  authorize(permission: 'ui:compose'): Promise<void>
+  authorize(permission: string): Promise<void>
   registerTheme(id: string, definition: PluginThemeDefinition): void
   unregisterTheme(id: string): void
+  pluginId?: string
+  effects?: unknown
 }
 
 function stringArg(value: Record<string, unknown>, key: string, max: number): string {
@@ -169,6 +171,12 @@ export async function dispatchPluginThemeHostCall(
       context.unregisterTheme(stringArg(args, 'registration_id', 96))
       return undefined
     default:
+      if (operation.startsWith('theme.') && typeof context.pluginId === 'string' && context.pluginId) {
+        const composeOp = operation === 'theme.slots.set' || operation === 'theme.slots.reset' || operation.startsWith('theme.hud.')
+        await context.authorize(composeOp ? 'ui:compose' : 'theme:effects')
+        const { applyPluginThemeOperation } = await import('./pluginThemeEffects')
+        return await applyPluginThemeOperation(operation, context.pluginId, args)
+      }
       throw new Error(`Unsupported plugin theme host operation: ${operation}`)
   }
 }

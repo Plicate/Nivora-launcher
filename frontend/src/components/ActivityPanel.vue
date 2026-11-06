@@ -80,13 +80,13 @@ async function copyActivitySummary(): Promise<void> {
          </div>
       </div>
       <div class="activity-state">
-        <span class="activity-pulse" :class="{ 'activity-pulse--done': !activity.busy }" />
+        <span class="activity-pulse" :class="{ 'activity-pulse--done': !activity.busy && activity.status !== 'error' && activity.status !== 'cancelled', 'activity-pulse--error': activity.status === 'error', 'activity-pulse--cancelled': activity.status === 'cancelled' }" />
         <div>
-          <strong>{{ activity.busy ? 'Работаю над задачей' : 'Готово' }}</strong>
+          <strong>{{ activity.busy ? 'Работаю над задачей' : activity.status === 'error' ? 'Не удалось' : activity.status === 'cancelled' ? 'Остановлено' : 'Готово' }}</strong>
           <span>{{ activity.detail }}</span>
         </div>
       </div>
-      <div class="progress-track" :class="{ 'progress-track--indeterminate': activity.busy && activity.progress <= 0 }">
+      <div class="progress-track" :class="{ 'progress-track--indeterminate': activity.busy && activity.progress <= 0, 'progress-track--error': activity.status === 'error' }">
         <span :style="{ width: `${activity.progress}%` }" />
       </div>
       <div v-if="activity.verification_code" class="verification-card">

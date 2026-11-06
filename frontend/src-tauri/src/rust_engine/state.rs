@@ -344,6 +344,19 @@ pub fn overlay_state_from(config_home: &Path, data_home: &Path, now: f64) -> Val
         }
     }
     let recording = recording_status(&game_dir, now);
+    let system_metrics = if overlay_settings
+        .get("enabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
+        && overlay_settings
+            .get("show_system_metrics")
+            .and_then(Value::as_bool)
+            .unwrap_or(true)
+    {
+        metrics::system_metrics(&json!({ "game_root": game_dir.to_string_lossy() })).unwrap_or(json!({}))
+    } else {
+        json!({})
+    };
     let instances_root = game_dir.join("instances");
     let Some(running) = scan_running_instance(&instances_root, now) else {
         return json!({
@@ -352,7 +365,7 @@ pub fn overlay_state_from(config_home: &Path, data_home: &Path, now: f64) -> Val
             "session_seconds": 0,
             "played_seconds": 0,
             "metrics": {},
-            "system_metrics": metrics::system_metrics(&json!({ "game_root": game_dir.to_string_lossy() })).unwrap_or(json!({})),
+            "system_metrics": system_metrics,
             "mods": [],
             "recording": recording,
             "overlay": overlay_settings,
@@ -383,7 +396,7 @@ pub fn overlay_state_from(config_home: &Path, data_home: &Path, now: f64) -> Val
             "peak_ram_bytes": running.metrics["peak_ram_bytes"].clone(),
             "storage_bytes": running.metrics["storage_bytes"].clone(),
         },
-        "system_metrics": metrics::system_metrics(&json!({ "game_root": game_dir.to_string_lossy() })).unwrap_or(json!({})),
+        "system_metrics": system_metrics,
         "mods": mods,
         "recording": recording,
         "overlay": overlay_settings,
@@ -1051,6 +1064,22 @@ mod tests {
         assert_eq!(response["overlay"]["metrics_cpu"], serde_json::json!(true));
         assert_eq!(response["overlay"]["metrics_ram"], serde_json::json!(true));
         assert_eq!(response["recording"]["active"], serde_json::json!(false));
+    }
+
+    #[test]
+    fn hidden_system_metrics_are_not_returned() {
+        let root = fixture_root("hidden-system-metrics");
+        let config = root.join("config");
+        let game = root.join("game");
+        fs::create_dir_all(game.join("instances")).unwrap();
+        write_json(
+            &config.join("settings.json"),
+            json!({ "game_dir": game.to_string_lossy(), "overlay_settings": { "show_system_metrics": false } }),
+        );
+
+        let response = overlay_state_from(&config, &root.join("data"), 1000.0);
+
+        assert_eq!(response["system_metrics"], serde_json::json!({}));
     }
 
     #[test]

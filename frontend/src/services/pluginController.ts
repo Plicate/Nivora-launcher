@@ -42,7 +42,7 @@ type PluginControllerDeps = {
   isSafePluginShortcutBinding: (binding: string) => boolean
   confirmDestructive: (message: string) => Promise<boolean>
   openActivity: (title: string, detail: string) => void
-  finishActivity: (detail: string) => void
+  finishActivity: (detail: string, logs?: string[], status?: 'success' | 'error' | 'cancelled') => void
   currentToastId: () => number
   dismissCurrentToast: (id: number) => void
 }
@@ -561,14 +561,14 @@ export function createPluginController(deps: PluginControllerDeps) {
     }
   }
 
-  async function installPluginArchive(payload: { name: string; data: string }) {
-    deps.openActivity('Установка плагина', payload.name)
+  async function installPluginArchive(payload: { name: string; data: string; replace?: boolean }) {
+    deps.openActivity(payload.replace ? 'Обновление плагина' : 'Установка плагина', payload.name)
     try {
-      const result = await bridge.pluginInstall(payload.data, false)
+      const result = await bridge.pluginInstall(payload.data, false, payload.replace || false)
       replacePluginList(result.plugins)
       deps.finishActivity(`Плагин «${result.plugin.name}» установлен и выключен. Проверьте разрешения перед включением.`)
     } catch (error) {
-      deps.finishActivity(deps.errorMessage(error))
+      deps.finishActivity(deps.errorMessage(error), undefined, 'error')
     }
   }
 
@@ -581,7 +581,7 @@ export function createPluginController(deps: PluginControllerDeps) {
       replacePluginList(result.plugins)
       deps.finishActivity(`Архив «${result.plugin.name}» проверен и сохранён · SHA-256 ${result.metadata.sha256}. Код не запускается.`)
     } catch (error) {
-      deps.finishActivity(deps.errorMessage(error))
+      deps.finishActivity(deps.errorMessage(error), undefined, 'error')
     } finally {
       githubPluginInstallBusy.value = false
     }

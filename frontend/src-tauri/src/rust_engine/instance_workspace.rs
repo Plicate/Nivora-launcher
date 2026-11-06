@@ -1776,21 +1776,20 @@ fn write_private_file(path: &Path, content: &[u8]) -> Result<(), String> {
     #[cfg(unix)]
     {
         use std::io::Write;
-        use std::os::unix::ffi::OsStrExt;
-        use std::os::unix::io::FromRawFd;
-        let c_path = std::ffi::CString::new(path.as_os_str().as_bytes())
-            .map_err(|_| "Некорректный путь файла ресурса".to_owned())?;
-        let flags = libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW;
-        let descriptor = unsafe { libc::open(c_path.as_ptr(), flags, 0o600) };
-        if descriptor < 0 {
-            let error = std::io::Error::last_os_error();
-            return if error.kind() == std::io::ErrorKind::AlreadyExists {
-                Err("Файл ресурса уже существует".to_owned())
-            } else {
-                Err(error.to_string())
-            };
-        }
-        let mut file = unsafe { std::fs::File::from_raw_fd(descriptor) };
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Err("Файл ресурса уже существует".to_owned())
+            }
+            Err(error) => return Err(error.to_string()),
+        };
         if let Err(error) = file.write_all(content) {
             drop(file);
             let _ = fs::remove_file(path);

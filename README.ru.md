@@ -19,6 +19,10 @@
 
 Используйте пакет для своей платформы: установщик Windows, пакет Linux или образ macOS. Bedrock поддерживается только на Windows и Linux.
 
+### Магазин Plicate и Plicate Rates
+
+Оба встроенных раздела используют единый API по адресу `https://plicate.art/api`. При необходимости переопределите его через `VITE_PLICATE_API_BASE_URL`, указав HTTPS origin или адрес с точным путём `/api`. API должен разрешать origin встроенного Tauri-клиента и localhost в режиме разработки; для другого встроенного клиента добавьте его точный origin в серверный `PLICATE_ALLOWED_ORIGINS`, разделяя несколько значений запятыми.
+
 ## Сборка и тесты
 
 Установите платформенные зависимости Tauri, затем запустите:
@@ -48,7 +52,7 @@ cargo test --locked
 
 ## Документация
 
-- [Модель безопасности](docs/security.md)
+- [Модель безопасности](SECURITY.md)
 - [API плагинов](docs/plugin-api.md)
 - [Формат тем](docs/theme-format.md)
 - [Серверный движок](docs/server-runtime.md) и [сеть серверов](docs/server-network.md)

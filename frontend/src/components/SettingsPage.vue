@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, proxyRefs, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, proxyRefs, ref } from 'vue'
 import CatalogBadge from './CatalogBadge.vue'
 import CloudStoragePanel from './CloudStoragePanel.vue'
 import CustomSelect from './CustomSelect.vue'
@@ -8,8 +8,15 @@ import Icon from './Icon.vue'
 import MemoryField from './MemoryField.vue'
 import NumericStepper from './NumericStepper.vue'
 import PluginViewRenderer from './PluginViewRenderer.vue'
+import PluginSlotHost from './PluginSlotHost.vue'
 import { bridge } from '../services/bridge'
 import { overlaySelfTest, type OverlaySelfTestStep } from '../services/overlay'
+
+const plicateEnabled = computed({
+  get: () => plicateServicesEnabled.value,
+  set: (value: boolean) => setPlicateServicesEnabled(value),
+})
+import { plicateServicesEnabled, setPlicateServicesEnabled } from '../services/plicateServices'
 import { createLauncherUpdates } from '../services/launcherUpdates'
 import type { AppState, LauncherProfile, PluginCatalog, ResourceCatalog, SelectOption } from '../types'
 
@@ -341,8 +348,9 @@ async function runOverlaySelfTest() {
                            <button class="icon-button" type="button" aria-label="Удалить профиль" :disabled="model.settingsProfileBusy" @click="model.deleteSettingsProfile(profile.name)"><Icon name="trash" :size="14" /></button>
                          </span>
                        </div>
-                       <span v-if="!model.settingsProfiles.length && !model.settingsProfilesLoading" class="muted">Профилей пока нет — сохраните текущие настройки как пресет.</span>
                        <span v-if="model.settingsProfilesLoading" class="muted">Загружаю…</span>
+                       <span v-else-if="model.settingsProfilesError" class="muted" role="status">{{ model.settingsProfilesError }}</span>
+                       <span v-else-if="!model.settingsProfiles.length" class="muted">Профилей пока нет — сохраните текущие настройки как пресет.</span>
                        <div class="settings-profile-actions">
                          <input v-model="model.settingsProfileName" class="settings-profile-name" placeholder="Имя профиля" maxlength="48" />
                          <button class="button button--small button--accent" type="button" :disabled="model.settingsProfileBusy || !model.settingsProfileName.trim()" @click="model.saveSettingsProfileAs">{{ model.settingsProfileBusy ? 'Работаю…' : 'Сохранить пресет' }}</button>
@@ -429,6 +437,15 @@ async function runOverlaySelfTest() {
                      </article>
                    </div>
                  </section>
+
+                 <section id="settings-plicate" class="panel settings-card">
+                   <div class="panel-heading"><div><h2>Сервисы Plicate</h2></div></div>
+                   <div class="settings-form">
+                     <div class="settings-toggle-grid">
+                       <label class="workspace-check"><input v-model="plicateEnabled" type="checkbox" /><span><strong>Сервисы Plicate</strong><small>Маркет Plicate, рейтинг серверов и их разделы в интерфейсе</small></span></label>
+                     </div>
+                   </div>
+                 </section>
                </div>
 
                <section id="settings-profiles" class="panel settings-card settings-card--wide">
@@ -513,5 +530,6 @@ async function runOverlaySelfTest() {
                  <div class="path-line"><span>Движок</span><strong>{{ model.state.system.python || 'подключение…' }}</strong></div>
                  <button class="button button--quiet" type="button" @click="model.openGameFolder"><Icon name="folder" :size="16" />Открыть папку игры</button>
                </section>
+               <PluginSlotHost slot-name="settings.footer" />
              </section>
 </template>

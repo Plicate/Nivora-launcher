@@ -7,7 +7,7 @@ import { bridge } from '../services/bridge'
 import { confirmDialog } from '../services/dialogs'
 import type { GitHubPluginDetails, GitHubPluginRepository, PluginManifest, SelectOption } from '../types'
 
-const props = withDefaults(defineProps<{ plugins: PluginManifest[]; installBusy: boolean; active?: boolean }>(), { active: true })
+const props = withDefaults(defineProps<{ plugins: PluginManifest[]; installBusy: boolean; active?: boolean; ecosystemEnabled?: boolean }>(), { active: true, ecosystemEnabled: true })
 const emit = defineEmits<{
   install: [payload: { owner: string; repo: string; replace: boolean }]
 }>()
@@ -130,15 +130,15 @@ function formatStars(value: number): string {
   return new Intl.NumberFormat().format(value)
 }
 
-watch(() => props.active, (active) => {
-  if (!active || automaticSearchStarted) return
+watch(() => [props.active, props.ecosystemEnabled] as const, ([active, ecosystemEnabled]) => {
+  if (!active || !ecosystemEnabled || automaticSearchStarted) return
   automaticSearchStarted = true
   void searchGithub()
 }, { immediate: true })
 </script>
 
 <template>
-  <section class="plugin-catalog" aria-label="Каталог плагинов сообщества">
+  <section class="plugin-catalog" aria-label="Маркет плагинов сообщества">
     <section class="panel search-panel">
       <div class="search-bar">
         <Icon name="search" :size="19" />
@@ -147,7 +147,7 @@ watch(() => props.active, (active) => {
         <slot name="import-control" />
         <button class="button button--accent" type="button" :disabled="loading" @click="searchGithub()">{{ loading ? 'Ищу…' : 'Найти плагины' }}</button>
       </div>
-      <div class="search-context"><span>Источник: GitHub Releases</span><span class="context-divider" /><span>ZIP проверяется перед импортом · код не запускается</span></div>
+      <div class="search-context"><span>Источник: GitHub Releases</span><span class="context-divider" /><span>★ — число звёзд GitHub, не отзывы пользователей</span><span class="context-divider" /><span>ZIP проверяется перед импортом · код не запускается</span></div>
       <p v-if="catalogError" class="inline-error">{{ catalogError }}</p>
     </section>
 
@@ -160,7 +160,7 @@ watch(() => props.active, (active) => {
           <h3>{{ repository.name }}</h3>
           <p>{{ repository.description || 'Автор не добавил описание.' }}</p>
           <div class="mod-card-footer">
-            <span class="mod-downloads">{{ formatStars(repository.stars) }} ★ · {{ formatDate(repository.updated_at) || 'GitHub' }}</span>
+            <span class="plugin-rating" :title="`${formatStars(repository.stars)} публичных звёзд GitHub; это не пользовательские отзывы`"><Icon name="star" :size="13" />{{ formatStars(repository.stars) }} <small>GitHub</small></span><span class="mod-downloads">{{ formatDate(repository.updated_at) || 'GitHub' }}</span>
             <a class="button button--small button--quiet" :href="repository.repository_url" target="_blank" rel="noreferrer">GitHub</a>
             <button class="button button--small button--accent" type="button" :aria-label="`Открыть карточку плагина ${repository.full_name}`" :disabled="installBusy || props.installBusy" @click="showDetails(repository)"><Icon name="download" :size="14" />Подробнее / импорт</button>
           </div>
@@ -192,6 +192,8 @@ watch(() => props.active, (active) => {
 <style scoped>
 .plugin-catalog { display: grid; min-width: 0; gap: 14px; }
 .plugin-repository-owner { display: block; overflow: hidden; margin-bottom: 4px; color: var(--muted); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.plugin-rating { display: inline-flex; align-items: center; gap: 4px; color: var(--accent); font-size: 10px; font-weight: 650; }
+.plugin-rating small { color: var(--muted); font-size: 8px; font-weight: 500; }
 .plugin-catalog-more { justify-self: center; }
 @media (max-width: 760px) {
   .search-context { align-items: flex-start; flex-wrap: wrap; }

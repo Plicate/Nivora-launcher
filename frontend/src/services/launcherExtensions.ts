@@ -71,6 +71,7 @@ export const permissionLabels: Record<PluginPermission, string> = {
   'policy:read': 'Читать policy-конфигурацию',
   'crypto:sign': 'Подписывать данные',
   'crypto:verify': 'Проверять подписи',
+  'theme:effects': 'Применять визуальные эффекты темы',
 }
 
 export const permissionDescriptions: Record<PluginPermission, string> = {
@@ -144,6 +145,7 @@ export const permissionDescriptions: Record<PluginPermission, string> = {
   'policy:read': 'Чтение host policy, ограничений и capability matrix.',
   'crypto:sign': 'Подписание данных host-managed ключами.',
   'crypto:verify': 'Проверка цифровых подписей и attestations.',
+  'theme:effects': 'Частицы, обои, курсор, звуки, слоты интерфейса, HUD-виджеты и визуальные эффекты тем.',
 }
 
 const THEME_SCHEMA_VERSION = 1 as const

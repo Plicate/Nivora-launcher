@@ -1,4 +1,4 @@
-export const BUTTON_LABEL_KEYS = ['instances', 'accounts', 'mods', 'modpacks', 'themes', 'settings'] as const
+export const BUTTON_LABEL_KEYS = ['instances', 'accounts', 'mods', 'modpacks', 'themes', 'store', 'rates', 'settings'] as const
 
 export type ButtonLabelKey = (typeof BUTTON_LABEL_KEYS)[number]
 export const BUTTON_CUSTOMIZATION_TARGETS = ['topbar-button', 'card-button', 'hero-play', 'nav-item'] as const
@@ -76,7 +76,7 @@ export const DEFAULT_BUTTON_CUSTOMIZATION: ButtonCustomization = {
   texture_data: '',
   icon_data: '',
   sound_data: '',
-  labels: { instances: '', accounts: '', mods: '', modpacks: '', themes: '', settings: '' },
+  labels: { instances: '', accounts: '', mods: '', modpacks: '', themes: '', store: '', rates: '', settings: '' },
   overrides: {},
 }
 

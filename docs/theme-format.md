@@ -1,6 +1,6 @@
 # Формат тем
 
-Пакет темы — ZIP с обязательными корневыми файлами `theme.json` и `theme.yml`. Импортер сохраняет совместимость со схемой `1`; новые темы используют `schema_version: 2`. Размер ZIP не должен превышать 8 MiB, суммарный распакованный размер — 32 MiB, число файлов — 128. `theme.json` ограничен 128 KiB, `theme.yml` — 16 KiB; изображения — 512 KiB, звук — 1 MiB, исходник функции — 256 KiB (всего исходников — 2 MiB).
+Пакет темы — ZIP с `theme.yml` в корне, `theme/theme.json` для палитры и ссылок на ресурсы, а также файлами в `resources/` и `functions/`. Импортер сохраняет совместимость со старыми архивами с корневым `theme.json`; новые темы используют `schema_version: 2`. Размер ZIP и суммарный распакованный размер — до 64 MiB, число файлов — 128. JSON-файл палитры ограничен 128 KiB, `theme.yml` — 16 KiB; каждый ресурс — 15 MiB, исходник функции — 256 KiB (всего исходников — 2 MiB).
 
 ## Базовые поля
 
@@ -86,7 +86,7 @@ creators:
 ## Структура ZIP и доверие
 
 ```text
-theme.json
+theme/theme.json
 theme.yml
 resources/button-texture.webp
 resources/button-icon.png
@@ -94,9 +94,9 @@ resources/button-click.ogg
 functions/index.js
 ```
 
-Файлы ресурсов и функций необязательны только когда на них нет ссылок. Разрешены лишь `theme.json`, `theme.yml`, заявленные файлы внутри `resources/` и заявленные исходники внутри `functions/`. Каталоги в ZIP не нужны. Абсолютные пути, `..`, точки-компоненты, обратные косые черты, символьные ссылки, специальные файлы, дубликаты, незаявленные файлы и неизвестные пути отклоняются. Архив проверяется до сохранения и экспорта; импортер ничего не извлекает по путям из архива и не исполняет вложенный код.
+Файлы ресурсов и функций необязательны только когда на них нет ссылок. Разрешены лишь `theme/theme.json` (или старый корневой `theme.json`), `theme.yml`, заявленные файлы внутри `resources/` и заявленные исходники внутри `functions/`. Каталоги в ZIP не нужны. Абсолютные пути, `..`, точки-компоненты, обратные косые черты, символьные ссылки, специальные файлы, дубликаты, незаявленные файлы и неизвестные пути отклоняются. Архив проверяется до сохранения и экспорта; импортер ничего не извлекает по путям из архива и не исполняет вложенный код.
 
-Схема v1 остаётся доступной для старых архивов: в ней достаточно исходных полей палитры и двух обязательных файлов в корне ZIP; ресурсы и встроенный plugin не обязательны. Встроенные темы получают `source: "builtin"`; локальные импорты и темы GitHub хранятся отдельно от настроек приложения.
+Схема v1 остаётся доступной для старых архивов: в ней достаточно исходных полей палитры и двух обязательных корневых файлов `theme.json` и `theme.yml`; ресурсы и встроенный plugin не обязательны. Встроенные темы получают `source: "builtin"`; локальные импорты и темы GitHub хранятся отдельно от настроек приложения.
 
 Для каталога GitHub репозиторий должен быть публичным и иметь topic `trial-launcher-theme` (идентификатор совместимости прежнего имени лаунчера). Последний стабильный Release должен содержать ZIP; `id` темы должен совпадать с именем репозитория, а версия в `theme.yml` — с тегом Release без необязательного начального `v`. Подпись автора не проверяется; лаунчер вычисляет SHA-256 загруженного архива.
 
@@ -106,7 +106,7 @@ functions/index.js
 
 # Theme format
 
-A theme package is a ZIP with required root files `theme.json` and `theme.yml`. The importer remains compatible with schema `1`; new themes use `schema_version: 2`. The ZIP is limited to 8 MiB, total uncompressed data to 32 MiB, and the file count to 128. `theme.json` is limited to 128 KiB, `theme.yml` to 16 KiB; images are limited to 512 KiB, audio to 1 MiB, and each function source to 256 KiB (2 MiB total for sources).
+A theme package is a ZIP with root `theme.yml`, a palette and resource references at `theme/theme.json`, and files under `resources/` and `functions/`. The importer remains compatible with legacy root `theme.json` archives; new themes use `schema_version: 2`. The ZIP and total uncompressed data are limited to 64 MiB, with at most 128 files. The palette JSON is limited to 128 KiB, `theme.yml` to 16 KiB, each resource to 15 MiB, and each function source to 256 KiB (2 MiB total for sources).
 
 ## Base fields
 
@@ -137,7 +137,7 @@ All `button_customization` fields are optional. Limits: `width` 120–280, `heig
 ## ZIP layout and trust
 
 ```text
-theme.json
+theme/theme.json
 theme.yml
 resources/button-texture.webp
 resources/button-icon.png
@@ -145,7 +145,7 @@ resources/button-click.ogg
 functions/index.js
 ```
 
-Resource and function files are optional only when nothing references them. Only `theme.json`, `theme.yml`, declared files under `resources/` and declared sources under `functions/` are allowed. ZIP directory entries are unnecessary. Absolute paths, `..`, dot components, backslashes, symlinks, special files, duplicates, unreferenced files and unexpected paths are rejected. The archive is validated before saving/export; the importer never extracts using archive-controlled paths or executes bundled code.
+Resource and function files are optional only when nothing references them. Only `theme/theme.json` (or legacy root `theme.json`), `theme.yml`, declared files under `resources/` and declared sources under `functions/` are allowed. ZIP directory entries are unnecessary. Absolute paths, `..`, dot components, backslashes, symlinks, special files, duplicates, unreferenced files and unexpected paths are rejected. The archive is validated before saving/export; the importer never extracts using archive-controlled paths or executes bundled code.
 
 Schema v1 remains available for old archives: it needs the original palette fields and the two required root files; assets and embedded plugins are not required. Built-in themes use `source: "builtin"`; local imports and GitHub themes are stored separately from application settings.
 

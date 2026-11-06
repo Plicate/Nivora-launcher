@@ -65,8 +65,8 @@ function encodeBytes(bytes: Uint8Array): string {
 }
 
 async function importThemeData(file: { fileName: string; data: string; size: number }) {
-  if (file.size > 8 * 1024 * 1024) {
-    emit('toast', 'ZIP темы больше 8 MiB')
+  if (file.size > 64 * 1024 * 1024) {
+    emit('toast', 'ZIP темы больше 64 MiB')
     return
   }
   try {
@@ -234,7 +234,7 @@ function formatDate(value: string): string {
           <label class="field"><span>Описание темы</span><textarea v-model="saveDescription" maxlength="500" rows="3" placeholder="Что меняет эта тема" /></label>
           <div class="theme-save-row"><label class="field"><span>Версия</span><input v-model="saveVersion" maxlength="64" placeholder="1.0.0" /></label><label class="field"><span>Создатели</span><input v-model="saveCreators" placeholder="Имена через запятую" /></label></div>
         </div>
-        <div class="modal-actions"><button class="button button--quiet" type="button" @click="saveDialogOpen = false">Отмена</button><button class="button button--accent" type="button" :disabled="busy" @click="saveCurrentTheme"><Icon name="save" :size="14" />Сохранить локально</button></div>
+        <div class="modal-actions"><button class="button button--quiet" type="button" @click="saveDialogOpen = false">Отмена</button><button class="button button--accent" type="button" :disabled="busy" @click="saveCurrentTheme"><Icon name="save" :size="14" />Сохранить ZIP</button></div>
       </section>
       </div>
       </Transition>

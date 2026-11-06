@@ -18,6 +18,8 @@ const MACOS_BUNDLE_PREFIX: &str = "com.nivora.launcher.shortcut.";
 
 /// экземпляр, который попросили запустить ярлыком; выдаётся UI один раз
 static PENDING_LAUNCH: Mutex<Option<String>> = Mutex::new(None);
+/// сервер из ссылки nivora://join (кнопка «Быстрый вход» на сайте Plicate Rates); выдаётся UI один раз
+static PENDING_JOIN: Mutex<Option<Value>> = Mutex::new(None);
 /// сериализация изменений реестра ярлыков между параллельными вызовами
 static REGISTRY_LOCK: Mutex<()> = Mutex::new(());
 
@@ -142,6 +144,88 @@ pub fn launch_argument<I: IntoIterator<Item = String>>(arguments: I) -> Option<S
         }
     }
     None
+}
+
+/// разбирает ссылку «Быстрого входа» с сайта Plicate Rates: nivora://join?host=…&port=…&edition=…&name=…
+pub fn parse_join_url(raw: &str) -> Option<Value> {
+    let query = raw.strip_prefix("nivora://join?")?;
+    let mut host = String::new();
+    let mut port: Option<u16> = None;
+    let mut edition = String::new();
+    let mut name = String::new();
+    let mut slug = String::new();
+    for pair in query.split('&').take(24) {
+        let Some((key, value)) = pair.split_once('=') else { continue };
+        match key {
+            "host" => host = percent_decode(&bound_text(value, 253)),
+            "port" => port = percent_decode(&bound_text(value, 5)).parse::<u16>().ok().filter(|value| *value > 0),
+            "edition" => edition = percent_decode(&bound_text(value, 12)),
+            "name" => name = percent_decode(&bound_text(value, 96)),
+            "slug" => slug = percent_decode(&bound_text(value, 96)),
+            _ => {}
+        }
+    }
+    // адрес сервера: цифры, латиница, точки и дефисы — как у обычного Minecraft-адреса
+    if host.is_empty() || !host.chars().all(|symbol| symbol.is_ascii_alphanumeric() || symbol == '.' || symbol == '-') {
+        return None;
+    }
+    let edition = if edition == "Bedrock" { "Bedrock" } else { "Java" };
+    let port = port.unwrap_or(if edition == "Bedrock" { 19132 } else { 25565 });
+    if name.is_empty() {
+        name = host.clone();
+    }
+    if slug.is_empty() {
+        slug = "quick-join".to_owned();
+    }
+    Some(json!({ "host": host, "port": port, "edition": edition, "name": name, "slug": slug }))
+}
+
+/// запоминает проверенную цель подключения для выдачи UI
+pub fn set_pending_join(target: Value) -> bool {
+    if !target.is_object() {
+        return false;
+    }
+    *PENDING_JOIN.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(target);
+    true
+}
+
+pub fn shortcut_take_join_request(_request: &Value) -> Result<Value, String> {
+    let join = PENDING_JOIN.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take();
+    Ok(json!({ "join": join }))
+}
+
+/// читает цель подключения из ссылки nivora://join в аргументах запуска
+pub fn join_argument<I: IntoIterator<Item = String>>(arguments: I) -> Option<Value> {
+    arguments
+        .into_iter()
+        .find(|argument| argument.starts_with("nivora://join?"))
+        .and_then(|url| parse_join_url(&url))
+}
+
+/// ограничивает длину значения из ссылки, чтобы ссылка не раздувала память
+fn bound_text(raw: &str, max: usize) -> String {
+    raw.chars().take(max).collect()
+}
+
+/// раскодирует %XX-последовательности из ссылки
+fn percent_decode(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut decoded: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            let high = (bytes[index + 1] as char).to_digit(16);
+            let low = (bytes[index + 2] as char).to_digit(16);
+            if let (Some(high), Some(low)) = (high, low) {
+                decoded.push((high * 16 + low) as u8);
+                index += 3;
+                continue;
+            }
+        }
+        decoded.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8_lossy(&decoded).into_owned()
 }
 
 /// удаляет ярлыки экземпляра, если доступна среда рабочего стола
@@ -1104,6 +1188,33 @@ mod tests {
         assert_eq!(shortcut_take_launch_request(&json!({})).unwrap()["name"], "pack");
         assert_eq!(shortcut_take_launch_request(&json!({})).unwrap()["name"], Value::Null);
         assert!(!set_pending_launch("bad name"));
+    }
+
+    #[test]
+    fn join_argument_parses_deep_links_and_rejects_bad_hosts() {
+        let args = |items: &[&str]| items.iter().map(|item| item.to_string()).collect::<Vec<_>>();
+        let join = join_argument(args(&["app", "nivora://join?host=play.example.com&port=25566&edition=Java&name=%D0%97%D0%B5%D0%BB%D1%91%D0%BD%D1%8B%D0%B9%20%D0%BC%D0%B8%D1%80"])).expect("валидная ссылка");
+        assert_eq!(join["host"], "play.example.com");
+        assert_eq!(join["port"], 25566);
+        assert_eq!(join["edition"], "Java");
+        assert_eq!(join["name"], "Зелёный мир");
+        assert_eq!(join["slug"], "quick-join");
+        let defaults = parse_join_url("nivora://join?host=rates.example.net").expect("адрес достаточно");
+        assert_eq!(defaults["port"], 25565);
+        assert_eq!(defaults["edition"], "Java");
+        assert_eq!(defaults["name"], "rates.example.net");
+        let bedrock = parse_join_url("nivora://join?host=bedrock.example.net&edition=Bedrock").expect("bedrock ссылка");
+        assert_eq!(bedrock["port"], 19132);
+        assert!(parse_join_url("nivora://join?host=bad host").is_none());
+        assert!(parse_join_url("nivora://join?host=http%3A%2F%2Fx").is_none());
+        assert!(parse_join_url("nivora://join?host=").is_none());
+        assert!(parse_join_url("nivora://join").is_none());
+        assert!(parse_join_url("https://example.com/join?host=x").is_none());
+        assert!(join_argument(args(&["app"])).is_none());
+        assert!(set_pending_join(json!({ "host": "play.example.com" })));
+        assert!(!set_pending_join(Value::Null));
+        assert_eq!(shortcut_take_join_request(&json!({})).unwrap()["join"]["host"], "play.example.com");
+        assert_eq!(shortcut_take_join_request(&json!({})).unwrap()["join"], Value::Null);
     }
 
     #[test]

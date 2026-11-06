@@ -156,8 +156,8 @@ export function createThemeManager(deps: ThemeManagerDependencies) {
     appearanceDraft.wallpaper_opacity = 34
     appearanceDraft.sidebar_texture_data = ''
     wallpaperRenderBlur.value = 12
-    appearanceDraft.page_themes = { instances: 'inherit', 'instance-settings': 'inherit', accounts: 'inherit', mods: 'inherit', modpacks: 'inherit', plugins: 'inherit', themes: 'inherit', settings: 'inherit' }
-    appearanceDraft.page_layouts = { instances: 'balanced', 'instance-settings': 'balanced', accounts: 'balanced', mods: 'wide', modpacks: 'wide', plugins: 'wide', themes: 'wide', settings: 'balanced' }
+    appearanceDraft.page_themes = { instances: 'inherit', 'instance-settings': 'inherit', accounts: 'inherit', mods: 'inherit', modpacks: 'inherit', plugins: 'inherit', themes: 'inherit', store: 'inherit', rates: 'inherit', settings: 'inherit' }
+    appearanceDraft.page_layouts = { instances: 'balanced', 'instance-settings': 'balanced', accounts: 'balanced', mods: 'wide', modpacks: 'wide', plugins: 'wide', themes: 'wide', store: 'wide', rates: 'wide', settings: 'balanced' }
     appearanceDraft.widget_visibility = { 'instances.workspace': true, 'accounts.status': true, 'mods.context': true }
     settingsDraft.font_family = 'system'
     syncActiveTheme()
@@ -274,7 +274,8 @@ export function createThemeManager(deps: ThemeManagerDependencies) {
       const result = await bridge.themeSave(theme, metadata, resourceData)
       localThemes.value = result.themes
       syncActiveTheme()
-      showToast(`Тема «${result.theme.name}» сохранена локально`)
+      await downloadThemeArchive(result.theme.id)
+      showToast(`Тема «${result.theme.name}» сохранена как ZIP и добавлена в лаунчер`)
     } catch (error) {
       showToast(errorMessage(error))
     } finally {
@@ -314,18 +315,22 @@ export function createThemeManager(deps: ThemeManagerDependencies) {
     }
   }
 
+  async function downloadThemeArchive(themeId: string) {
+    const result = await bridge.themeExport(themeId)
+    const binary = atob(result.data)
+    const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0))
+    const url = URL.createObjectURL(new Blob([bytes], { type: 'application/zip' }))
+    const link = document.createElement('a')
+    link.href = url
+    link.download = result.file_name
+    link.click()
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+  }
+
   async function exportLocalTheme(themeId: string) {
     themeOperationBusy.value = true
     try {
-      const result = await bridge.themeExport(themeId)
-      const binary = atob(result.data)
-      const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0))
-      const url = URL.createObjectURL(new Blob([bytes], { type: 'application/zip' }))
-      const link = document.createElement('a')
-      link.href = url
-      link.download = result.file_name
-      link.click()
-      window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+      await downloadThemeArchive(themeId)
       showToast(`Архив темы «${themeId}» сохранён`)
     } catch (error) {
       showToast(errorMessage(error))

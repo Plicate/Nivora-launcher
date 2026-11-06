@@ -103,13 +103,27 @@ func getJSON(client *http.Client, target string) (any, error) {
 		return nil, fmt.Errorf("Каталог Modrinth вернул некорректный ответ")
 	}
 	if response.StatusCode >= 400 {
+		if response.StatusCode == http.StatusNotFound && isHTMLResponse(response.Header.Get("Content-Type"), body) {
+			return nil, fmt.Errorf("API каталога вернул HTML-страницу 404 вместо JSON. Проверьте, что задан HTTPS-адрес API, а не обычный сайт или панель хостинга")
+		}
 		return nil, fmt.Errorf("Каталог Modrinth ответил ошибкой %d", response.StatusCode)
 	}
 	var value any
 	if err := json.Unmarshal(body, &value); err != nil {
+		if isHTMLResponse(response.Header.Get("Content-Type"), body) {
+			return nil, fmt.Errorf("API каталога вернул HTML вместо JSON. Проверьте базовый адрес совместимого API и маршрут /search")
+		}
 		return nil, fmt.Errorf("Каталог Modrinth вернул некорректный JSON")
 	}
 	return value, nil
+}
+
+func isHTMLResponse(contentType string, body []byte) bool {
+	if strings.Contains(strings.ToLower(contentType), "text/html") {
+		return true
+	}
+	prefix := strings.ToLower(strings.TrimSpace(string(body[:min(len(body), 512)])))
+	return strings.HasPrefix(prefix, "<!doctype html") || strings.HasPrefix(prefix, "<html")
 }
 
 func requestURLHost(target string) string {

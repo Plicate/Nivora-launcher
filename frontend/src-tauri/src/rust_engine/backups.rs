@@ -36,48 +36,18 @@ pub(crate) fn timestamp() -> String {
     }
 }
 
-#[cfg(unix)]
 fn local_datetime(seconds: i64) -> Option<(i64, u32, u32, u32, u32, u32)> {
-    unsafe {
-        let mut tm: libc::tm = std::mem::zeroed();
-        if libc::localtime_r(&seconds, &mut tm).is_null() {
-            return None;
-        }
-        Some((tm.tm_year as i64 + 1900, tm.tm_mon as u32 + 1, tm.tm_mday as u32, tm.tm_hour as u32, tm.tm_min as u32, tm.tm_sec as u32))
-    }
-}
+    use chrono::{Datelike, Local, TimeZone, Timelike};
 
-#[cfg(windows)]
-fn local_datetime(seconds: i64) -> Option<(i64, u32, u32, u32, u32, u32)> {
-    use windows_sys::Win32::System::SystemServices::TIME_ZONE_ID_DAYLIGHT;
-    use windows_sys::Win32::System::Time::{GetTimeZoneInformation, TIME_ZONE_INFORMATION};
-
-    let bias_minutes: i64 = unsafe {
-        let mut info: TIME_ZONE_INFORMATION = std::mem::zeroed();
-        let status = GetTimeZoneInformation(&mut info);
-        // смещение UTC относительно местного времени; учитываем летнее время
-        let extra = if status == TIME_ZONE_ID_DAYLIGHT { info.DaylightBias } else { info.StandardBias };
-        (info.Bias + extra) as i64
-    };
-    let local = seconds - bias_minutes * 60;
-    let days = local.div_euclid(86_400);
-    let rest = local.rem_euclid(86_400);
-    let (year, month, day) = civil_from_days(days);
-    Some((year, month, day, (rest / 3600) as u32, ((rest % 3600) / 60) as u32, (rest % 60) as u32))
-}
-
-#[cfg(windows)]
-fn civil_from_days(days: i64) -> (i64, u32, u32) {
-    let z = days + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = (z - era * 146_097) as u64;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let year = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    (if month <= 2 { year + 1 } else { year }, month, day)
+    let local = Local.timestamp_opt(seconds, 0).single()?;
+    Some((
+        local.year() as i64,
+        local.month(),
+        local.day(),
+        local.hour(),
+        local.minute(),
+        local.second(),
+    ))
 }
 
 struct Instance {
