@@ -103,6 +103,94 @@ fn overlay_attempt_log(entry: Option<String>) -> Result<Value, String> {
     Ok(serde_json::json!({ "path": path.to_string_lossy(), "tail": tail }))
 }
 
+/// Резервный канал для API Plicate: веб-окружение может заблокировать запрос
+/// (CSP, CORS, особенности WebKitGTK), поэтому при сбое фронтенд повторяет его здесь.
+#[tauri::command]
+fn plicate_http_fetch(payload: serde_json::Value) -> Result<serde_json::Value, String> {
+    use std::io::Read as _;
+
+    let value_string = |object: &serde_json::Value, key: &str| -> String {
+        object.get(key).and_then(|item| item.as_str()).unwrap_or_default().to_string()
+    };
+    let url = value_string(&payload, "url");
+    if url.is_empty() {
+        return Err("Прокси Plicate API: не указан адрес запроса.".to_owned());
+    }
+    let parsed = url::Url::parse(&url).map_err(|error| format!("Прокси Plicate API: некорректный адрес: {error}"))?;
+    if parsed.scheme() != "https" {
+        let local = matches!(parsed.host_str(), Some("localhost") | Some("127.0.0.1") | Some("[::1]"));
+        if !(parsed.scheme() == "http" && local) {
+            return Err("Прокси Plicate API: разрешены только HTTPS-адреса (кроме локальной разработки).".to_owned());
+        }
+    }
+    let method = {
+        let raw = value_string(&payload, "method");
+        let normalized = if raw.is_empty() { "GET".to_owned() } else { raw.to_ascii_uppercase() };
+        match normalized.as_str() {
+            "GET" | "POST" | "HEAD" => normalized,
+            other => return Err(format!("Прокси Plicate API: метод {other} не поддерживается.")),
+        }
+    };
+    let agent = ureq::AgentBuilder::new()
+        .timeout(std::time::Duration::from_secs(30))
+        .build();
+    let mut request = match method.as_str() {
+        "GET" => agent.get(&url),
+        "POST" => agent.post(&url),
+        _ => agent.head(&url),
+    };
+    request = request.set("User-Agent", concat!("NivoraLauncher/", env!("CARGO_PKG_VERSION")));
+    if let Some(headers) = payload.get("headers").and_then(|item| item.as_object()) {
+        for (key, value) in headers {
+            let name = key.to_ascii_lowercase();
+            if matches!(name.as_str(), "accept" | "content-type" | "user-agent") {
+                if let Some(text) = value.as_str() {
+                    request = request.set(key, text);
+                }
+            }
+        }
+    }
+    let response = match if method == "POST" {
+        let body = payload.get("body").and_then(|item| item.as_str()).unwrap_or("{}").to_owned();
+        request.send_string(&body)
+    } else {
+        request.call()
+    } {
+        Ok(response) => response,
+        Err(ureq::Error::Status(_status, response)) => response,
+        Err(error) => return Err(format!("Сервер Plicate недоступен: {error}")),
+    };
+    let status = response.status();
+    let content_type = response.header("content-type").unwrap_or_default().to_owned();
+    let mut body = Vec::new();
+    response
+        .into_reader()
+        .take(96 * 1024 * 1024)
+        .read_to_end(&mut body)
+        .map_err(|error| format!("Не удалось прочитать ответ Plicate API: {error}"))?;
+    Ok(serde_json::json!({
+        "status": status,
+        "contentType": content_type,
+        "bodyBase64": base64_encode_std(&body),
+    }))
+}
+
+fn base64_encode_std(data: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut result = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let byte0 = chunk[0] as u32;
+        let byte1 = *chunk.get(1).unwrap_or(&0) as u32;
+        let byte2 = *chunk.get(2).unwrap_or(&0) as u32;
+        let triple = (byte0 << 16) | (byte1 << 8) | byte2;
+        result.push(ALPHABET[(triple >> 18) as usize & 63] as char);
+        result.push(ALPHABET[(triple >> 12) as usize & 63] as char);
+        result.push(if chunk.len() > 1 { ALPHABET[(triple >> 6) as usize & 63] as char } else { '=' });
+        result.push(if chunk.len() > 2 { ALPHABET[triple as usize & 63] as char } else { '=' });
+    }
+    result
+}
+
 #[tauri::command]
 async fn backend_call(app: AppHandle, request: Value) -> Result<Value, String> {
     tauri::async_runtime::spawn_blocking(move || backend_call_sync(app, request))
@@ -326,6 +414,16 @@ fn register_nivora_protocol(executable: &str) {
 
 pub fn run() {
     install_panic_hook();
+    // На части Linux-систем (старый Mesa, LMDE, Debian) WebKitGTK отдаёт пустое серое окно:
+    // DMA-BUF рендерер падает на таких драйверах, отключаем его, если пользователь не задал
+    // переменную сам. Должно выполниться до создания первого WebView.
+    #[cfg(target_os = "linux")]
+    {
+        if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+            std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+            startup_trace("linux: WEBKIT_DISABLE_DMABUF_RENDERER=1 (обход пустого окна WebKitGTK)");
+        }
+    }
     #[cfg(windows)]
     install_native_crash_filter();
     let executable = std::env::current_exe()
@@ -396,7 +494,7 @@ pub fn run() {
             }
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![backend_call, cancel_operation, overlay_attempt_log])
+        .invoke_handler(tauri::generate_handler![backend_call, cancel_operation, overlay_attempt_log, plicate_http_fetch])
         .build(tauri::generate_context!())
     {
         Ok(app) => app,

@@ -50,6 +50,7 @@ import { DEFAULT_BUTTON_CUSTOMIZATION, buttonCustomizationRole, normalizeButtonC
 import type { ButtonCustomizationTarget } from './services/buttonCustomization'
 import { createSettingsWorkflow } from './services/settingsWorkflow'
 import { createPlicateRatesApi, DEFAULT_PLICATE_API_BASE_URL, type PlicateJoinTarget } from './services/plicateRates'
+import { plicateFetch } from './services/tauriFetch'
 import { createPlicateStoreApi } from './services/plicateStore'
 import { plicateServicesEnabled } from './services/plicateServices'
 const browserPreview = !inTauri()
@@ -346,8 +347,8 @@ const initialState: AppState = {
 
 const state = reactive<AppState>(initialState)
 const PLICATE_API_BASE_URL = import.meta.env.VITE_PLICATE_API_BASE_URL || DEFAULT_PLICATE_API_BASE_URL
-const plicateStoreApi = PLICATE_API_BASE_URL ? createPlicateStoreApi(PLICATE_API_BASE_URL) : undefined
-const plicateRatesApi = PLICATE_API_BASE_URL ? createPlicateRatesApi(PLICATE_API_BASE_URL) : undefined
+const plicateStoreApi = PLICATE_API_BASE_URL ? createPlicateStoreApi(PLICATE_API_BASE_URL, plicateFetch) : undefined
+const plicateRatesApi = PLICATE_API_BASE_URL ? createPlicateRatesApi(PLICATE_API_BASE_URL, plicateFetch) : undefined
 const currentView = ref<ViewName>('instances')
 
 watch([currentView, plicateServicesEnabled], ([view, enabled]) => {
@@ -3897,7 +3898,7 @@ const settingsPageModel = {
               </section>
 
               <section data-page-view="plugins" class="page-content">
-                <section v-if="activeRuntimeTab" class="panel">
+                <section v-if="activeRuntimeTab" class="panel plugin-tab-panel">
                   <div class="panel-heading">
                     <div><h2>{{ activeRuntimeTab.view.title }}</h2><p>{{ activeRuntimeTab.view.description || `Живая страница плагина ${activeRuntimeTab.pluginName}.` }}</p></div>
                     <button class="button button--outline" type="button" @click="setView('plugins')">К плагинам</button>
@@ -3911,7 +3912,7 @@ const settingsPageModel = {
                     @open-link="(url) => void openPluginLink({ pluginId: activeRuntimeTab!.pluginId, url })"
                   />
                 </section>
-                <section v-else-if="activePluginTab" class="panel">
+                <section v-else-if="activePluginTab" class="panel plugin-tab-panel">
                   <div class="panel-heading">
                     <div><h2>{{ activePluginTab.label }}</h2><p>{{ activePluginTab.description || `Вкладка плагина ${activePluginTab.name}.` }}</p></div>
                     <button class="button button--outline" type="button" @click="setView('plugins')">К плагинам</button>

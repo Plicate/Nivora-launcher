@@ -1,4 +1,5 @@
 import type { InstanceInfo } from '../types'
+import type { PlicateFetcher } from './tauriFetch'
 
 export const DEFAULT_PLICATE_API_BASE_URL = 'https://plicate.art/api'
 
@@ -66,7 +67,7 @@ export function serverAddress(server: Pick<PlicateRatesServer, 'host' | 'port' |
   return server.port === defaultPort ? server.host : `${server.host}:${server.port}`
 }
 
-export function createPlicateRatesApi(baseUrl: string, fetcher: typeof fetch = fetch): PlicateRatesApi {
+export function createPlicateRatesApi(baseUrl: string, fetcher: PlicateFetcher = fetch): PlicateRatesApi {
   const raw = baseUrl.trim().replace(/\/+$/, '')
   if (!raw) throw new Error('Не задан адрес API Plicate Rates.')
   let parsedBase: URL

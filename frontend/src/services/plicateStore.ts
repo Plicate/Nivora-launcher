@@ -1,4 +1,5 @@
 import type { LauncherThemePreset } from '../types'
+import type { PlicateFetcher } from './tauriFetch'
 
 export type PlicateStoreKind = 'theme' | 'plugin'
 
@@ -59,7 +60,7 @@ function bytesToBase64(bytes: Uint8Array): string {
   return btoa(binary)
 }
 
-export function createPlicateStoreApi(baseUrl: string, fetcher: typeof fetch = fetch): PlicateStoreApi {
+export function createPlicateStoreApi(baseUrl: string, fetcher: PlicateFetcher = fetch): PlicateStoreApi {
   const { origin, apiBase } = storeApiBase(baseUrl)
   async function get(url: URL): Promise<Response> {
     const response = await fetcher(url.toString(), { credentials: 'omit', headers: { Accept: 'application/json, application/zip' } })
@@ -120,21 +121,24 @@ export function compareStoreVersions(left: string, right: string): number {
 export function presetStoreItems(themes: LauncherThemePreset[]): PlicateStoreItem[] {
   return themes
     .filter((theme) => theme.source === 'builtin' && theme.id && theme.name)
-    .map((theme) => ({
-      id: theme.id,
-      name: theme.name,
-      author: theme.author || 'Nivora Launcher',
-      description: theme.description || '',
-      version: theme.version || '1.0.0',
-      kind: 'theme' as const,
-      download_url: '',
-      preset: true,
-      background: theme.background,
-      panel: theme.panel,
-      panel_soft: theme.panel_soft,
-      accent: theme.accent,
-      accent_strong: theme.accent_strong,
-    }))
+    .map((theme) => {
+      const item: PlicateStoreItem = {
+        id: theme.id,
+        name: theme.name,
+        author: theme.author || 'Nivora Launcher',
+        description: theme.description || '',
+        version: theme.version || '1.0.0',
+        kind: 'theme',
+        download_url: '',
+        preset: true,
+      }
+      // Палитру добавляем только когда она задана: тесты и потребители каталога
+      // не должны видеть ключи с пустыми значениями.
+      for (const [key, value] of [['background', theme.background], ['panel', theme.panel], ['panel_soft', theme.panel_soft], ['accent', theme.accent], ['accent_strong', theme.accent_strong]] as const) {
+        if (typeof value === 'string' && value) item[key] = value
+      }
+      return item
+    })
 }
 
 export function isPresetStoreItem(item: PlicateStoreItem): boolean {
