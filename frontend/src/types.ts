@@ -1,4 +1,5 @@
 import type { ButtonCustomization, ButtonCustomizationTarget } from './services/buttonCustomization'
+import type { FontAsset } from './services/fonts'
 
 export type ViewName = 'instances' | 'instance-settings' | 'accounts' | 'mods' | 'modpacks' | 'plugins' | 'themes' | 'store' | 'rates' | 'settings'
 export type LoaderId = 'vanilla' | 'fabric' | 'forge' | 'neoforge' | 'quilt'
@@ -204,6 +205,7 @@ export type AutoRepairAction =
   | 'install_dependencies'
   | 'set_memory'
   | 'set_java'
+  | 'install_java'
   | 'reset_jvm_arguments'
   | 'repair_version'
   | 'backup_configs'
@@ -372,6 +374,10 @@ export interface AppearanceSettings {
   widget_visibility: Record<string, boolean>
   color_tokens: Record<string, string>
   button_customization: ButtonCustomization
+  custom_fonts: FontAsset[]
+  surface_opacity: number
+  surface_blur: number
+  shadow_strength: number
 }
 
 /** формат списка экземпляров: обычные строки или плотные плитки */
@@ -386,6 +392,8 @@ export interface RemoteReleaseInfo {
   published_at: string
   notes: string
   assets: Array<{ name: string; url: string }>
+  /** как эта сборка умеет обновляться: tauri, pacman или none */
+  package_channel: string
 }
 
 export interface SkinExportResult {
@@ -395,6 +403,10 @@ export interface SkinExportResult {
 }
 
 export interface SettingsInfo {
+  custom_fonts: unknown[]
+  surface_opacity: number
+  surface_blur: number
+  shadow_strength: number
   sidebar_texture_data: string
   game_dir: string
   java_path: string
@@ -1353,6 +1365,8 @@ export interface InstanceIconBlock {
 }
 
 export interface SelectOption {
+  /** стиль строки в списке (например, шрифт для превью гарнитуры) */
+  style?: Record<string, string>
   value: string
   label: string
   meta?: string
@@ -1516,6 +1530,10 @@ export interface LauncherThemePreset {
   locale?: 'ru' | 'en'
   button_customization?: ThemeButtonCustomization
   radius_tokens?: Record<string, number>
+  font_family?: string
+  surface_opacity?: number
+  surface_blur?: number
+  shadow_strength?: number
   resources?: Record<string, string>
   resource_data?: Record<string, string>
   plugin?: { id: string; name: string; version: string; api_version: '3'; entrypoint: string; sources?: string[] }

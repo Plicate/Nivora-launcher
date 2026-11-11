@@ -646,7 +646,13 @@ function chooseDirectory() {
 
 function isActiveRoot(root: { label: string; path: string }): boolean {
   const normalize = (value: string) => value.replace(/[\\/]+$/, '')
-  return Boolean(currentPath.value) && normalize(currentPath.value).startsWith(normalize(root.path))
+  const current = currentPath.value
+  if (!current) return false
+  // подсвечивается только самый глубокий подходящий корень: «Диск» не горит под «Домом»
+  const matches = (listing.value?.roots || []).filter((candidate) => normalize(current).startsWith(normalize(candidate.path)))
+  if (!matches.length) return false
+  const deepest = matches.reduce((best, candidate) => (normalize(candidate.path).length > normalize(best.path).length ? candidate : best))
+  return deepest === root
 }
 
 // приём файлов из системы

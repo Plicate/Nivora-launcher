@@ -1,6 +1,7 @@
 pub const APP_NAME: &str = "Nivora Launcher";
 // версия должна совпадать с frontend/package.json и Cargo.toml
-pub const APP_VERSION: &str = "2.0.1";
+// версия берётся из Cargo.toml, чтобы не разъезжаться с пакетом и интерфейсом
+pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const BUILD_STAMP: &str = "r42";
 
 pub const GITHUB_RELEASES_API_URL: &str = "https://api.github.com/repositories/1419334247/releases/latest";

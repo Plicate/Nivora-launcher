@@ -7,7 +7,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
 use std::thread::{self, JoinHandle};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::config::ConfigStore;
@@ -20,6 +20,7 @@ pub(crate) struct JavaRuntimeManager {
     download_cache: PathBuf,
     configured_java: String,
     http: Arc<HttpClient>,
+    repair_operation_id: String,
 }
 
 const MAX_JAVA_VERSION_OUTPUT_BYTES: usize = 64 * 1024;
@@ -35,6 +36,7 @@ impl JavaRuntimeManager {
             download_cache: config.paths.download_cache.clone(),
             configured_java: config.str_setting("java_path"),
             http,
+            repair_operation_id: String::new(),
         })
     }
 
@@ -116,7 +118,56 @@ impl JavaRuntimeManager {
         Err("Java не найден. Установите jre-openjdk или разрешите лаунчеру скачать runtime Mojang.".to_owned())
     }
 
+    pub(crate) fn with_repair_progress(mut self, operation_id: &str) -> Self {
+        self.repair_operation_id = operation_id.to_owned();
+        self
+    }
+
+    fn check_repair_cancelled(&self) -> Result<(), String> {
+        if let Some(token) = &self.http.cancellation { token.check()?; }
+        Ok(())
+    }
+
+    fn repair_progress(&self, current: usize, total: usize) {
+        if !self.repair_operation_id.is_empty() && (current == 0 || current == total || current % 5 == 0) {
+            super::events::emit_status_event_extra("java-install-progress", "Установка Java", json!({
+                "operation_id": self.repair_operation_id, "current": current, "total": total
+            }));
+        }
+    }
+
+    pub(crate) fn install_for_repair(&self, required: i64, preferred: Option<&str>) -> Result<(PathBuf, i64), String> {
+        if !(8..=100).contains(&required) {
+            return Err("Не удалось определить подходящую версию Java".to_owned());
+        }
+        self.check_repair_cancelled()?;
+        let platform = runtime_platform()?;
+        let manifest = self.runtime_manifest()?;
+        self.check_repair_cancelled()?;
+        let component = repair_runtime_component_preferred(&manifest, &platform, required, preferred)
+            .ok_or_else(|| format!("Mojang не предлагает Java {required}+ для этой платформы"))?;
+        let path = self.ensure_mojang_runtime(&component)?
+            .ok_or_else(|| format!("Не удалось установить среду Java: {component}"))?;
+        self.check_repair_cancelled()?;
+        let actual = java_version(&path)
+            .ok_or_else(|| "Установленная Java не прошла проверку версии".to_owned())?;
+        if actual < required {
+            return Err(format!("Установлена Java {actual}, но требуется Java {required}+"));
+        }
+        Ok((path, actual))
+    }
+
     fn ensure_mojang_runtime(&self, component: &str) -> Result<Option<PathBuf>, String> {
+        static INSTALL_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let lock = INSTALL_LOCK.get_or_init(|| Mutex::new(()));
+        let _guard = loop {
+            self.check_repair_cancelled()?;
+            match lock.try_lock() {
+                Ok(guard) => break guard,
+                Err(std::sync::TryLockError::WouldBlock) => thread::sleep(Duration::from_millis(100)),
+                Err(_) => return Err("Не удалось заблокировать установку Java".to_owned()),
+            }
+        };
         safe_runtime_component(component, "runtime component")?;
         let platform_key = runtime_platform()?;
         let all_manifest = self.runtime_manifest()?;
@@ -170,9 +221,11 @@ impl JavaRuntimeManager {
         };
         let total_entries = files_map.len();
         let mut processed_files: usize = 0;
+        self.repair_progress(0, total_entries);
         #[cfg(windows)]
         let mut pending_links: Vec<(PathBuf, PathBuf)> = Vec::new();
         for (relative, metadata) in files_map {
+            self.check_repair_cancelled()?;
             // нормализуем слэши и удаляем пустые компоненты пути
             let relative_text = relative.replace('\\', "/");
             let parts: Vec<String> = relative_text
@@ -202,6 +255,7 @@ impl JavaRuntimeManager {
                 fs::create_dir_all(&target)
                     .map_err(|error| format!("Не удалось создать каталог Java runtime: {error}"))?;
                 processed_files += 1;
+                self.repair_progress(processed_files, total_entries);
                 continue;
             }
             if file_type == "link" {
@@ -230,6 +284,7 @@ impl JavaRuntimeManager {
                     std::os::unix::fs::symlink(link_target, &target)
                         .map_err(|error| format!("Не удалось создать ссылку Java runtime: {error}"))?;
                     processed_files += 1;
+                    self.repair_progress(processed_files, total_entries);
                 }
                 #[cfg(windows)]
                 {
@@ -266,6 +321,7 @@ impl JavaRuntimeManager {
                 add_execute_bits(&target)?;
             }
             processed_files += 1;
+            self.repair_progress(processed_files, total_entries);
         }
         #[cfg(windows)]
         if !pending_links.is_empty() {
@@ -277,6 +333,7 @@ impl JavaRuntimeManager {
                 let mut deferred: Vec<(PathBuf, PathBuf)> = Vec::new();
                 let mut progress = false;
                 for (target, source) in &remaining {
+                    self.check_repair_cancelled()?;
                     if !source.is_file() || is_reparse_point(source) {
                         deferred.push((target.clone(), source.clone()));
                         continue;
@@ -292,6 +349,7 @@ impl JavaRuntimeManager {
                     let _ = fs::remove_file(&temporary);
                     copied.map_err(|error| format!("Не удалось скопировать ссылку Java runtime: {error}"))?;
                     processed_files += 1;
+                    self.repair_progress(processed_files, total_entries);
                     progress = true;
                 }
                 if deferred.is_empty() {
@@ -314,6 +372,7 @@ impl JavaRuntimeManager {
                 remaining = deferred;
             }
         }
+        self.check_repair_cancelled()?;
         if java_path.exists()
             && within(&resolve_path(&java_path), &destination_resolved)
             && processed_files == total_entries
@@ -355,6 +414,32 @@ impl JavaRuntimeManager {
         )?;
         Ok(manifest)
     }
+}
+
+fn runtime_major(version: &str) -> Option<i64> {
+    let version = version.strip_prefix("1.").unwrap_or(version);
+    let digits: String = version.chars().take_while(|ch| ch.is_ascii_digit()).collect();
+    digits.parse().ok()
+}
+
+fn repair_runtime_component_preferred(manifest: &Value, platform: &str, required: i64, preferred: Option<&str>) -> Option<String> {
+    preferred.and_then(|name| {
+        let entry = manifest.get(platform)?.get(name)?.as_array()?.first()?;
+        let major = runtime_major(entry.get("version")?.get("name")?.as_str()?)?;
+        (major >= required).then(|| name.to_owned())
+    }).or_else(|| repair_runtime_component(manifest, platform, required))
+}
+
+fn repair_runtime_component(manifest: &Value, platform: &str, required: i64) -> Option<String> {
+    let runtimes = manifest.get(platform)?.as_object()?;
+    // При одинаковой версии предпочитаем обычную среду gamma варианту beta.
+    let components = ["jre-legacy", "java-runtime-alpha", "java-runtime-gamma",
+        "java-runtime-beta", "java-runtime-delta", "java-runtime-epsilon"];
+    components.iter().filter_map(|component| {
+        let entry = runtimes.get(*component)?.as_array()?.first()?;
+        let major = runtime_major(entry.get("version")?.get("name")?.as_str()?)?;
+        (major >= required).then_some((major, *component))
+    }).min_by_key(|(major, _)| *major).map(|(_, component)| component.to_owned())
 }
 
 fn read_cached_runtime_manifest(path: &Path) -> Option<(Value, bool)> {
@@ -844,6 +929,46 @@ fn epoch_seconds() -> f64 {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn repair_component_selects_closest_supported_stable_runtime() {
+        let manifest = json!({"linux": {
+            "jre-legacy": [{"version": {"name": "8u202"}}],
+            "java-runtime-alpha": [{"version": {"name": "16.0.1"}}],
+            "java-runtime-gamma": [{"version": {"name": "17.0.15"}}],
+            "java-runtime-beta": [{"version": {"name": "17.0.15"}}],
+            "java-runtime-gamma-snapshot": [{"version": {"name": "17.0.15"}}],
+            "java-runtime-delta": [{"version": {"name": "21.0.7"}}],
+            "java-runtime-epsilon": [{"version": {"name": "25.0.1"}}]
+        }});
+        assert_eq!(runtime_major("1.8.0_51"), Some(8));
+        assert_eq!(repair_runtime_component_preferred(&manifest, "linux", 17, Some("java-runtime-beta")).as_deref(), Some("java-runtime-beta"));
+        assert_eq!(repair_runtime_component_preferred(&manifest, "linux", 21, Some("java-runtime-beta")).as_deref(), Some("java-runtime-delta"));
+        assert_eq!(repair_runtime_component_preferred(&manifest, "linux", 17, Some("missing")).as_deref(), Some("java-runtime-gamma"));
+        assert_eq!(repair_runtime_component(&manifest, "linux", 8).as_deref(), Some("jre-legacy"));
+        assert_eq!(repair_runtime_component(&manifest, "linux", 17).as_deref(), Some("java-runtime-gamma"));
+        assert_eq!(repair_runtime_component(&manifest, "linux", 18).as_deref(), Some("java-runtime-delta"));
+        assert_eq!(repair_runtime_component(&manifest, "linux", 26), None);
+        assert_eq!(repair_runtime_component(&manifest, "missing", 17), None);
+    }
+
+    #[test]
+    fn cancelled_repair_does_not_start_installation() {
+        let root = temp_root("cancel-repair");
+        let id = format!("repair-cancel-test-{}", std::process::id());
+        let token = Arc::new(super::super::operations::CancellationToken::new(&id));
+        token.cleanup();
+        assert!(super::super::operations::request_cancel(&id));
+        let http = Arc::new(HttpClient::new(2, 1, "", Some(token.clone())).unwrap());
+        let manager = JavaRuntimeManager {
+            runtimes_dir: root.join("runtimes"), download_cache: root.join("cache"),
+            configured_java: String::new(), http, repair_operation_id: id,
+        };
+        assert!(manager.install_for_repair(21, None).unwrap_err().contains("остановлена"));
+        assert!(!root.join("runtimes").exists());
+        token.cleanup();
+        let _ = fs::remove_dir_all(root);
+    }
 
     fn temp_root(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("nivora-runtime-{tag}-{}", std::process::id()));

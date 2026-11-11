@@ -4,6 +4,7 @@ import type { Ref } from 'vue'
 import type { PluginUiTone } from '../../../plugins/api'
 import { confirmDialog } from './dialogs'
 import { bridge } from './bridge'
+import type { RemoteReleaseInfo } from '../types'
 
 export function createLauncherUpdates(deps: {
   updaterBusy: Ref<boolean>
@@ -28,6 +29,25 @@ export function createLauncherUpdates(deps: {
     errorMessage,
   } = deps
   let pendingAppUpdate: any = null
+  let pendingPacmanUpdate: { url: string; signatureUrl: string; version: string } | null = null
+
+  function pacmanPackageAsset(release: RemoteReleaseInfo): { pkg: { name: string; url: string }; sig: { name: string; url: string } } | null {
+    const pkg = release.assets.find((asset) => asset.name.endsWith('.pkg.tar.zst'))
+    if (!pkg) return null
+    const sig = release.assets.find((asset) => asset.name === `${pkg.name}.sig`)
+    return sig ? { pkg, sig } : null
+  }
+
+  function announcePacmanFallback(release: RemoteReleaseInfo) {
+    const asset = release.package_channel === 'pacman' ? pacmanPackageAsset(release) : null
+    if (asset) {
+      pendingPacmanUpdate = { url: asset.pkg.url, signatureUrl: asset.sig.url, version: release.latest_version }
+      updaterStatus.value = `Доступна версия ${release.latest_version}. Пакет обновления установится автоматически через pacman.`
+      return
+    }
+    pendingPacmanUpdate = null
+    updaterStatus.value = `Доступна версия ${release.latest_version}. Для этой сборки нет подписанного пакета самообновления — установщик можно скачать со страницы релизов.`
+  }
 
 function inDesktopTauri(): boolean {
   return typeof window !== 'undefined' && Boolean((window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__)
@@ -37,6 +57,7 @@ async function checkRemoteReleaseFallback(showToastOnNoUpdate = true): Promise<b
   const release = await bridge.checkRemoteRelease()
   if (!release.update_available) {
     pendingAppUpdate = null
+    pendingPacmanUpdate = null
     updaterVersion.value = ''
     updaterNotes.value = ''
     updaterManualUrl.value = ''
@@ -59,11 +80,11 @@ async function checkRemoteReleaseFallback(showToastOnNoUpdate = true): Promise<b
       updaterNotes.value = String(update.body || release.notes || '')
       updaterStatus.value = `Доступна версия ${updaterVersion.value}.`
     } else {
-      updaterStatus.value = `Доступна версия ${release.latest_version}. Для этой сборки нет подписанного пакета самообновления — установщик можно скачать со страницы релизов.`
+      announcePacmanFallback(release)
     }
   } catch {
     // GitHub Releases API remains the source of truth when a signed updater JSON is absent or invalid.
-    updaterStatus.value = `Доступна версия ${release.latest_version}. Для этой сборки нет подписанного пакета самообновления — установщик можно скачать со страницы релизов.`
+    announcePacmanFallback(release)
   }
   if (!alreadyAnnounced) showToast(`Найдена версия ${release.latest_version}`)
   return true
@@ -103,6 +124,31 @@ async function checkLauncherUpdates(showToastOnNoUpdate = true) {
 }
 
 async function installLauncherUpdate() {
+  if (!pendingAppUpdate && pendingPacmanUpdate) {
+    const pacman = pendingPacmanUpdate
+    if (!(await confirmDialog(`Установить обновление ${pacman.version}?`, {
+      title: 'Самообновление Nivora Launcher',
+      detail: 'Лаунчер скачает подписанный пакет обновления и установит его через pacman. Система запросит пароль администратора.',
+      confirmLabel: 'Установить',
+    }))) return
+    updaterBusy.value = true
+    updaterProgressDownloaded.value = 0
+    updaterProgressTotal.value = 0
+    updaterStatus.value = `Загружаю пакет обновления ${pacman.version}…`
+    try {
+      await bridge.installRemoteRelease({ url: pacman.url, signature_url: pacman.signatureUrl, version: pacman.version })
+      updaterStatus.value = 'Обновление установлено. Перезапускаю лаунчер…'
+      showToast('Обновление установлено, перезапуск…')
+      pendingPacmanUpdate = null
+      await relaunch()
+    } catch (error) {
+      updaterStatus.value = errorMessage(error)
+      showToast(errorMessage(error), 'danger')
+    } finally {
+      updaterBusy.value = false
+    }
+    return
+  }
   if (!pendingAppUpdate) {
     if (updaterManualUrl.value) {
       if (!(await confirmDialog(`Открыть страницу загрузки версии ${updaterVersion.value || 'новее текущей'}?`, {

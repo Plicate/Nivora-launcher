@@ -103,47 +103,71 @@ fn overlay_attempt_log(entry: Option<String>) -> Result<Value, String> {
     Ok(serde_json::json!({ "path": path.to_string_lossy(), "tail": tail }))
 }
 
+const PLICATE_API_HOST: &str = "plicate.art";
+const PLICATE_API_PREFIX: &str = "/api/";
+const PLICATE_MAX_REQUEST_BODY: usize = 1024 * 1024;
+const PLICATE_MAX_RESPONSE: u64 = 16 * 1024 * 1024;
+
+/// Проверяет адрес для резервного канала Plicate API.
+/// Разрешены только https://plicate.art/api/... без учётных данных и нестандартного порта.
+/// Для локальной разработки (debug-сборка) дополнительно разрешён http://localhost и 127.0.0.1.
+fn plicate_url_allowed(url: &str) -> Result<url::Url, String> {
+    let parsed = url::Url::parse(url).map_err(|error| format!("Прокси Plicate API: некорректный адрес: {error}"))?;
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("Прокси Plicate API: адрес с учётными данными запрещён.".to_owned());
+    }
+    let host = parsed.host_str().unwrap_or_default().to_ascii_lowercase();
+    let local_dev = cfg!(debug_assertions)
+        && parsed.scheme() == "http"
+        && matches!(host.as_str(), "localhost" | "127.0.0.1");
+    let production = parsed.scheme() == "https" && host == PLICATE_API_HOST && parsed.port().is_none();
+    if !(local_dev || production) {
+        return Err("Прокси Plicate API: разрешены только адреса https://plicate.art/api/.".to_owned());
+    }
+    if !parsed.path().starts_with(PLICATE_API_PREFIX) {
+        return Err("Прокси Plicate API: путь вне /api/ запрещён.".to_owned());
+    }
+    Ok(parsed)
+}
+
 /// Резервный канал для API Plicate: веб-окружение может заблокировать запрос
 /// (CSP, CORS, особенности WebKitGTK), поэтому при сбое фронтенд повторяет его здесь.
+/// Команда не является общим HTTP-клиентом: адрес ограничен API Plicate.
 #[tauri::command]
 fn plicate_http_fetch(payload: serde_json::Value) -> Result<serde_json::Value, String> {
     use std::io::Read as _;
 
-    let value_string = |object: &serde_json::Value, key: &str| -> String {
-        object.get(key).and_then(|item| item.as_str()).unwrap_or_default().to_string()
-    };
-    let url = value_string(&payload, "url");
+    let url = payload.get("url").and_then(|item| item.as_str()).unwrap_or_default().trim().to_owned();
     if url.is_empty() {
         return Err("Прокси Plicate API: не указан адрес запроса.".to_owned());
     }
-    let parsed = url::Url::parse(&url).map_err(|error| format!("Прокси Plicate API: некорректный адрес: {error}"))?;
-    if parsed.scheme() != "https" {
-        let local = matches!(parsed.host_str(), Some("localhost") | Some("127.0.0.1") | Some("[::1]"));
-        if !(parsed.scheme() == "http" && local) {
-            return Err("Прокси Plicate API: разрешены только HTTPS-адреса (кроме локальной разработки).".to_owned());
-        }
-    }
+    let parsed = plicate_url_allowed(&url)?;
     let method = {
-        let raw = value_string(&payload, "method");
+        let raw = payload.get("method").and_then(|item| item.as_str()).unwrap_or_default();
         let normalized = if raw.is_empty() { "GET".to_owned() } else { raw.to_ascii_uppercase() };
         match normalized.as_str() {
             "GET" | "POST" | "HEAD" => normalized,
             other => return Err(format!("Прокси Plicate API: метод {other} не поддерживается.")),
         }
     };
+    let body = payload.get("body").and_then(|item| item.as_str()).unwrap_or("{}").to_owned();
+    if method == "POST" && body.len() > PLICATE_MAX_REQUEST_BODY {
+        return Err("Прокси Plicate API: слишком большое тело запроса.".to_owned());
+    }
     let agent = ureq::AgentBuilder::new()
         .timeout(std::time::Duration::from_secs(30))
+        .redirects(0)
         .build();
     let mut request = match method.as_str() {
-        "GET" => agent.get(&url),
-        "POST" => agent.post(&url),
-        _ => agent.head(&url),
+        "GET" => agent.get(parsed.as_str()),
+        "POST" => agent.post(parsed.as_str()),
+        _ => agent.head(parsed.as_str()),
     };
     request = request.set("User-Agent", concat!("NivoraLauncher/", env!("CARGO_PKG_VERSION")));
     if let Some(headers) = payload.get("headers").and_then(|item| item.as_object()) {
         for (key, value) in headers {
             let name = key.to_ascii_lowercase();
-            if matches!(name.as_str(), "accept" | "content-type" | "user-agent") {
+            if matches!(name.as_str(), "accept" | "content-type") {
                 if let Some(text) = value.as_str() {
                     request = request.set(key, text);
                 }
@@ -151,7 +175,6 @@ fn plicate_http_fetch(payload: serde_json::Value) -> Result<serde_json::Value, S
         }
     }
     let response = match if method == "POST" {
-        let body = payload.get("body").and_then(|item| item.as_str()).unwrap_or("{}").to_owned();
         request.send_string(&body)
     } else {
         request.call()
@@ -162,17 +185,36 @@ fn plicate_http_fetch(payload: serde_json::Value) -> Result<serde_json::Value, S
     };
     let status = response.status();
     let content_type = response.header("content-type").unwrap_or_default().to_owned();
-    let mut body = Vec::new();
+    let mut body_bytes = Vec::new();
     response
         .into_reader()
-        .take(96 * 1024 * 1024)
-        .read_to_end(&mut body)
+        .take(PLICATE_MAX_RESPONSE)
+        .read_to_end(&mut body_bytes)
         .map_err(|error| format!("Не удалось прочитать ответ Plicate API: {error}"))?;
     Ok(serde_json::json!({
         "status": status,
         "contentType": content_type,
-        "bodyBase64": base64_encode_std(&body),
+        "bodyBase64": base64_encode_std(&body_bytes),
     }))
+}
+
+#[cfg(test)]
+mod plicate_proxy_tests {
+    use super::plicate_url_allowed;
+
+    #[test]
+    fn allows_only_plicate_api() {
+        assert!(plicate_url_allowed("https://plicate.art/api/store/catalog").is_ok());
+        assert!(plicate_url_allowed("https://plicate.art/api/health").is_ok());
+        assert!(plicate_url_allowed("https://evil.example/api/health").is_err());
+        assert!(plicate_url_allowed("https://plicate.art.evil.example/api/health").is_err());
+        assert!(plicate_url_allowed("https://plicate.art:8443/api/health").is_err());
+        assert!(plicate_url_allowed("https://user:pass@plicate.art/api/health").is_err());
+        assert!(plicate_url_allowed("https://plicate.art/admin").is_err());
+        assert!(plicate_url_allowed("http://plicate.art/api/health").is_err());
+        assert!(plicate_url_allowed("file:///etc/passwd").is_err());
+        assert!(plicate_url_allowed("http://192.168.1.10/api/health").is_err());
+    }
 }
 
 fn base64_encode_std(data: &[u8]) -> String {

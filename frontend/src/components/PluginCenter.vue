@@ -227,8 +227,9 @@ async function importRevocationData(file: { fileName: string; data: string; size
 
 <style scoped>
 .plugin-import-panel { display: grid; gap: 14px; padding: 20px; }
-.plugin-import-actions { display: flex; flex-wrap: wrap; gap: 9px; }
-.plugin-import-actions .button { white-space: nowrap; }
+.plugin-import-actions { display: flex; flex-wrap: wrap; gap: 9px; min-width: 0; }
+.plugin-import-actions .button { white-space: nowrap; flex: 0 0 auto; }
+@media (max-width: 640px) { .plugin-import-actions .button { white-space: normal; } }
 .plugin-center { display: grid; min-width: 0; gap: 14px; }
 .plugin-library-panel { display: grid; gap: 14px; padding: 20px; }
 .plugin-runtime-panel { display: grid; gap: 14px; padding: 20px; }

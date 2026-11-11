@@ -1,5 +1,6 @@
 import { computed, nextTick, ref, watch, type Ref } from 'vue'
 import { bridge } from './bridge'
+import { fontFamilyStack } from './fonts'
 import { buttonFontStack, cropBackgroundPosition, cropBackgroundSize } from './buttonCustomization'
 import { confirmDialog } from './dialogs'
 import { launcherThemes } from './launcherExtensions'
@@ -135,7 +136,11 @@ export function createSettingsWorkflow(deps: SettingsWorkflowDependencies) {
       manrope: "Manrope, Inter, 'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif",
       mono: "'DM Mono', 'Cascadia Mono', 'Cascadia Code', Consolas, ui-monospace, monospace",
     }
-    return families[settingsDraft.font_family] || families.system
+    const value = settingsDraft.font_family
+    if (value.startsWith('custom:') || value.startsWith('font:') || value.startsWith('theme-font:')) {
+      return fontFamilyStack(value, appearanceDraft.custom_fonts)
+    }
+    return families[value] || families.system
   })
 
   function cloneSettingsValue(value: unknown): unknown {
@@ -293,11 +298,17 @@ export function createSettingsWorkflow(deps: SettingsWorkflowDependencies) {
     return appearanceDraft.animation_settings.page_styles[currentView.value] || appearanceDraft.animation_settings.page_style
   })
   const effectiveAnimationDuration = computed(() => appearanceDraft.animation_settings.page_durations_ms[currentView.value] || appearanceDraft.animation_settings.page_duration_ms)
+  /** цвет поверхности с учётом непрозрачности из студии тем */
+  function surfaceColor(hex: string, opacity: number): string {
+    const alpha = Math.max(20, Math.min(100, Math.round(Number(opacity) || 100)))
+    return alpha >= 100 ? hex : `color-mix(in srgb, ${hex} ${alpha}%, transparent)`
+  }
+
   const appStyle = computed<Record<string, string>>(() => ({
     '--bg': effectiveColorTokens.value.background,
-    '--panel': effectiveColorTokens.value.panel,
-    '--panel-raised': effectiveColorTokens.value.panel_raised,
-    '--panel-soft': effectiveColorTokens.value.panel_soft,
+    '--panel': surfaceColor(effectiveColorTokens.value.panel, appearanceDraft.surface_opacity),
+    '--panel-raised': surfaceColor(effectiveColorTokens.value.panel_raised, appearanceDraft.surface_opacity),
+    '--panel-soft': surfaceColor(effectiveColorTokens.value.panel_soft, appearanceDraft.surface_opacity),
     '--text': effectiveColorTokens.value.text,
     '--muted': effectiveColorTokens.value.muted,
     '--quiet': effectiveColorTokens.value.quiet,
@@ -327,6 +338,9 @@ export function createSettingsWorkflow(deps: SettingsWorkflowDependencies) {
     '--button-width': `${Math.max(120, Math.min(280, appearanceDraft.button_customization.width))}px`,
     '--button-height': `${Math.max(28, Math.min(64, appearanceDraft.button_customization.height))}px`,
     '--button-font-family': buttonFontStack(appearanceDraft.button_customization.font_family),
+    '--surface-alpha-pct': `${Math.max(20, Math.min(100, appearanceDraft.surface_opacity))}%`,
+    '--surface-blur-filter': appearanceDraft.surface_blur > 0 ? `blur(${appearanceDraft.surface_blur}px)` : 'none',
+    '--surface-shadow-scale': String(Math.max(0, Math.min(100, appearanceDraft.shadow_strength)) / 100),
     '--button-font-size': `${Math.max(9, Math.min(20, appearanceDraft.button_customization.font_size))}px`,
     '--button-text-stroke': appearanceDraft.button_customization.outline.enabled
       ? `${Math.max(0, Math.min(3, appearanceDraft.button_customization.outline.width))}px ${appearanceDraft.button_customization.outline.color}`

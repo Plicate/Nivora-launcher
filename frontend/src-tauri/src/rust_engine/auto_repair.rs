@@ -28,6 +28,7 @@ pub(super) use super::turbo;
 
 mod apply;
 mod diagnose;
+mod java_requirement;
 mod scan;
 pub(crate) use scan::{scan_mods, scan_mods_full, wrong_loader, ModEntry};
 
@@ -586,6 +587,16 @@ fn memory_fix(current_kib: i64, target_kib: i64, label: &str) -> Option<Value> {
     }))
 }
 
+fn repair_game_java_major(version: &str) -> i64 {
+    static RELEASE: OnceLock<Regex> = OnceLock::new();
+    let release = RELEASE.get_or_init(|| Regex::new(r"^(?:[ab])?1\.\d+(?:\.\d+)?$").unwrap());
+    if release.is_match(version.trim()) {
+        super::autotune::required_java_major(version.trim())
+    } else {
+        0
+    }
+}
+
 fn java_fixes(required: i64, java_path: &str) -> Vec<Value> {
     let mut fixes: Vec<Value> = Vec::new();
     let mut candidates: Vec<(i64, PathBuf)> = Vec::new();
@@ -608,21 +619,25 @@ fn java_fixes(required: i64, java_path: &str) -> Vec<Value> {
             "params": {"java_path": path.to_string_lossy()},
         }));
     }
+    if (8..=100).contains(&required) {
+        fixes.push(json!({
+            "action": "install_java",
+            "label": format!("Установить Java {required} или новее"),
+            "steps": [
+                format!("Скачать среду Mojang с Java {required} или новее в папку лаунчера."),
+                "Проверить версию и выбрать её только для этого экземпляра. Системная Java не изменится.".to_owned(),
+            ],
+            "params": {"required_major": required},
+        }));
+    }
     if !java_path.is_empty() {
         fixes.push(json!({
             "action": "set_java",
             "label": "Вернуть автоматический выбор Java",
             "steps": [
                 format!("Убрать ручной путь к Java: {java_path}"),
-                "Лаунчер сам подберёт системную Java нужной версии или скачает официальную среду Mojang.".to_owned(),
+                "При следующем запуске лаунчер подберёт среду для версии игры.".to_owned(),
             ],
-            "params": {"java_path": ""},
-        }));
-    } else if candidates.is_empty() && required == 0 {
-        fixes.push(json!({
-            "action": "set_java",
-            "label": "Скачать подходящую Java автоматически",
-            "steps": ["Оставить автоматический выбор Java: при следующем запуске лаунчер скачает официальную среду Mojang для этой версии.".to_owned()],
             "params": {"java_path": ""},
         }));
     }
@@ -1079,6 +1094,8 @@ impl IssueSink {
             return;
         }
         let mut used_ids: BTreeSet<String> = BTreeSet::new();
+        // рекомендуемой может быть только первая починка, которая не снижает защиту песочницы
+        let first_safe = fixes.iter().position(|fix| !weakens_protection(fix));
         let fixes: Vec<Value> = fixes
             .into_iter()
             .enumerate()
@@ -1093,7 +1110,7 @@ impl IssueSink {
                 }
                 used_ids.insert(fix_id.clone());
                 fix["id"] = json!(fix_id);
-                fix["recommended"] = json!(index == 0);
+                fix["recommended"] = json!(Some(index) == first_safe);
                 fix
             })
             .collect();
@@ -1296,6 +1313,15 @@ fn diagnose_account(sink: &mut IssueSink, combined: &str, accounts: &[Value], cu
             "Разрешите сетевую игру в настройках конфиденциальности Xbox (account.xbox.com → Конфиденциальность) или в настройках семьи Microsoft.",
         );
     }
+}
+
+/// Починка, которая ослабляет песочницу (профиль compat или off), никогда не предвыбирается.
+fn weakens_protection(fix: &Value) -> bool {
+    fix.get("action").and_then(Value::as_str) == Some("set_security")
+        && fix
+            .pointer("/params/profile")
+            .and_then(Value::as_str)
+            .is_some_and(|profile| profile == "compat" || profile == "off")
 }
 
 fn security_fix(label: &str, steps: &[String], profile: &str, add: &[String], remove: &[String]) -> Value {
@@ -1595,6 +1621,7 @@ pub(crate) fn build_report(
         effective_memory: launch_settings.get("memory").and_then(Value::as_str).unwrap_or_default().to_owned(),
         loader: info.loader.clone(),
         minecraft_version: info.minecraft_version.clone(),
+        version_id: info.version_id.clone(),
         error: truncate_chars(error, 4000),
         since,
         muted,
@@ -1685,6 +1712,17 @@ pub fn auto_repair_apply(request: &Value) -> Result<Value, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn security_downgrades_are_never_recommended() {
+        let compat = json!({"action": "set_security", "params": {"profile": "compat"}});
+        let off = json!({"action": "set_security", "params": {"profile": "off"}});
+        let narrow = json!({"action": "set_security", "params": {"profile": ""}});
+        assert!(weakens_protection(&compat));
+        assert!(weakens_protection(&off));
+        assert!(!weakens_protection(&narrow));
+        assert!(!weakens_protection(&json!({"action": "disable_mods", "params": {}})));
+    }
+
     use super::*;
     use std::io::Write;
 
@@ -1831,6 +1869,7 @@ mod tests {
             effective_memory: "2048M".to_owned(),
             loader: loader.to_owned(),
             minecraft_version: "1.20.1".to_owned(),
+            version_id: String::new(),
             error: String::new(),
             since: 0.0,
             muted: Vec::new(),
@@ -1848,6 +1887,40 @@ mod tests {
             .iter()
             .map(|issue| issue["id"].as_str().unwrap_or_default().to_owned())
             .collect()
+    }
+
+    #[test]
+    fn java_version_diagnosis_offers_install_for_required_major() {
+        let mut input = diagnose_input(&["Настроенная Java 17 слишком старая для этой версии; требуется Java 21"], "vanilla");
+        input.minecraft_version = "1.21.4".to_owned();
+        let report = diagnose::diagnose(&input);
+        let issue = report["issues"].as_array().unwrap().iter()
+            .find(|issue| issue["id"] == "java_version").unwrap();
+        let install = issue["fixes"].as_array().unwrap().iter()
+            .find(|fix| fix["action"] == "install_java").unwrap();
+        assert_eq!(install["params"]["required_major"], 21);
+    }
+
+    #[test]
+    fn missing_java_uses_minecraft_requirement() {
+        let mut input = diagnose_input(&["Java не найден"], "vanilla");
+        input.minecraft_version = "1.16.5".to_owned();
+        let report = diagnose::diagnose(&input);
+        let issue = report["issues"].as_array().unwrap().iter()
+            .find(|issue| issue["id"] == "java_version").unwrap();
+        let install = issue["fixes"].as_array().unwrap().iter()
+            .find(|fix| fix["action"] == "install_java").unwrap();
+        assert_eq!(install["params"]["required_major"], 8);
+    }
+
+    #[test]
+    fn unknown_java_requirement_is_not_guessed() {
+        let mut input = diagnose_input(&["Java не найден"], "vanilla");
+        input.minecraft_version.clear();
+        let report = diagnose::diagnose(&input);
+        let issue = report["issues"].as_array().unwrap().iter()
+            .find(|issue| issue["id"] == "java_version").unwrap();
+        assert!(!issue["fixes"].as_array().unwrap().iter().any(|fix| fix["action"] == "install_java"));
     }
 
     #[test]

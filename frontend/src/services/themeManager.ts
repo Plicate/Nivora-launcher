@@ -3,6 +3,7 @@ import type { PluginUiTone } from '../../../plugins/api'
 import { bridge } from './bridge'
 import type { AnimationSettings, AppState, AppearanceSettings, LauncherThemePreset, ThemeSaveRequest } from '../types'
 import { buttonCustomizationRole, DEFAULT_BUTTON_CUSTOMIZATION, normalizeButtonCustomization, type ButtonCustomizationTarget } from './buttonCustomization'
+import { registerFontFaces, themeFontFamilyId, normalizeFontAssets, isFontAsset } from './fonts'
 
 function stableResourceHash(value: string): string {
   let hash = 0xcbf29ce484222325n
@@ -113,6 +114,26 @@ export function createThemeManager(deps: ThemeManagerDependencies) {
       }
       appearanceDraft.button_customization = button
     }
+    const surfaceOpacity = Number((theme as { surface_opacity?: unknown }).surface_opacity)
+    if (Number.isFinite(surfaceOpacity)) appearanceDraft.surface_opacity = Math.max(20, Math.min(100, Math.round(surfaceOpacity)))
+    const surfaceBlur = Number((theme as { surface_blur?: unknown }).surface_blur)
+    if (Number.isFinite(surfaceBlur)) appearanceDraft.surface_blur = Math.max(0, Math.min(24, Math.round(surfaceBlur)))
+    const shadowStrength = Number((theme as { shadow_strength?: unknown }).shadow_strength)
+    if (Number.isFinite(shadowStrength)) appearanceDraft.shadow_strength = Math.max(0, Math.min(100, Math.round(shadowStrength)))
+    const themeFont = typeof (theme as { font_family?: unknown }).font_family === 'string' ? (theme as { font_family: string }).font_family : ''
+    if (themeFont) {
+      if (themeFont.startsWith('theme-font:')) {
+        const fontId = themeFontFamilyId(themeFont)
+        const raw = theme.resource_data?.['font'] || ''
+        const path = theme.resources?.['font'] || ''
+        const extension = path.split('.').pop()?.toLowerCase() || ''
+        const mime = extension === 'ttf' ? 'font/ttf' : extension === 'otf' ? 'font/otf' : extension === 'woff' ? 'font/woff' : extension === 'woff2' ? 'font/woff2' : ''
+        if (raw && mime) registerFontFaces(`Nivora Font ${fontId}`, `data:${mime};base64,${raw}`)
+        settingsDraft.font_family = themeFont
+      } else if (/^(system|inter|manrope|mono)$/.test(themeFont) || themeFont.startsWith('font:')) {
+        settingsDraft.font_family = themeFont
+      }
+    }
     if (theme.locale === 'ru' || theme.locale === 'en') setLanguageFromSettings(theme.locale)
     showToast(`Тема «${theme.name}» применена`)
     if (!busy.value) void saveSettings()
@@ -152,6 +173,9 @@ export function createThemeManager(deps: ThemeManagerDependencies) {
     } as AnimationSettings
     appearanceDraft.density = 'comfortable'
     appearanceDraft.ui_scale = 100
+    appearanceDraft.surface_opacity = 100
+    appearanceDraft.surface_blur = 0
+    appearanceDraft.shadow_strength = 0
     appearanceDraft.wallpaper_blur = 12
     appearanceDraft.wallpaper_opacity = 34
     appearanceDraft.sidebar_texture_data = ''
@@ -208,8 +232,26 @@ export function createThemeManager(deps: ThemeManagerDependencies) {
       resources[key] = `resources/${safePrefix}.${extension}`
       resourceData[key] = dataUrl.slice(separator + 1)
     }
+    const mimeExtension: Record<string, string> = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'audio/ogg': 'ogg', 'audio/wav': 'wav', 'audio/webm': 'webm', 'audio/mpeg': 'mp3', 'font/ttf': 'ttf', 'font/otf': 'otf', 'font/woff': 'woff', 'font/woff2': 'woff2' }
     registerResource('sidebar', appearanceDraft.sidebar_texture_data || '', 'sidebar')
     for (const key of ['texture', 'icon', 'sound'] as const) registerResource(key, button[`${key}_data`])
+    // шрифт темы: пользовательский файл попадает в resources как font.*
+    const chosenFontFamily = settingsDraft.font_family
+    let themeFontFamily = chosenFontFamily
+    if (chosenFontFamily.startsWith('custom:')) {
+      const fontId = chosenFontFamily.slice('custom:'.length)
+      const font = normalizeFontAssets(appearanceDraft.custom_fonts).find((entry) => isFontAsset(entry) && entry.id === fontId)
+      if (font) {
+        const separator = font.data.indexOf(',')
+        const mime = font.data.slice(5, font.data.indexOf(';'))
+        const extension = mimeExtension[mime] || ''
+        if (separator > 0 && extension) {
+          resources['font'] = `resources/theme-font.${extension}`
+          resourceData['font'] = font.data.slice(separator + 1)
+          themeFontFamily = `theme-font:${fontId}`
+        }
+      }
+    }
     for (const [target, override] of Object.entries(button.overrides)) {
       if (!override || !buttonCustomizationRole(target)) continue
       for (const kind of ['texture', 'icon', 'sound'] as const) {
@@ -219,7 +261,7 @@ export function createThemeManager(deps: ThemeManagerDependencies) {
     }
     const themeOverrides = Object.fromEntries(Object.entries(button.overrides).flatMap(([target, override]) => {
       if (!override || !buttonCustomizationRole(target)) return []
-      const { label, width, height, fill, border, font_family, font_size, outline, texture_fit, crop_enabled, crop } = override
+      const { label, width, height, fill, border, font_family, font_size, outline, texture_fit, crop_enabled, crop, auto_size, hidden } = override as never
       const stored = {
         label,
         width,
@@ -232,6 +274,8 @@ export function createThemeManager(deps: ThemeManagerDependencies) {
         texture_fit,
         crop_enabled,
         crop,
+        auto_size,
+        hidden,
         texture: resources[`${target}-texture`],
         icon: resources[`${target}-icon`],
         sound: resources[`${target}-sound`],
@@ -254,6 +298,10 @@ export function createThemeManager(deps: ThemeManagerDependencies) {
       sidebar_mode: appearanceDraft.sidebar_mode,
       radius_tokens: { ...appearanceDraft.radius_tokens },
       locale: settingsDraft.language === 'en' ? 'en' as const : 'ru' as const,
+      font_family: themeFontFamily,
+      surface_opacity: appearanceDraft.surface_opacity,
+      surface_blur: appearanceDraft.surface_blur,
+      shadow_strength: appearanceDraft.shadow_strength,
       button_customization: {
         width: button.width,
         height: button.height,

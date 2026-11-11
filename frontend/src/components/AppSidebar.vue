@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { plicateServicesEnabled } from '../services/plicateServices'
+import { buttonCustomizationTarget, resolveButtonCustomization } from '../services/buttonCustomization'
 import Icon from './Icon.vue'
 import BrandLogo from './BrandLogo.vue'
 import CustomSelect from './CustomSelect.vue'
@@ -25,6 +26,7 @@ const props = withDefaults(defineProps<{
   accountInitial: string
   accountOptions: SelectOption[]
   buttonLabels?: Record<string, string>
+  buttonCustomization?: { overrides?: Partial<Record<string, { hidden?: boolean }>> }
 }>(), { pinnedGroups: () => [], buttonLabels: () => ({}) })
 
 const emit = defineEmits<{
@@ -45,10 +47,18 @@ const libraryItems: Array<{ view: ViewName; label: string; icon: string }> = [
 ]
 
 const ecosystemItems: Array<{ view: ViewName; label: string; icon: string }> = [
-  { view: 'rates', label: 'Рейтинг серверов', icon: 'globe' },
+  // { view: 'rates', label: 'Рейтинг серверов', icon: 'globe' }, — rates временно скрыт
   { view: 'store', label: 'Маркет Plicate', icon: 'archive' },
 ]
 const visibleEcosystemItems = computed(() => (plicateServicesEnabled.value ? ecosystemItems : []))
+
+/** пункты меню можно скрывать из студии тем; скрытые возвращаются через студию же */
+function navHidden(view: string): boolean {
+  return props.buttonCustomization?.overrides?.[navButtonTarget(view)]?.hidden === true
+}
+const libraryItemsShown = computed(() => libraryItems.filter((item) => !navHidden(item.view)))
+const toolItemsShown = computed(() => toolItems.filter((item) => !navHidden(item.view)))
+const ecosystemItemsShown = computed(() => visibleEcosystemItems.value.filter((item) => !navHidden(item.view)))
 
 const toolItems: Array<{ view: ViewName; label: string; icon: string }> = [
   { view: 'plugins', label: 'Плагины', icon: 'plug' },
@@ -58,6 +68,15 @@ const toolItems: Array<{ view: ViewName; label: string; icon: string }> = [
 function buttonLabel(view: string, fallback: string): string {
   const custom = Array.from(String(props.buttonLabels?.[view] || '').trim()).slice(0, 16).join('')
   return custom || fallback
+}
+
+
+function navButtonTarget(view: string) {
+  return buttonCustomizationTarget('nav-item', view)
+}
+
+function navIconData(view: string): string {
+  return resolveButtonCustomization(props.buttonCustomization, navButtonTarget(view)).icon_data
 }
 
 const groupNames = computed(() => Array.from(new Set([
@@ -91,7 +110,7 @@ const groupFilters = computed(() => [
     <nav class="nav-list" aria-label="Основная навигация">
       <span class="nav-section-label">Библиотека</span>
       <button
-        v-for="item in libraryItems"
+        v-for="item in libraryItemsShown"
         :key="item.view"
         class="nav-item"
         :class="{ 'nav-item--active': current === item.view }"
@@ -100,12 +119,13 @@ const groupFilters = computed(() => [
         v-tooltip="buttonLabel(item.view, item.label)"
         @click="emit('navigate', item.view)"
       >
-        <Icon class="nav-item-icon" :name="item.icon" :size="17" />
+        <img v-if="navIconData(item.view)" class="nav-item-icon nav-item-icon--custom" :src="navIconData(item.view)" alt="" />
+        <Icon v-else class="nav-item-icon" :name="item.icon" :size="17" />
         <span>{{ buttonLabel(item.view, item.label) }}</span>
       </button>
       <span v-if="plicateServicesEnabled" class="nav-section-label nav-section-label--tools">Plicate</span>
       <button
-        v-for="item in visibleEcosystemItems"
+        v-for="item in ecosystemItemsShown"
         :key="item.view"
         class="nav-item"
         :class="{ 'nav-item--active': current === item.view }"
@@ -114,12 +134,13 @@ const groupFilters = computed(() => [
         v-tooltip="buttonLabel(item.view, item.label)"
         @click="emit('navigate', item.view)"
       >
-        <Icon class="nav-item-icon" :name="item.icon" :size="17" />
+        <img v-if="navIconData(item.view)" class="nav-item-icon nav-item-icon--custom" :src="navIconData(item.view)" alt="" />
+        <Icon v-else class="nav-item-icon" :name="item.icon" :size="17" />
         <span>{{ buttonLabel(item.view, item.label) }}</span>
       </button>
       <span class="nav-section-label nav-section-label--tools">Инструменты</span>
       <button
-        v-for="item in toolItems"
+        v-for="item in toolItemsShown"
         :key="item.view"
         class="nav-item"
         :class="{ 'nav-item--active': current === item.view && !(item.view === 'plugins' && activePluginTabId) }"
@@ -128,7 +149,8 @@ const groupFilters = computed(() => [
         v-tooltip="buttonLabel(item.view, item.label)"
         @click="emit('navigate', item.view)"
       >
-        <Icon class="nav-item-icon" :name="item.icon" :size="17" />
+        <img v-if="navIconData(item.view)" class="nav-item-icon nav-item-icon--custom" :src="navIconData(item.view)" alt="" />
+        <Icon v-else class="nav-item-icon" :name="item.icon" :size="17" />
         <span>{{ buttonLabel(item.view, item.label) }}</span>
       </button>
       <span v-if="pluginTabs.length" class="nav-section-label nav-section-label--tools">Вкладки плагинов</span>

@@ -62,6 +62,7 @@ body { font-family: var(--font-family); }
   transition: color .16s ease, background-color .16s ease, transform .16s ease;
 }
 .nav-item-icon { opacity: .85; transition: color .16s ease, opacity .16s ease; }
+.nav-item-icon--custom { width: 17px; height: 17px; border-radius: 4px; object-fit: contain; }
 .nav-item:hover { color: var(--text); background: color-mix(in srgb, var(--text) 5%, transparent); transform: translateX(1px); }
 
 .nav-item--active,
@@ -1162,3 +1163,38 @@ body[data-launcher-animations='off'] .app-shell .icon-button,
 body[data-launcher-animations='off'] .app-shell .instance-row,
 body[data-launcher-animations='off'] .app-shell .instance-tile { transition: none; }
 body[data-launcher-animations='off'] .pin-star--splash svg { animation: none; }
+
+/* Настройки поверхностей из студии тем: размытие и тени */
+.app-shell .card,
+.app-shell .panel,
+.app-shell .modal-card,
+.app-shell .dialog-card,
+.app-shell .workspace-card,
+.app-shell .instance-group-section,
+.app-shell .studio-inspector,
+.app-shell .studio-toolbar,
+.app-shell .studio-rail,
+.app-shell .studio-viewport-bar,
+.app-shell .studio-statusbar {
+  backdrop-filter: var(--surface-blur-filter, none);
+  -webkit-backdrop-filter: var(--surface-blur-filter, none);
+}
+.app-shell .card,
+.app-shell .modal-card,
+.app-shell .dialog-card,
+.app-shell .workspace-card {
+  box-shadow: 0 calc(14px * var(--surface-shadow-scale, 0)) calc(34px * var(--surface-shadow-scale, 0)) rgba(0, 0, 0, calc(0.3 * var(--surface-shadow-scale, 0)));
+}
+/* размер кнопки по содержимому */
+.app-shell[data-button-autosize="true"] .nav-item,
+.app-shell[data-button-autosize="true"] .topbar .button,
+.app-shell[data-button-autosize="true"] .button:not(.icon-button):not(.button--icon) {
+  width: auto;
+  min-width: var(--button-width, 152px);
+}
+.app-shell[data-button-autosize="true"] .nav-item,
+.app-shell[data-button-autosize="true"] .button:not(.icon-button):not(.button--icon) {
+  height: auto;
+  min-height: var(--button-height, 38px);
+  padding-inline: 14px;
+}

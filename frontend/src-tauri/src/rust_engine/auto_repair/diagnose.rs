@@ -10,6 +10,7 @@ pub(crate) struct DiagnoseInput<'a> {
     pub effective_memory: String,
     pub loader: String,
     pub minecraft_version: String,
+    pub version_id: String,
     pub error: String,
     pub since: f64,
     pub muted: Vec<String>,
@@ -557,26 +558,31 @@ pub(crate) fn diagnose(input: &DiagnoseInput) -> Map<String, Value> {
         java_required = java_required.max(first_int(&joined));
     }
     let java_path = settings.get("java_path").and_then(Value::as_str).unwrap_or_default().trim().to_owned();
+    let game_java = input.instance_path
+        .and_then(|path| java_requirement::from_metadata(path, &input.version_id, &input.minecraft_version))
+        .map(|requirement| requirement.major)
+        .unwrap_or_else(|| repair_game_java_major(&input.minecraft_version));
+    let repair_java = java_required.max(game_java);
     if java_required >= 8 || combined.contains("UnsupportedClassVersionError") {
         sink.add(
             "java_version",
             &format!("Игре или модам нужна Java {}, а запуск шёл на более старой.", if java_required > 0 { java_required.to_string() } else { "новее".to_owned() }),
-            java_fixes(java_required, &java_path).into_iter().map(Some).collect(),
+            java_fixes(repair_java, &java_path).into_iter().map(Some).collect(),
             evidence_lines(&combined, &["java", "class file version"]),
             "",
             &format!(
-                "Если подходящей Java нет, установите Java {} (например, Eclipse Temurin) и выберите её в настройках экземпляра.",
-                if java_required > 0 { java_required.to_string() } else { "новее".to_owned() }
+                "Если автоматическая установка недоступна, установите Java {} вручную и выберите её в настройках экземпляра.",
+                if repair_java > 0 { repair_java.to_string() } else { "новее".to_owned() }
             ),
         );
     } else if patterns().java_missing.is_match(&combined) {
         sink.add(
             "java_version",
-            "Лаунчер не нашёл подходящей Java для запуска.",
-            java_fixes(0, &java_path).into_iter().map(Some).collect(),
+            &if repair_java > 0 { format!("Для этой сборки нужна Java {repair_java} или новее. Выберите установленную Java или установите её.") } else { "Лаунчер не нашёл Java и не смог определить нужную версию.".to_owned() },
+            java_fixes(repair_java, &java_path).into_iter().map(Some).collect(),
             evidence_lines(&combined, &["java"]),
             "Java не найдена",
-            "",
+            "Если версия игры не определена, укажите её или установите подходящую Java вручную.",
         );
     }
 

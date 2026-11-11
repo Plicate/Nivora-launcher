@@ -47,6 +47,7 @@ import { nicknameError } from './services/nickname'
 import { createModpackWorkflow } from './services/modpackWorkflow'
 import { createThemeManager } from './services/themeManager'
 import { DEFAULT_BUTTON_CUSTOMIZATION, buttonCustomizationRole, normalizeButtonCustomization, resolveButtonCustomization } from './services/buttonCustomization'
+import { normalizeFontAssets, registerFontAssets } from './services/fonts'
 import type { ButtonCustomizationTarget } from './services/buttonCustomization'
 import { createSettingsWorkflow } from './services/settingsWorkflow'
 import { createPlicateRatesApi, DEFAULT_PLICATE_API_BASE_URL, type PlicateJoinTarget } from './services/plicateRates'
@@ -338,6 +339,10 @@ const initialState: AppState = {
     cloud_include_accounts: false,
     cloud_last_sync: 0,
     cloud_configured: false,
+    custom_fonts: [],
+    surface_opacity: 100,
+    surface_blur: 0,
+    shadow_strength: 0,
   },
    server_cores: [],
    plugin_catalogs: [],
@@ -407,6 +412,8 @@ const {
   unrevokePlugin,
   installPluginArchive,
   uninstallPlugin,
+  startThemePluginPreview,
+  stopThemePluginPreview,
 } = pluginController
 
 async function beforeInstanceLaunch(instance: PluginInstanceRef): Promise<void> {
@@ -692,7 +699,12 @@ const appearanceDraft = reactive<AppearanceSettings>({
   widget_visibility: { 'instances.workspace': true, 'accounts.status': true, 'mods.context': true },
   color_tokens: { ...defaultColorTokens },
   button_customization: normalizeButtonCustomization(DEFAULT_BUTTON_CUSTOMIZATION),
+  custom_fonts: [],
+  surface_opacity: 100,
+  surface_blur: 0,
+  shadow_strength: 0,
 })
+watch(() => appearanceDraft.custom_fonts, (fonts) => { registerFontAssets(fonts) }, { deep: false })
 const activity = reactive<ActivityState>({
   open: false,
   title: 'Рабочая область',
@@ -1944,6 +1956,10 @@ function applyState(next: AppState, preserveAppearance = false) {
        widget_visibility: { ...appearanceDraft.widget_visibility, ...next.settings.widget_visibility },
         color_tokens: migrateDefaultColors(next.settings.color_tokens),
         button_customization: normalizeButtonCustomization(next.settings.button_customization),
+        custom_fonts: normalizeFontAssets(next.settings.custom_fonts),
+        surface_opacity: Number.isFinite(next.settings.surface_opacity) ? Math.max(20, Math.min(100, Math.round(next.settings.surface_opacity))) : 100,
+        surface_blur: Number.isFinite(next.settings.surface_blur) ? Math.max(0, Math.min(24, Math.round(next.settings.surface_blur))) : 0,
+        shadow_strength: Number.isFinite(next.settings.shadow_strength) ? Math.max(0, Math.min(100, Math.round(next.settings.shadow_strength))) : 0,
       })
       wallpaperRenderBlur.value = next.settings.wallpaper_blur
       if (next.settings.color_tokens?.accent) {
@@ -3607,7 +3623,7 @@ const settingsPageModel = {
   />
   </Transition>
   <AutoRepairDialog v-if="!overlayMode" @toast="showToast" @settings="applyAutoRepairSettings" @repaired="refreshBootstrap()" @relaunch="relaunchAfterRepair" @login="loginMicrosoft()" />
-  <div v-if="!overlayMode" ref="appShellRef" class="app-shell" :data-button-icon="String(Boolean(appearanceDraft.button_customization.icon_data))" :data-button-fill="String(appearanceDraft.button_customization.fill)" :data-button-border="String(appearanceDraft.button_customization.border)" @click.capture="playButtonSound">
+  <div v-if="!overlayMode" ref="appShellRef" class="app-shell" :data-button-icon="String(Boolean(appearanceDraft.button_customization.icon_data))" :data-button-fill="String(appearanceDraft.button_customization.fill)" :data-button-border="String(appearanceDraft.button_customization.border)" :data-button-autosize="String(appearanceDraft.button_customization.auto_size)" @click.capture="playButtonSound">
         <div v-if="buildStampMismatch" class="build-mismatch-banner" role="alert">
           <Icon name="info" :size="16" />
           <span>Части лаунчера собраны из разных версий: интерфейс {{ buildStampMismatch.frontend }}, нативное ядро {{ buildStampMismatch.backend }}. При несовпадении версий некоторые экраны (Bedrock, оверлей и другие) могут работать неправильно. Пересоберите приложение целиком: <code>cd frontend &amp;&amp; npm install &amp;&amp; npm run tauri build</code></span>
@@ -3626,6 +3642,7 @@ const settingsPageModel = {
          :width-mode="appearanceDraft.sidebar_width_mode"
          :cloud-configured="settingsDraft.cloud_configured"
          :button-labels="appearanceDraft.button_customization.labels"
+         :button-customization="appearanceDraft.button_customization"
          :plugin-tabs="enabledPluginTabs"
          :active-plugin-tab-id="activePluginTabId"
          :instances="state.instances"
@@ -4000,6 +4017,8 @@ const settingsPageModel = {
                  @import-wallpaper-file="importWallpaperFile"
                  @clear-wallpaper="clearWallpaper"
                  @commit-wallpaper-blur="commitWallpaperBlur"
+                 @start-theme-plugin="void startThemePluginPreview($event.manifest, $event.source)"
+                 @stop-theme-plugin="void stopThemePluginPreview()"
                />
                <ThemeGallery
                  :themes="availableThemes"

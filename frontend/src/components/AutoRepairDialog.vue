@@ -4,6 +4,7 @@ import Icon from './Icon.vue'
 import { bridge } from '../services/bridge'
 import { autoRepairState, closeAutoRepair } from '../services/autoRepair'
 import { useModalFocus } from '../services/modalFocus'
+import { repairErrorSummary } from '../services/repairMessages'
 import type { AutoRepairFix, AutoRepairResult, SettingsInfo } from '../types'
 
 const emit = defineEmits<{
@@ -21,6 +22,9 @@ const phase = ref<Phase>('offer')
 const selection = reactive<Record<string, string>>({})
 const results = ref<AutoRepairResult[]>([])
 const muting = ref(false)
+const activeOperationId = ref('')
+const cancelling = ref(false)
+const progress = ref<{ current: number; total: number } | null>(null)
 const dialogElement = ref<HTMLElement | null>(null)
 
 const report = computed(() => autoRepairState.report)
@@ -49,7 +53,7 @@ watch(report, (value) => {
   results.value = []
   for (const key of Object.keys(selection)) delete selection[key]
   for (const issue of value?.issues ?? []) {
-    selection[issue.id] = issue.fixes.find((fix) => fix.recommended)?.id ?? issue.fixes[0]?.id ?? NO_FIX
+    selection[issue.id] = issue.fixes.find((fix) => fix.recommended)?.id ?? NO_FIX
   }
 })
 
@@ -76,12 +80,21 @@ async function applySelected() {
   const value = report.value
   if (!value || !chosenFixes.value.length || phase.value !== 'offer') return
   phase.value = 'applying'
+  cancelling.value = false
+  progress.value = null
+  const id = bridge.newOperationId()
+  activeOperationId.value = id
+  let unlisten: (() => void) | undefined
   try {
+    unlisten = await bridge.subscribeEvents((event) => {
+      if (event.event === 'java-install-progress' && event.operation_id === id && typeof event.current === 'number' && typeof event.total === 'number' && event.total > 0) {
+        progress.value = { current: event.current, total: event.total }
+      }
+    })
     const chosen = chosenFixes.value
-    const response = await bridge.autoRepairApply(value.instance_name, chosen)
+    const response = await bridge.autoRepairApply(value.instance_name, chosen, id)
     results.value = response.results
-    emit('repaired', value.instance_name)
-    // интерактивный вход Microsoft запускается отдельно в приложении
+    if (response.results.some((item) => item.ok)) emit('repaired', value.instance_name)
     const loginIds = new Set(chosen.filter((fix) => fix.action === 'login_microsoft').map((fix) => fix.id))
     if (response.results.some((item) => item.ok && loginIds.has(item.id))) emit('login')
     const failed = response.results.filter((item) => !item.ok).length
@@ -89,7 +102,20 @@ async function applySelected() {
   } catch (error) {
     results.value = [{ id: 'error', ok: false, message: errorMessage(error) }]
   } finally {
+    unlisten?.()
+    activeOperationId.value = ''
     phase.value = 'done'
+  }
+}
+
+async function cancelRepair() {
+  if (!activeOperationId.value || cancelling.value) return
+  cancelling.value = true
+  try {
+    await bridge.cancelOperation(activeOperationId.value)
+  } catch {
+    cancelling.value = false
+    emit('toast', 'Не удалось остановить починку. Дождитесь её завершения.')
   }
 }
 
@@ -163,9 +189,15 @@ function relaunch() {
                   <small v-if="issue.manual" class="auto-repair-manual"><Icon name="info" :size="12" />{{ issue.manual }}</small>
                 </article>
               </div>
+              <div v-if="phase === 'applying'" class="repair-progress" role="status" aria-live="polite">
+                <span>{{ cancelling ? 'Останавливаем починку…' : progress ? 'Установка Java' : 'Подготовка починки…' }}</span>
+                <template v-if="progress"><progress :value="progress.current" :max="progress.total" /> <small>Обработано: {{ progress.current }} из {{ progress.total }}</small></template>
+                <small>Уже выполненные изменения при отмене сохранятся.</small>
+              </div>
               <small v-if="mutedCount" class="dialog-detail">Скрыто проблем: {{ mutedCount }} — их показ отключён в настройках авто-починки.</small>
               <div class="dialog-actions auto-repair-actions">
                 <button v-if="issues.length && !report.manual" class="button button--quiet auto-repair-mute" type="button" :disabled="muting || phase === 'applying'" :title="`Не предлагать починку для: ${issues.map((issue) => issue.title).join(', ')}`" @click="muteShown">Больше не показывать</button>
+                <button v-if="phase === 'applying'" class="button button--quiet" type="button" :disabled="cancelling" @click="cancelRepair">{{ cancelling ? 'Останавливаем…' : 'Отменить починку' }}</button>
                 <button class="button button--quiet" type="button" :disabled="phase === 'applying'" @click="dismiss">{{ issues.length ? 'Не сейчас' : 'Закрыть' }}</button>
                 <button v-if="issues.length" class="button button--accent" type="button" :disabled="!chosenFixes.length || phase === 'applying'" @click="applySelected">
                   <Icon name="refresh" :size="14" />{{ phase === 'applying' ? 'Чиню…' : chosenFixes.length > 1 ? `Починить (${chosenFixes.length})` : 'Починить' }}
@@ -177,7 +209,7 @@ function relaunch() {
               <ul class="auto-repair-results">
                 <li v-for="item in results" :key="item.id" :class="item.ok ? 'auto-repair-result--ok' : 'auto-repair-result--failed'">
                   <Icon :name="item.ok ? 'check' : 'warning'" :size="14" />
-                  <span><strong>{{ item.id === 'error' ? 'Починка не удалась' : fixTitle(item.id) }}</strong><small>{{ item.message }}</small></span>
+                  <span><strong>{{ item.id === 'error' ? 'Починка не удалась' : fixTitle(item.id) }}</strong><small>{{ item.ok ? item.message : repairErrorSummary(item.message) }}</small><details v-if="!item.ok" class="auto-repair-evidence"><summary>Технические подробности</summary><pre>{{ item.message }}</pre></details></span>
                 </li>
               </ul>
               <div class="dialog-actions">
@@ -209,6 +241,9 @@ function relaunch() {
 .auto-repair-badge { margin-left: 8px; padding: 1px 6px; border-radius: 999px; color: var(--success, #9bac78); background: color-mix(in srgb, var(--success, #9bac78) 16%, transparent); font-size: 10px; font-style: normal; font-weight: 500; }
 .auto-repair-steps { display: grid; gap: 2px; margin: 4px 0 0; padding-left: 16px; color: var(--muted); font-size: 11px; line-height: 1.45; }
 .auto-repair-manual { display: flex; gap: 6px; align-items: flex-start; color: var(--muted); font-size: 11px; line-height: 1.5; }
+.repair-progress { display: grid; gap: 5px; margin-top: 12px; font-size: 12px; }
+.repair-progress progress { width: 100%; accent-color: var(--success, #9bac78); }
+.repair-progress small { color: var(--muted); }
 .auto-repair-actions { flex-wrap: wrap; }
 .auto-repair-mute { margin-right: auto; }
 .auto-repair-results { display: grid; gap: 8px; margin: 16px 0 0; padding: 0; list-style: none; }

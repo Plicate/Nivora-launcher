@@ -48,6 +48,8 @@ export type ButtonCustomization = {
   texture_data: string
   icon_data: string
   sound_data: string
+  auto_size: boolean
+  hidden: boolean
   labels: Record<ButtonLabelKey, string>
   overrides: Partial<Record<ButtonCustomizationTarget, ButtonCustomizationOverride>>
 }
@@ -55,9 +57,10 @@ export type ButtonCustomization = {
 export type ButtonCustomizationOverride = Partial<Omit<ButtonCustomization, 'labels' | 'overrides' | 'outline'>> & {
   outline?: Partial<ButtonCustomization['outline']>
   label?: string
+  hidden?: boolean
 }
 
-const BUTTON_OVERRIDE_FIELDS = ['width', 'height', 'fill', 'border', 'font_family', 'font_size', 'outline', 'texture_fit', 'crop_enabled', 'crop', 'texture', 'icon', 'sound', 'texture_data', 'icon_data', 'sound_data'] as const
+const BUTTON_OVERRIDE_FIELDS = ['width', 'height', 'fill', 'border', 'font_family', 'font_size', 'outline', 'texture_fit', 'crop_enabled', 'crop', 'texture', 'icon', 'sound', 'texture_data', 'icon_data', 'sound_data', 'auto_size', 'hidden'] as const
 
 export const DEFAULT_BUTTON_CUSTOMIZATION: ButtonCustomization = {
   width: 152,
@@ -66,6 +69,7 @@ export const DEFAULT_BUTTON_CUSTOMIZATION: ButtonCustomization = {
   border: true,
   font_family: 'system',
   font_size: 12,
+  hidden: false,
   outline: { enabled: false, width: 1, color: '#111111' },
   texture_fit: 'cover',
   crop_enabled: false,
@@ -76,6 +80,7 @@ export const DEFAULT_BUTTON_CUSTOMIZATION: ButtonCustomization = {
   texture_data: '',
   icon_data: '',
   sound_data: '',
+  auto_size: false,
   labels: { instances: '', accounts: '', mods: '', modpacks: '', themes: '', store: '', rates: '', settings: '' },
   overrides: {},
 }
@@ -118,6 +123,7 @@ function normalizeButtonCustomizationOverrides(value: unknown): ButtonCustomizat
       ) as ButtonCustomizationOverride['outline']
       if (outline && Object.keys(outline).length) override.outline = outline
     }
+    if (entry.hidden === true || entry.hidden === false) override.hidden = entry.hidden === true
     if (Object.prototype.hasOwnProperty.call(entry, 'label')) override.label = boundedLabel(entry.label)
     if (Object.keys(override).length) result[target as ButtonCustomizationTarget] = override
   }
@@ -168,6 +174,7 @@ export function normalizeButtonCustomization(value: unknown): ButtonCustomizatio
     texture_data: safeDataUrl(raw.texture_data, 'image'),
     icon_data: safeDataUrl(raw.icon_data, 'image'),
     sound_data: safeDataUrl(raw.sound_data, 'audio'),
+    auto_size: raw.auto_size === true,
     labels: Object.fromEntries(BUTTON_LABEL_KEYS.map((key) => [key, boundedLabel(rawLabels[key])])) as Record<ButtonLabelKey, string>,
     overrides: normalizeButtonCustomizationOverrides(raw.overrides),
   }

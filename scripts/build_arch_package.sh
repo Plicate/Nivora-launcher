@@ -10,6 +10,11 @@ archive_root="$pkgname"
 pkgver="$(sed -n 's/^pkgver=//p' packaging/arch/PKGBUILD | tr -d '[:space:]')"
 [ -n "$pkgver" ] || { echo "Не удалось прочитать pkgver из packaging/arch/PKGBUILD" >&2; exit 1; }
 
+# ключ подписи самообновления: допускаем и путь к файлу, и содержимое ключа
+if [ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ] && [ -f "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+  TAURI_SIGNING_PRIVATE_KEY="$(cat "$TAURI_SIGNING_PRIVATE_KEY")"
+  export TAURI_SIGNING_PRIVATE_KEY
+fi
 command -v makepkg >/dev/null 2>&1 || { echo "makepkg не найден: установите pacman-package-group/base-devel" >&2; exit 1; }
 
 log() { printf '\033[1;34m==> %s\033[0m\n' "$*"; }
@@ -83,6 +88,28 @@ package_file="$(ls -1t ${pkgname}-*.pkg.tar.zst 2>/dev/null | head -n 1 || true)
 mkdir -p "$OUTPUT_DIR"
 cp -f "$package_file" "$OUTPUT_DIR/"
 log "Пакет готов: $OUTPUT_DIR/$package_file"
+
+# подпись пакета для самообновления: стандартная подпись минисайна,
+# лаунчер проверяет её встроенным ключом перед pacman -U
+if [ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
+  sig_file="$OUTPUT_DIR/$package_file.sig"
+  rm -f "$sig_file"
+  sign_env=()
+  if [ -n "${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}" ]; then
+    sign_env+=(TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$TAURI_SIGNING_PRIVATE_KEY_PASSWORD")
+  fi
+  ( cd "$PROJECT_ROOT/frontend" && env TAURI_SIGNING_PRIVATE_KEY="$TAURI_SIGNING_PRIVATE_KEY" "${sign_env[@]}" \
+      ./node_modules/.bin/tauri signer sign "$OUTPUT_DIR/$package_file" >/dev/null ) \
+    || die "Не удалось подписать пакет ключом самообновления (проверьте TAURI_SIGNING_PRIVATE_KEY и TAURI_SIGNING_PRIVATE_KEY_PASSWORD)."
+  [ -f "$sig_file" ] || die "tauri signer не создал $sig_file"
+  log "Подпись пакета: $sig_file"
+  log "Загрузите в релиз на GitHub ОБА файла: $package_file и $(basename "$sig_file")"
+  log "Без .sig лаунчер откажется ставить пакет автоматически (защита от подмены)."
+  log "Ключ подписи храните отдельно и не добавляйте в git."
+else
+  log "Внимание: TAURI_SIGNING_PRIVATE_KEY не задан — пакет НЕ подписан."
+  log "Самообновление этот релиз поставить не сможет; лаунчер предложит скачать пакет вручную."
+fi
 log "Установка: sudo pacman -U \"$OUTPUT_DIR/$package_file\""
 log "ВНИМАНИЕ: устанавливайте пакет целиком. Ручная замена отдельных файлов"
 log "может рассинхронизировать интерфейс и нативное ядро; лаунчер покажет предупреждение."

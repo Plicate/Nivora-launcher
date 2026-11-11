@@ -235,6 +235,10 @@ const fallbackSettings: SettingsInfo = {
   cloud_include_accounts: false,
   cloud_last_sync: 0,
   cloud_configured: false,
+  custom_fonts: [],
+  surface_opacity: 100,
+  surface_blur: 0,
+  shadow_strength: 0,
 }
 
 const fallbackState: AppState = {
@@ -488,9 +492,9 @@ async function invokeBackend<T>(body: Record<string, unknown>, timeout: number |
   }
 }
 
-async function request<T>(operation: string, payload: Record<string, unknown> = {}, signal?: AbortSignal): Promise<T> {
+async function request<T>(operation: string, payload: Record<string, unknown> = {}, signal?: AbortSignal, requestedOperationId?: string): Promise<T> {
   if (signal?.aborted) throw abortError()
-  const id = operationId()
+  const id = requestedOperationId ?? operationId()
   activeOperationIds.add(id)
   const body = { operation, operation_id: id, ...payload }
   try {
@@ -701,6 +705,9 @@ async function mockRequest<T>(operation: string, payload: Record<string, unknown
   }
   if (operation === 'instance_icon_blocks') return { available: true, blocks: mockIsoBlocks() } as T
   if (operation === 'fs_browse') return mockFsBrowse(payload.path ? String(payload.path) : undefined) as T
+  if (operation === 'fs_fonts') {
+    return { fonts: ['DejaVu Sans', 'Liberation Sans', 'Liberation Serif', 'Liberation Mono', 'Noto Sans', 'Noto Serif', 'Ubuntu', 'Cantarell', 'Roboto', 'Arial', 'Georgia', 'Times New Roman', 'Courier New'] } as T
+  }
   if (operation === 'fs_read_file') {
     const path = String(payload.path || '')
     const data = mockFsData.get(path)
@@ -1049,6 +1056,10 @@ export const bridge = {
   pluginDevVerify: (archive: string) => request<PluginVerifyResult>('plugin_dev_verify', { archive }),
   pluginDevKeypair: (privatePem: string, publicPem: string) => request<PluginKeypairResult>('plugin_dev_keypair', { private_pem: privatePem, public_pem: publicPem }),
   pluginOperationTrace: (pluginId: string, method: string, args: Record<string, unknown>, signal?: AbortSignal, outcome: 'begin' | 'ok' | 'denied' = 'begin', elapsedMs = 0) => request('plugin_api_operation_trace', { plugin_id: pluginId, method, outcome, elapsed_ms: elapsedMs, event: typeof args.event === 'string' ? args.event : '', listener_id: typeof args.listener_id === 'string' ? args.listener_id : '', arguments: Object.fromEntries(Object.keys(args).slice(0, 64).map((key) => [key, '[redacted]'])) }, signal),
+  newOperationId: operationId,
+  cancelOperation: async (id: string): Promise<void> => {
+    if (inTauri()) await invoke('cancel_operation', { operationId: id })
+  },
   cancelActiveOperations: async (): Promise<void> => {
     if (!inTauri()) return
     await Promise.all([...activeOperationIds].map((operation_id) => invoke('cancel_operation', { operationId: operation_id })))
@@ -1085,6 +1096,7 @@ export const bridge = {
   loginMicrosoft: () => request<{ account: AccountInfo; messages: string[] }>('login_microsoft'),
   fsBrowse: (path?: string, options: { showHidden?: boolean } = {}) =>
     request<FileBrowserListing>('fs_browse', { path, show_hidden: options.showHidden || undefined }),
+  fsFonts: () => request<{ fonts: string[] }>('fs_fonts'),
   fsReadFile: (path: string, offset = 0, length?: number) =>
     request<{ size: number; offset: number; length: number; eof: boolean; data: string }>('fs_read_file', { path, offset, length }),
   fsWriteFile: (path: string, data: string) =>
@@ -1379,6 +1391,8 @@ export const bridge = {
   pluginApiOpenExternal: (pluginId: string, url: string, signal?: AbortSignal) => request<{ opened: boolean }>('plugin_api_open_external', { plugin_id: pluginId, url }, signal),
   openExternal: (url: string, signal?: AbortSignal) => request<{ opened: boolean }>('open_external', { url }, signal),
   checkRemoteRelease: (signal?: AbortSignal) => request<RemoteReleaseInfo>('check_remote_release', {}, signal),
+  installRemoteRelease: (payload: { url: string; signature_url: string; version?: string }, signal?: AbortSignal) =>
+    request<{ installed: boolean; version: string }>('install_remote_release', payload, signal),
   pluginApiFilesList: (pluginId: string, scope: 'plugin' | 'instance' | 'launcher-root-readonly', directory = '', instanceName = '', signal?: AbortSignal) =>
     request<{ files: PluginFileInfo[] }>('plugin_api_files_list', { plugin_id: pluginId, scope, directory, instance_name: instanceName }, signal),
   pluginApiFilesRead: (pluginId: string, scope: 'plugin' | 'instance' | 'launcher-root-readonly', path: string, instanceName = '', signal?: AbortSignal) =>
@@ -1470,8 +1484,8 @@ export const bridge = {
   /** статус завершившейся игры: код выхода, хвост лога, разбор краша */
   autoRepairDiagnose: (payload: { instance_name: string; exit_code?: number | null; error?: string; manual?: boolean }) =>
     request<AutoRepairReport>('auto_repair_diagnose', payload),
-  autoRepairApply: (instanceName: string, fixes: AutoRepairFix[]) =>
-    request<{ instance_name: string; results: AutoRepairResult[]; instances: InstanceInfo[] }>('auto_repair_apply', { instance_name: instanceName, fixes }),
+  autoRepairApply: (instanceName: string, fixes: AutoRepairFix[], id?: string) =>
+    request<{ instance_name: string; results: AutoRepairResult[]; instances: InstanceInfo[] }>('auto_repair_apply', { instance_name: instanceName, fixes }, undefined, id),
   autoRepairMute: (kinds: string[], muted = true) =>
     request<{ settings: SettingsInfo }>('auto_repair_mute', { kinds, muted }),
   openFolder: (path?: string) => request<{ opened: boolean }>('open_folder', { path }),

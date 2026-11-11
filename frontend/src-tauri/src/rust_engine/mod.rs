@@ -11,6 +11,7 @@ mod block_icons;
 mod bootstrap;
 mod cloud;
 mod fs_browser;
+mod font_scan;
 mod github_plugins;
 mod graphics;
 mod wallpapers;
@@ -105,6 +106,7 @@ pub const NATIVE_OPS: &[&str] = &[
     "fs_save_text_file",
     "fs_open_file",
     "fs_reveal",
+    "fs_fonts",
     "instance_file_list",
     "instance_file_read",
     "instance_file_write",
@@ -211,6 +213,7 @@ pub const NATIVE_OPS: &[&str] = &[
     "loader_choices",
     "server_core_versions",
     "check_remote_release",
+    "install_remote_release",
     "shader_analyze",
     "global_search",
     "world_import_path",
@@ -392,6 +395,7 @@ pub fn handle(operation: &str, request: &Value) -> Result<Value, String> {
         "fs_save_text_file" => Ok(ok_response(operation, fs_browser::fs_save_text_file(request)?)),
         "fs_open_file" => Ok(ok_response(operation, fs_browser::fs_open_file(request)?)),
         "fs_reveal" => Ok(ok_response(operation, fs_browser::fs_reveal(request)?)),
+        "fs_fonts" => Ok(ok_response(operation, font_scan::font_list(request)?)),
         "instance_file_list" => Ok(ok_response(operation, instance_files::instance_file_list(request)?)),
         "instance_file_read" => Ok(ok_response(operation, instance_files::instance_file_read(request)?)),
         "instance_file_write" => Ok(ok_response(operation, instance_files::instance_file_write(request)?)),
@@ -483,6 +487,7 @@ pub fn handle(operation: &str, request: &Value) -> Result<Value, String> {
         "loader_choices" => Ok(ok_response(operation, loaders::loader_choices(request)?)),
         "server_core_versions" => Ok(ok_response(operation, server::server_core_versions(request)?)),
         "check_remote_release" => Ok(ok_response(operation, release_check::check_remote_release(request)?)),
+        "install_remote_release" => Ok(ok_response(operation, release_check::install_remote_release(request)?)),
         "shader_analyze" => Ok(ok_response(operation, shader_analysis::shader_analyze(request)?)),
         "global_search" => Ok(ok_response(operation, global_search::global_search(request)?)),
         "mods_search" => Ok(ok_response(operation, modcat::mods_search(request)?)),

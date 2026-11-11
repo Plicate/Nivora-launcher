@@ -6,7 +6,9 @@ import Icon from './Icon.vue'
 import NumericStepper from './NumericStepper.vue'
 import ThemeStudioPreview from './ThemeStudioPreview.vue'
 import ThemeButtonSettingsEditor from './ThemeButtonSettingsEditor.vue'
-import { buttonCustomizationRole, normalizeButtonCustomization, resolveButtonCustomization, resolveButtonLabel, safeDataUrl, type ButtonCustomizationTarget, type ButtonLabelKey } from '../services/buttonCustomization'
+import { buttonCustomizationRole, buttonCustomizationTarget, normalizeButtonCustomization, resolveButtonCustomization, resolveButtonLabel, safeDataUrl, type ButtonCustomizationTarget, type ButtonLabelKey } from '../services/buttonCustomization'
+import { normalizeFontAssets, registerFontAssets, getInstalledFontFamilies, fontIdFromName, uniqueFontId, validateFontFile, type FontAsset } from '../services/fonts'
+import { parseThemePluginZip, type ThemePluginPreviewResult } from '../services/themePluginPreview'
 import { pickFile } from '../services/fileBrowser'
 import type { ButtonCustomization } from '../services/buttonCustomization'
 import type { AppearanceSettings, InstanceInfo, SelectOption, ViewName } from '../types'
@@ -39,6 +41,8 @@ const emit = defineEmits<{
   clearWallpaper: []
   commitWallpaperBlur: []
   openPage: [view: ViewName]
+  startThemePlugin: [result: ThemePluginPreviewResult]
+  stopThemePlugin: []
 }>()
 
 const labelOptions: Array<{ key: ButtonLabelKey; label: string }> = [
@@ -48,7 +52,7 @@ const labelOptions: Array<{ key: ButtonLabelKey; label: string }> = [
   { key: 'modpacks', label: 'Модпаки' },
   { key: 'themes', label: 'Студия тем' },
   { key: 'store', label: 'Маркет Plicate' },
-  { key: 'rates', label: 'Рейтинг серверов' },
+  // { key: 'rates', label: 'Рейтинг серверов' }, — rates временно скрыт
   { key: 'settings', label: 'Настройки' },
 ]
 const themeOptions: SelectOption[] = [
@@ -57,12 +61,25 @@ const themeOptions: SelectOption[] = [
   { value: 'light', label: 'Светлая', meta: 'Чистый интерфейс' },
   { value: 'glass', label: 'Glass', meta: 'Полупрозрачные панели' },
 ]
-const fontFamilyOptions: SelectOption[] = [
+const baseFontFamilyOptions: SelectOption[] = [
   { value: 'system', label: 'Системный', meta: 'Шрифт текущей ОС' },
   { value: 'inter', label: 'Inter', meta: 'Нейтральная UI-гарнитура' },
   { value: 'manrope', label: 'Manrope', meta: 'Более мягкие формы' },
   { value: 'mono', label: 'DM Mono', meta: 'Технический моноширинный стиль' },
 ]
+const customFonts = computed<FontAsset[]>(() => normalizeFontAssets(props.appearance.custom_fonts))
+const fontFamilyOptions = computed<SelectOption[]>(() => [
+  ...baseFontFamilyOptions,
+  ...installedFontFamilies.value.map((name) => {
+    const safe = name.replace(/["\\]/g, '')
+    return { value: `font:${name}`, label: name, style: { fontFamily: `"${safe}", system-ui, sans-serif` } }
+  }),
+  ...customFonts.value.map((font) => ({ value: `custom:${font.id}`, label: font.name, meta: 'Загруженный шрифт', style: { fontFamily: `"Nivora Font ${font.id}", system-ui, sans-serif` } })),
+])
+const installedFontFamilies = ref<string[]>([])
+onMounted(async () => {
+  installedFontFamilies.value = await getInstalledFontFamilies()
+})
 const accentPresets = ['#5b8dd9', '#3d6ba8', '#8b653f', '#65764b', '#65747a', '#8c5145', '#756157', '#596f5b']
 const colorTokenOptions: SelectOption[] = [
   { value: 'accent', label: 'Основной акцент', meta: 'Кнопки, selection, focus' },
@@ -143,16 +160,17 @@ const radiusPresets: Array<{ label: string; hint: string; value: Record<string, 
   { label: 'Мягкие', hint: 'Максимально плавные формы', value: { card: 18, button: 20, control: 22, sidebar: 16 } },
 ]
 
-type RailSection = 'general' | 'buttons' | 'colors' | 'shape' | 'wallpaper' | 'navigation' | 'motion' | 'pages'
+type RailSection = 'general' | 'buttons' | 'colors' | 'shape' | 'wallpaper' | 'navigation' | 'motion' | 'pages' | 'plugins'
 const railSections: Array<{ id: RailSection; label: string; icon: string; hint: string }> = [
   { id: 'general', label: 'Тема', icon: 'palette', hint: 'Режим, акцент, шрифт, масштаб' },
   { id: 'buttons', label: 'Кнопки', icon: 'settings', hint: 'Размер, текст, иконка, текстура и звук' },
   { id: 'colors', label: 'Цвета', icon: 'mods', hint: 'Вся палитра лаунчера' },
-  { id: 'shape', label: 'Формы', icon: 'instances', hint: 'Закруглённости и плотность' },
+  { id: 'shape', label: 'Формы', icon: 'instances', hint: 'Закруглённости, плотность, поверхности' },
   { id: 'wallpaper', label: 'Обои', icon: 'image', hint: 'Картинка, размытие, видимость' },
-  { id: 'navigation', label: 'Навигация', icon: 'monitor', hint: 'Сайдбар: положение и режим' },
+  { id: 'navigation', label: 'Навигация', icon: 'monitor', hint: 'Сайдбар: положение, иконки пунктов' },
   { id: 'motion', label: 'Движение', icon: 'activity', hint: 'Анимации страниц и поверхностей' },
   { id: 'pages', label: 'Страницы', icon: 'file', hint: 'Темы и раскладки страниц' },
+  { id: 'plugins', label: 'Плагины для тем', icon: 'mods', hint: 'Живой предпросмотр плагина темы' },
 ]
 const activeSection = ref<RailSection>('general')
 const selectedTarget = ref('')
@@ -198,7 +216,10 @@ function handleEscape() {
 }
 
 onMounted(() => { window.addEventListener('keydown', handleStudioKeydown) })
-onBeforeUnmount(() => { window.removeEventListener('keydown', handleStudioKeydown) })
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', handleStudioKeydown)
+  if (pluginPreviewName.value) emit('stopThemePlugin')
+})
 
 type TargetEditor = {
   label: string
@@ -363,7 +384,16 @@ const statusHint = computed(() => {
 })
 
 const themeLabel = computed(() => themeOptions.find((option) => option.value === props.appearance.theme)?.label || props.appearance.theme)
-const fontLabel = computed(() => fontFamilyOptions.find((option) => option.value === props.fontFamily)?.label || props.fontFamily)
+const fontLabel = computed(() => {
+  const value = props.fontFamily
+  const option = fontFamilyOptions.value.find((entry) => entry.value === value)
+  if (option) return option.label
+  if (value.startsWith('custom:')) {
+    const font = customFonts.value.find((entry) => `custom:${entry.id}` === value)
+    return font ? font.name : 'Загруженный шрифт'
+  }
+  return value || 'Системный'
+})
 const radiusSummary = computed(() => `${props.appearance.radius_tokens.card}/${props.appearance.radius_tokens.button}/${props.appearance.radius_tokens.control}/${props.appearance.radius_tokens.sidebar ?? 0}`)
 
 function setAccentColor(value: string) {
@@ -662,6 +692,128 @@ function clearSidebarTexture() {
   sidebarTextureError.value = ''
 }
 
+const fontError = ref('')
+const MAX_FONTS = 8
+
+async function chooseFontFile() {
+  const file = await pickFile({ accept: '.ttf,.otf,.woff,.woff2', title: 'Загрузка шрифта' })
+  if (!file) return
+  let binary: Uint8Array
+  try {
+    binary = Uint8Array.from(atob(file.data), (char) => char.charCodeAt(0))
+  } catch {
+    fontError.value = 'Не удалось прочитать файл шрифта.'
+    return
+  }
+  const validated = validateFontFile(file.fileName, '', binary)
+  if (!validated) {
+    fontError.value = 'Поддерживаются TTF, OTF, WOFF и WOFF2 до 20 МБ.'
+    return
+  }
+  const current = normalizeFontAssets(props.appearance.custom_fonts)
+  if (current.length >= MAX_FONTS) {
+    fontError.value = 'Максимум 8 загруженных шрифтов. Сначала удалите один.'
+    return
+  }
+  const id = uniqueFontId(fontIdFromName(file.fileName), current)
+  const name = (file.fileName.replace(/\.[^.]+$/, '') || id).slice(0, 64)
+  pushHistory()
+  props.appearance.custom_fonts = [...current, { id, name, data: `data:${validated.mime};base64,${validated.base64}` }] as never
+  registerFontAssets(props.appearance.custom_fonts as FontAsset[])
+  fontError.value = ''
+  emit('update:fontFamily', `custom:${id}`)
+}
+
+function removeFont(id: string) {
+  pushHistory()
+  const current = normalizeFontAssets(props.appearance.custom_fonts)
+  props.appearance.custom_fonts = current.filter((font) => font.id !== id) as never
+  if (props.fontFamily === `custom:${id}`) emit('update:fontFamily', 'system')
+}
+
+/* иконки и скрытие пунктов меню: каждая навигационная кнопка получает собственный override */
+const navIconError = ref('')
+
+function navItemTarget(key: ButtonLabelKey): ButtonCustomizationTarget {
+  return buttonCustomizationTarget('nav-item', key)
+}
+
+function navOverride(key: ButtonLabelKey) {
+  return props.appearance.button_customization.overrides?.[navItemTarget(key)]
+}
+
+function navItemHidden(key: ButtonLabelKey): boolean {
+  return navOverride(key)?.hidden === true
+}
+
+function updateNavOverride(key: ButtonLabelKey, patch: Record<string, unknown>) {
+  pushHistory()
+  const current = normalizeButtonCustomization(props.appearance.button_customization)
+  const target = navItemTarget(key)
+  const overrides = { ...current.overrides }
+  overrides[target] = { ...overrides[target], ...patch } as never
+  props.appearance.button_customization = normalizeButtonCustomization({ ...current, overrides })
+}
+
+async function chooseNavIcon(key: ButtonLabelKey) {
+  const file = await pickFile({ accept: '.png,.jpg,.jpeg,.webp', title: 'Иконка пункта меню' })
+  if (!file) return
+  if (file.size > 15 * 1024 * 1024) {
+    navIconError.value = 'Изображение должно быть не больше 15 МБ.'
+    return
+  }
+  const extension = file.fileName.split('.').pop()?.toLowerCase()
+  const mime = extension === 'png' ? 'image/png' : extension === 'jpg' || extension === 'jpeg' ? 'image/jpeg' : extension === 'webp' ? 'image/webp' : ''
+  const data = mime ? `data:${mime};base64,${file.data}` : ''
+  if (!safeDataUrl(data, 'image')) {
+    navIconError.value = 'Выберите PNG, JPEG или WebP не больше 15 МБ.'
+    return
+  }
+  updateNavOverride(key, { icon_data: data })
+  navIconError.value = ''
+}
+
+function clearNavIcon(key: ButtonLabelKey) {
+  updateNavOverride(key, { icon_data: '' })
+  navIconError.value = ''
+}
+
+function toggleNavHidden(key: ButtonLabelKey, value: boolean) {
+  updateNavOverride(key, { hidden: value })
+}
+
+/* плагин для темы: предпросмотр */
+const pluginBusy = ref(false)
+const pluginError = ref('')
+const pluginPreviewName = ref('')
+const pluginPreviewVersion = ref('')
+
+async function chooseThemePlugin() {
+  if (pluginBusy.value) return
+  const file = await pickFile({ accept: '.zip', title: 'Плагин для темы' })
+  if (!file) return
+  pluginBusy.value = true
+  pluginError.value = ''
+  try {
+    const result = parseThemePluginZip(`data:application/zip;base64,${file.data}`)
+    emit('startThemePlugin', result)
+    pluginPreviewName.value = result.manifest.name
+    pluginPreviewVersion.value = result.manifest.version || ''
+  } catch (error) {
+    pluginError.value = error instanceof Error ? error.message : 'Не удалось прочитать архив плагина.'
+    pluginPreviewName.value = ''
+    pluginPreviewVersion.value = ''
+  } finally {
+    pluginBusy.value = false
+  }
+}
+
+function stopThemePluginPreview() {
+  emit('stopThemePlugin')
+  pluginPreviewName.value = ''
+  pluginPreviewVersion.value = ''
+}
+
 const fontFamilyValue = computed({
   get: () => props.fontFamily,
   set: (value: string) => emit('update:fontFamily', value),
@@ -768,6 +920,7 @@ const saveLabel = computed(() => {
               :resource-prefix="buttonScope === 'specific' ? (buttonCustomizationRole(currentTarget.buttonId) || currentTarget.buttonId) : 'global'"
               :button-label="selectedButtonLabel"
               label-placeholder="Играть"
+              show-hide-option
               @update:settings="updateButtonSettings"
               @update:button-label="updateButtonLabel"
             />
@@ -821,6 +974,18 @@ const saveLabel = computed(() => {
           <template v-else-if="activeSection === 'general'">
             <div class="studio-inspector-field"><div class="field"><span>Основная тема</span><CustomSelect v-model="appearance.theme" :options="themeOptions" /></div></div>
             <div class="studio-inspector-field"><div class="field"><span>Шрифт интерфейса</span><CustomSelect v-model="fontFamilyValue" :options="fontFamilyOptions" /></div></div>
+            <div class="studio-inspector-group">
+              <h4>Шрифты</h4>
+              <div class="wallpaper-controls">
+                <button class="button button--small button--outline" type="button" @click="chooseFontFile">Загрузить шрифт</button>
+              </div>
+              <div v-for="font in customFonts" :key="font.id" class="button-asset-row">
+                <span><strong :style="{ fontFamily: `&quot;Nivora Font ${font.id}&quot;, system-ui, sans-serif` }">{{ font.name }}</strong><small>Загруженный шрифт</small></span>
+                <button class="icon-button" type="button" aria-label="Удалить шрифт" v-tooltip="`Удалить шрифт ${font.name}`" @click="removeFont(font.id)"><Icon name="close" :size="14" /></button>
+              </div>
+              <p v-if="fontError" class="studio-inspector-note studio-inspector-note--error" role="alert">{{ fontError }}</p>
+              <small class="studio-inspector-note">TTF, OTF, WOFF или WOFF2 · до 20 МБ · до 8 файлов</small>
+            </div>
             <div class="studio-inspector-field"><div class="field"><span>Язык интерфейса</span><CustomSelect :model-value="language" :options="languageOptions" @update:model-value="emit('update:language', $event)" /></div></div>
             <p class="studio-inspector-note">При применении темы её язык выбирается автоматически. Здесь можно переключить язык отдельно от темы.</p>
             <div class="studio-inspector-group">
@@ -908,6 +1073,13 @@ const saveLabel = computed(() => {
               <small>{{ item.hint }}</small>
             </label>
             <div class="studio-inspector-field"><div class="field"><span>Плотность</span><CustomSelect v-model="appearance.density" :options="densityOptions" /></div></div>
+            <div class="studio-inspector-group">
+              <h4>Поверхности</h4>
+              <p class="studio-inspector-note">Панели, карточки и окна: прозрачность, размытие фона и сила теней.</p>
+              <label class="field"><span>Непрозрачность панелей <strong>{{ appearance.surface_opacity }}%</strong></span><input v-model.number="appearance.surface_opacity" type="range" min="20" max="100" step="5" /><small>Чем ниже, тем прозрачнее карточки</small></label>
+              <label class="field"><span>Размытие панелей <strong>{{ appearance.surface_blur }} px</strong></span><input v-model.number="appearance.surface_blur" type="range" min="0" max="24" /><small>Мягкое стекло за панелями; 0 выключено</small></label>
+              <label class="field"><span>Сила теней <strong>{{ appearance.shadow_strength }}%</strong></span><input v-model.number="appearance.shadow_strength" type="range" min="0" max="100" step="5" /><small>Мощные тени подходят тёмным темам</small></label>
+            </div>
             <button class="button button--small button--quiet" type="button" @click="resetRadiusTokens"><Icon name="refresh" :size="13" />Сбросить формы</button>
           </template>
 
@@ -936,6 +1108,24 @@ const saveLabel = computed(() => {
               <small class="studio-inspector-note">PNG, JPEG или WebP · до 15 МБ</small>
             </div>
             <label class="workspace-check"><input v-model="appearance.sidebar_floating" type="checkbox" /><span><strong>Плавающий режим</strong><small>Сайдбар не приклеен к краю окна</small></span></label>
+            <div class="studio-inspector-group">
+              <h4>Пункты меню</h4>
+              <p class="studio-inspector-note">Своя иконка для каждого пункта, текст и переключение видимости. Пункт можно вернуть тем же переключателем.</p>
+              <div v-for="item in labelOptions" :key="`nav-item-${item.key}`" class="studio-nav-item-row">
+                <span class="studio-nav-item-icon">
+                  <img v-if="navOverride(item.key)?.icon_data" :src="String(navOverride(item.key)?.icon_data)" alt="" draggable="false" />
+                  <Icon v-else :name="item.key === 'themes' ? 'palette' : item.key === 'mods' ? 'mods' : 'settings'" :size="16" />
+                </span>
+                <span class="studio-nav-item-copy"><strong>{{ item.label }}</strong><small>{{ navItemHidden(item.key) ? 'Скрыт из меню' : 'Показан в меню' }}</small></span>
+                <span class="studio-nav-item-actions">
+                  <button class="button button--small button--outline" type="button" @click="chooseNavIcon(item.key)">{{ navOverride(item.key)?.icon_data ? 'Заменить' : 'Иконка' }}</button>
+                  <button v-if="navOverride(item.key)?.icon_data" class="icon-button" type="button" aria-label="Убрать иконку" @click="clearNavIcon(item.key)"><Icon name="close" :size="14" /></button>
+                  <label class="workspace-check studio-nav-item-toggle"><input type="checkbox" :checked="navItemHidden(item.key)" @change="toggleNavHidden(item.key, ($event.target as HTMLInputElement).checked)" /><span>Скрыть</span></label>
+                </span>
+              </div>
+              <p v-if="navIconError" class="studio-inspector-note studio-inspector-note--error" role="alert">{{ navIconError }}</p>
+              <small class="studio-inspector-note">PNG, JPEG или WebP · до 15 МБ</small>
+            </div>
           </template>
 
           <template v-else-if="activeSection === 'motion'">
@@ -966,6 +1156,22 @@ const saveLabel = computed(() => {
               <label class="workspace-check"><input v-model="appearance.widget_visibility['instances.workspace']" type="checkbox" /><span>Рабочая область экземпляра</span></label>
               <label class="workspace-check"><input v-model="appearance.widget_visibility['accounts.status']" type="checkbox" /><span>Статус аккаунтов</span></label>
               <label class="workspace-check"><input v-model="appearance.widget_visibility['mods.context']" type="checkbox" /><span>Контекст каталога ресурсов</span></label>
+            </div>
+          </template>
+
+          <template v-else-if="activeSection === 'plugins'">
+            <div class="studio-inspector-group">
+              <h4>Плагин для темы</h4>
+              <p class="studio-inspector-note">Архив плагина (api_version 3, только разрешения темы) запускается здесь в живом предпросмотре: он меняет те элементы, которые меняет. Пока плагин запущен, остальные плагины приостановлены, а после выхода из студии предпросмотр останавливается сам.</p>
+              <div v-if="pluginPreviewName" class="button-asset-row">
+                <span><strong>{{ pluginPreviewName }}</strong><small>{{ pluginPreviewVersion ? `Версия ${pluginPreviewVersion} · предпросмотр активен` : 'Предпросмотр активен' }}</small></span>
+                <button class="button button--small button--quiet" type="button" @click="stopThemePluginPreview">Остановить</button>
+              </div>
+              <div class="wallpaper-controls">
+                <button class="button button--small button--outline" type="button" :disabled="pluginBusy" @click="chooseThemePlugin">{{ pluginPreviewName ? 'Заменить плагин' : 'Загрузить плагин (.zip)' }}</button>
+              </div>
+              <p v-if="pluginError" class="studio-inspector-note studio-inspector-note--error" role="alert">{{ pluginError }}</p>
+              <small class="studio-inspector-note">ZIP с plugin.json и входным JS · код до 1 МБ · архив до 30 МБ</small>
             </div>
           </template>
         </div>

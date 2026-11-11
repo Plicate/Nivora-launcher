@@ -12,18 +12,171 @@ fn err(message: &str) -> String {
     format!("Встроенный проводник: {message}")
 }
 
+/// пользовательские каталоги из ~/.config/user-dirs.dirs: локализованные имена
+/// и реальное расположение вместо жёсткого списка
+fn xdg_user_dirs(home: &Path) -> Vec<(String, PathBuf)> {
+    let config_home = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".config"));
+    let file = config_home.join("user-dirs.dirs");
+    let content = match fs::read_to_string(&file) {
+        Ok(value) => value,
+        Err(_) => return Vec::new(),
+    };
+    let mut result = Vec::new();
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else { continue };
+        if !key.trim().ends_with("_DIR") {
+            continue;
+        }
+        let mut value = value.trim();
+        if let Some(inner) = value.strip_prefix('"') {
+            value = inner.strip_suffix('"').unwrap_or(inner);
+        }
+        let value = value.replace("$HOME", &home.to_string_lossy());
+        let path = PathBuf::from(value);
+        if !path.is_absolute() {
+            continue;
+        }
+        let label = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "Папка".to_owned());
+        result.push((label, path));
+    }
+    result
+}
+
+/// монтированные носители из /proc/self/mounts: /media, /run/media и /mnt
+fn mounted_roots() -> Vec<(String, PathBuf)> {
+    let mut result = Vec::new();
+    if cfg!(target_os = "macos") {
+        if let Ok(entries) = fs::read_dir("/Volumes") {
+            for entry in entries.flatten() {
+                if entry.path().is_dir() {
+                    if let Some(name) = entry.path().file_name() {
+                        result.push((name.to_string_lossy().into_owned(), entry.path()));
+                    }
+                }
+            }
+        }
+        return result;
+    }
+    if !cfg!(target_os = "linux") {
+        return result;
+    }
+    let mounts = match fs::read_to_string("/proc/self/mounts") {
+        Ok(value) => value,
+        Err(_) => return result,
+    };
+    for line in mounts.lines() {
+        let mut parts = line.split_whitespace();
+        if parts.next().is_none() {
+            continue;
+        }
+        let Some(mount) = parts.next() else { continue };
+        let mount = decode_mount_escapes(mount);
+        if !(mount.starts_with("/media/") || mount.starts_with("/run/media/") || mount.starts_with("/mnt/")) {
+            continue;
+        }
+        let path = PathBuf::from(&mount);
+        if !path.is_dir() {
+            continue;
+        }
+        if let Some(name) = path.file_name() {
+            result.push((name.to_string_lossy().into_owned(), path));
+        }
+    }
+    result
+}
+
+/// /proc/self/mounts кодирует пробел, табуляцию и слеш в именах как \0NN
+fn decode_mount_escapes(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'\\' && index + 3 < bytes.len() {
+            let code = value.get(index + 1..index + 4).and_then(|chunk| u8::from_str_radix(chunk, 8).ok());
+            if let Some(byte) = code {
+                out.push(byte);
+                index += 4;
+                continue;
+            }
+        }
+        out.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 fn home_dir() -> Option<PathBuf> {
     std::env::var_os("USERPROFILE")
         .or_else(|| std::env::var_os("HOME"))
         .map(PathBuf::from)
 }
 
+fn push_existing(roots: &mut Vec<(String, PathBuf)>, label: &str, path: PathBuf) {
+    if let Ok(canonical) = path.canonicalize() {
+        if canonical.is_dir() && !roots.iter().any(|(_, existing)| *existing == canonical) {
+            roots.push((label.to_owned(), canonical));
+        }
+    }
+}
+
+/// стартовые каталоги проводника: дом, его стандартные папки, диски, корзина
+/// и каталоги лаунчера. Каждый корень должен существовать, дубликаты убираются.
 fn allowed_roots() -> Vec<(String, PathBuf)> {
     let mut roots = Vec::new();
-    if let Some(home) = home_dir() {
-        if let Ok(canonical) = home.canonicalize() {
-            roots.push(("Дом".to_owned(), canonical));
+    let home = home_dir();
+    if let Some(home) = &home {
+        push_existing(&mut roots, "Дом", home.clone());
+        // каталоги пользователя: сначала XDG-конфиг с локализованными именами,
+        // при его отсутствии стандартный набор
+        let user_dirs = xdg_user_dirs(&home);
+        if user_dirs.is_empty() {
+            for (label, name) in [
+                ("Рабочий стол", "Desktop"),
+                ("Загрузки", "Downloads"),
+                ("Документы", "Documents"),
+                ("Изображения", "Pictures"),
+                ("Музыка", "Music"),
+                ("Видео", "Videos"),
+            ] {
+                push_existing(&mut roots, label, home.join(name));
+            }
+        } else {
+            for (label, path) in user_dirs {
+                push_existing(&mut roots, &label, path);
+            }
         }
+        // подключённые носители: /media, /run/media и /mnt на Linux, /Volumes на macOS
+        for (label, path) in mounted_roots() {
+            push_existing(&mut roots, &label, path);
+        }
+        // корзина: XDG-путь на Linux, домашняя корзина на macOS
+        if cfg!(target_os = "linux") {
+            if let Some(data_home) = std::env::var_os("XDG_DATA_HOME") {
+                push_existing(&mut roots, "Корзина", PathBuf::from(data_home).join("Trash/files"));
+            } else {
+                push_existing(&mut roots, "Корзина", home.join(".local/share/Trash/files"));
+            }
+        } else if cfg!(target_os = "macos") {
+            push_existing(&mut roots, "Корзина", home.join(".Trash"));
+        }
+    }
+    // диски: буквы дисков на Windows, корень ФС на Linux и macOS
+    if cfg!(target_os = "windows") {
+        for letter in b'C'..=b'Z' {
+            let drive = format!("{}:\\", letter as char);
+            push_existing(&mut roots, &format!("Диск {}", letter as char), PathBuf::from(drive));
+        }
+    } else if let Ok(canonical) = Path::new("/").canonicalize() {
+        roots.push(("Диск".to_owned(), canonical));
     }
     let engine_roots = super::state::launcher_roots();
     let game_dir = super::state::settings_game_dir(&engine_roots.config_home, &engine_roots.data_home);
@@ -33,7 +186,9 @@ fn allowed_roots() -> Vec<(String, PathBuf)> {
         ("Настройки лаунчера".to_owned(), engine_roots.config_home.clone()),
     ] {
         if let Ok(canonical) = path.canonicalize() {
-            roots.push((label, canonical));
+            if canonical.is_dir() && !roots.iter().any(|(_, existing)| *existing == canonical) {
+                roots.push((label, canonical));
+            }
         }
     }
     roots

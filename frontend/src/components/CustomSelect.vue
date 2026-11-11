@@ -174,7 +174,7 @@ onBeforeUnmount(() => {
       @click="open = !open"
       @keydown="onKeydown"
     >
-      <span class="custom-select-value">
+      <span class="custom-select-value" :style="selected?.style">
         <strong>{{ selected?.label || placeholder }}</strong>
         <small v-if="selected?.meta">{{ selected.meta }}</small>
       </span>
@@ -192,6 +192,7 @@ onBeforeUnmount(() => {
             type="button"
             role="option"
             :aria-selected="option.value === modelValue"
+            :style="option.style"
             @mouseenter="highlightedIndex = index"
             @click="choose(option)"
           >

@@ -1,10 +1,11 @@
 use super::*;
 
-const FIX_ACTIONS: [&str; 12] = [
+const FIX_ACTIONS: [&str; 13] = [
     "disable_mods",
     "install_dependencies",
     "set_memory",
     "set_java",
+    "install_java",
     "reset_jvm_arguments",
     "repair_version",
     "backup_configs",
@@ -181,6 +182,7 @@ fn apply_one(
     info: &super::instances::InstanceInfo,
     action: &str,
     params: &Value,
+    operation_id: &str,
 ) -> Result<String, String> {
     let workspace = super::instance_workspace::InstanceWorkspace::new()?;
     let save = |values: Value| -> Result<(), String> {
@@ -271,6 +273,20 @@ fn apply_one(
                 format!("Java экземпляра: {java_path}")
             })
         }
+        "install_java" => {
+            let required = params.get("required_major").and_then(Value::as_i64)
+                .filter(|major| (8..=100).contains(major))
+                .ok_or_else(|| "Не указана подходящая версия Java".to_owned())?;
+            let metadata = java_requirement::from_metadata(&info.path, &info.version_id, &info.minecraft_version);
+            let game_required = metadata.as_ref().map(|item| item.major).unwrap_or_else(|| repair_game_java_major(&info.minecraft_version));
+            let required = required.max(game_required);
+            let manager = super::runtime::JavaRuntimeManager::new(config, Some(http.clone()))?.with_repair_progress(operation_id);
+            let (path, actual) = manager.install_for_repair(required, metadata.as_ref().and_then(|item| item.component.as_deref()))?;
+            if let Some(token) = &http.cancellation { token.check()?; }
+            let path = path.to_string_lossy().to_string();
+            save(json!({ "java_path": path }))?;
+            Ok(format!("Java {actual} установлена и выбрана для экземпляра: {path}"))
+        }
         "reset_jvm_arguments" => {
             save(json!({ "jvm_arguments": [], "jvm_preset": "none" }))?;
             Ok("Аргументы JVM и пресет сброшены".to_owned())
@@ -346,7 +362,7 @@ fn apply_one(
             Ok(format!("Аккаунт по умолчанию: {label}"))
         }
         "login_microsoft" => {
-            // вход по коду устройства запускается интерфейсом после применения починок (см; autoRepairDialog)
+            // вход по коду устройства запускается интерфейсом после применения починок (см. AutoRepairDialog)
             Ok("Откроется вход Microsoft — подтвердите его в браузере".to_owned())
         }
         "set_security" => {
@@ -414,6 +430,7 @@ fn apply_fixes(
     http: &std::sync::Arc<super::net::HttpClient>,
     info: &super::instances::InstanceInfo,
     fixes: &[Value],
+    operation_id: &str,
 ) -> Result<Vec<Value>, String> {
     if fixes.is_empty() {
         return Err("Не выбрано ни одной починки".to_owned());
@@ -442,11 +459,17 @@ fn apply_fixes(
             .chars()
             .take(120)
             .collect();
+        if let Some(token) = &http.cancellation {
+            if let Err(message) = token.check() {
+                results.push(json!({"id": fix_id, "ok": false, "message": message}));
+                break;
+            }
+        }
         if !FIX_ACTIONS.contains(&action.as_str()) {
             results.push(json!({"id": fix_id, "ok": false, "message": format!("Неизвестная починка: {action}")}));
             continue;
         }
-        match apply_one(config, http, info, &action, &params) {
+        match apply_one(config, http, info, &action, &params, operation_id) {
             Ok(message) => results.push(json!({"id": fix_id, "ok": true, "message": message})),
             Err(message) => results.push(json!({"id": fix_id, "ok": false, "message": message})),
         }
@@ -472,9 +495,12 @@ pub(super) fn auto_repair_apply(request: &Value) -> Result<Value, String> {
     let Some(fixes) = request.get("fixes").and_then(Value::as_array) else {
         return Err("Не выбрано ни одной починки".to_owned());
     };
-    let http = super::net::client_from_settings(config.settings(), "")?;
+    let operation_id = request.get("operation_id").and_then(Value::as_str).unwrap_or_default();
     let _lock = super::server::InstanceLock::acquire(&config.paths.data_home, &info.name)?;
-    let results = apply_fixes(&config, &http, &info, fixes)?;
+    let http = super::net::client_from_settings(config.settings(), operation_id)?;
+    let result = apply_fixes(&config, &http, &info, fixes, operation_id);
+    if let Some(token) = &http.cancellation { token.cleanup(); }
+    let results = result?;
     super::events::emit_status_event("workspace-changed", "Авто-починка применена.");
     let list: Vec<Value> = store.list().iter().map(|item| item.public()).collect();
     Ok(json!({

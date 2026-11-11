@@ -288,6 +288,11 @@ update_asset="${setup_name// /.}"
 if [ "$update_asset" != "$setup_name" ]; then
   mv -f "$OUTPUT_DIR/$setup_name" "$OUTPUT_DIR/$update_asset"
 fi
+# ключ подписи самообновления: допускаем и путь к файлу, и содержимое ключа
+if [ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ] && [ -f "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+  TAURI_SIGNING_PRIVATE_KEY="$(cat "$TAURI_SIGNING_PRIVATE_KEY")"
+  export TAURI_SIGNING_PRIVATE_KEY
+fi
 if [ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
   log "Подписываю установщик для апдейтера и собираю latest.json (тег $RELEASE_TAG)"
   rm -f "$OUTPUT_DIR/$update_asset.sig"

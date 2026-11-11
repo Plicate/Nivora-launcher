@@ -256,40 +256,7 @@ export function createPluginController(deps: PluginControllerDeps) {
             pluginId: plugin.id,
             manifest,
             selectedInstance: () => pluginInstanceRef(),
-            theme: (): PluginThemeContext => {
-              const appearance = deps.appearanceDraft()
-              const currentMode = appearance.theme === 'system'
-                ? (deps.systemDark() ? 'dark' : 'light')
-                : appearance.theme
-              const mode = currentMode === 'glass' ? 'glass' : currentMode === 'light' ? 'light' : 'dark'
-              const base = buildPluginThemeContext(appearance, mode, locale.value, deps.settingsDraft().font_family)
-              const tokens: Record<string, string | number> = { ...base.tokens }
-              const colors: Record<string, string> = { ...base.colors }
-              const contributions = pluginThemeContributions.get(plugin.id)
-              if (contributions) {
-                for (const [registrationId, contribution] of contributions) {
-                  const prefix = `plugin.${plugin.id}.${registrationId}`
-                  if (contribution.name) {
-                    const key = `${prefix}.name`
-                    if (safeThemeKey(key)) tokens[key] = contribution.name.slice(0, 80)
-                  }
-                  for (const [key, value] of Object.entries(contribution.colors || {})) {
-                    const tokenKey = `${prefix}.color.${key}`
-                    const color = safeThemeColor(value)
-                    if (safeThemeKey(tokenKey) && color) {
-                      tokens[tokenKey] = color
-                      colors[tokenKey] = color
-                    }
-                  }
-                  for (const [key, value] of Object.entries(contribution.tokens || {})) {
-                    const tokenKey = `${prefix}.token.${key}`
-                    const safeValue = safeThemeToken(value)
-                    if (safeThemeKey(tokenKey) && safeValue !== undefined) tokens[tokenKey] = safeValue
-                  }
-                }
-              }
-              return Object.freeze({ ...base, tokens: Object.freeze(tokens), colors: Object.freeze(colors) })
-            },
+            theme: (): PluginThemeContext => buildThemeContextFor(plugin.id),
             removeView: (viewId) => removePluginView(plugin.id, viewId),
             subscribe: (event, listenerId) => subscribePluginEvent(plugin.id, listenerId, event),
             unsubscribe: (listenerId) => unsubscribePluginEvent(plugin.id, listenerId),
@@ -628,7 +595,98 @@ export function createPluginController(deps: PluginControllerDeps) {
     runningPluginDigests.clear()
   }
 
+  const previewPluginIds = new Set<string>()
+
+  function buildThemeContextFor(id: string): PluginThemeContext {
+    const appearance = deps.appearanceDraft()
+    const currentMode = appearance.theme === 'system'
+      ? (deps.systemDark() ? 'dark' : 'light')
+      : appearance.theme
+    const mode = currentMode === 'glass' ? 'glass' : currentMode === 'light' ? 'light' : 'dark'
+    const base = buildPluginThemeContext(appearance, mode, locale.value, deps.settingsDraft().font_family)
+    const tokens: Record<string, string | number> = { ...base.tokens }
+    const colors: Record<string, string> = { ...base.colors }
+    const contributions = pluginThemeContributions.get(id)
+    if (contributions) {
+      for (const [registrationId, contribution] of contributions) {
+        const prefix = `plugin.${id}.${registrationId}`
+        if (contribution.name) {
+          const key = `${prefix}.name`
+          if (safeThemeKey(key)) tokens[key] = contribution.name.slice(0, 80)
+        }
+        for (const [key, value] of Object.entries(contribution.colors || {})) {
+          const tokenKey = `${prefix}.color.${key}`
+          const color = safeThemeColor(value)
+          if (safeThemeKey(tokenKey) && color) {
+            tokens[tokenKey] = color
+            colors[tokenKey] = color
+          }
+        }
+        for (const [key, value] of Object.entries(contribution.tokens || {})) {
+          const tokenKey = `${prefix}.token.${key}`
+          const safeValue = safeThemeToken(value)
+          if (safeThemeKey(tokenKey) && safeValue !== undefined) tokens[tokenKey] = safeValue
+        }
+      }
+    }
+    return Object.freeze({ ...base, tokens: Object.freeze(tokens), colors: Object.freeze(colors) })
+  }
+
+  /** предпросмотр плагина для темы: запускается только в студии, при выходе останавливается */
+  async function startThemePluginPreview(manifest: RuntimePluginManifest, source: string) {
+    const pluginId = `preview:${manifest.id}`
+    for (const id of [...previewPluginIds, ...pluginRuntime.runtimeIds()]) {
+      await pluginRuntime.stop(id)
+      clearPluginRuntimeState(id)
+    }
+    previewPluginIds.clear()
+    try {
+      await pluginRuntime.start(pluginId, manifest, source, {
+        hostCall: createPluginHostCall({
+          pluginId,
+          manifest,
+          selectedInstance: () => null,
+          theme: (): PluginThemeContext => buildThemeContextFor(pluginId),
+          removeView: () => false,
+          subscribe: () => {},
+          unsubscribe: () => {},
+          registerCommand: () => {},
+          unregisterCommand: () => {},
+          registerShortcut: () => {},
+          unregisterShortcut: () => {},
+          registerTheme: (id, definition) => registerPluginTheme(pluginId, id, definition),
+          unregisterTheme: (id) => unregisterPluginTheme(pluginId, id),
+          notify: (title, message, tone: PluginUiTone, id) => {
+            const notificationId = id || `${pluginId}-notification-${Date.now()}`
+            deps.showToast(`${title}: ${message}`, tone)
+            return notificationId
+          },
+          dismissNotification: () => false,
+        }),
+        onView: () => {},
+        onError: (error) => deps.showToast(`${manifest.name}: ${error.message}`),
+      })
+      previewPluginIds.add(pluginId)
+    } catch (error) {
+      clearPluginRuntimeState(pluginId)
+      deps.showToast(`${manifest.name}: ${deps.errorMessage(error)}`)
+    }
+  }
+
+  async function stopThemePluginPreview() {
+    const ids = [...previewPluginIds]
+    if (!ids.length) return
+    for (const id of ids) {
+      await pluginRuntime.stop(id)
+      clearPluginRuntimeState(id)
+      previewPluginIds.delete(id)
+    }
+    await reconcilePluginRuntimes()
+  }
+
   return {
+    startThemePluginPreview,
+    stopThemePluginPreview,
     pluginViews,
     githubPluginInstallBusy,
     pluginCommands,

@@ -12,6 +12,7 @@ const props = defineProps<{
   resourcePrefix: string
   buttonLabel?: string
   labelPlaceholder?: string
+  showHideOption?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -126,33 +127,85 @@ function assetBlob(bytes: Uint8Array, mime: AssetMime): Blob {
   return new Blob([buffer], { type: mime })
 }
 
-function validateImage(bytes: Uint8Array, mime: AssetMime): Promise<boolean> {
-  return new Promise((resolve) => {
-    const url = URL.createObjectURL(assetBlob(bytes, mime))
+interface PreparedImage {
+  bytes: Uint8Array
+  mime: AssetMime
+}
+
+function loadImageFromSource(bytes: Uint8Array, mime: AssetMime, source: string, blobSource: boolean): Promise<{ image: HTMLImageElement; revoke: () => void }> {
+  return new Promise((resolve, reject) => {
     const image = new Image()
-    let settled = false
-    const timeout = window.setTimeout(() => finish(false), 10_000)
-    const finish = (valid: boolean) => {
-      if (settled) return
-      settled = true
-      const width = image.naturalWidth
-      const height = image.naturalHeight
-      window.clearTimeout(timeout)
+    const cleanup = () => {
       image.onload = null
       image.onerror = null
       image.src = ''
-      URL.revokeObjectURL(url)
-      resolve(valid && width > 0 && height > 0 && width * height <= MAX_IMAGE_PIXELS)
+      if (blobSource) URL.revokeObjectURL(source)
     }
-    image.onload = () => finish(true)
-    image.onerror = () => finish(false)
-    image.src = url
+    const timeout = window.setTimeout(() => {
+      cleanup()
+      reject(new Error('timeout'))
+    }, 10_000)
+    image.onload = () => {
+      window.clearTimeout(timeout)
+      resolve({ image, revoke: cleanup })
+    }
+    image.onerror = () => {
+      window.clearTimeout(timeout)
+      cleanup()
+      reject(new Error('decode'))
+    }
+    image.src = source
   })
+}
+
+/** в webkit картинка из blob: читается нестабильно, поэтому сначала data URL, blob как запасной вариант */
+function loadImage(bytes: Uint8Array, mime: AssetMime): Promise<{ image: HTMLImageElement; revoke: () => void }> {
+  const blobUrl = URL.createObjectURL(assetBlob(bytes, mime))
+  return loadImageFromSource(bytes, mime, `data:${mime};base64,${encodeBase64(bytes)}`, false)
+    .then((loaded) => {
+      URL.revokeObjectURL(blobUrl)
+      return loaded
+    })
+    .catch(() => loadImageFromSource(bytes, mime, blobUrl, true))
+}
+
+/** вместо отказа уменьшает картинку под лимит пикселей и отдаёт обратно в WebP */
+async function prepareImage(bytes: Uint8Array, mime: AssetMime): Promise<PreparedImage | null> {
+  let loaded: Awaited<ReturnType<typeof loadImage>>
+  try {
+    loaded = await loadImage(bytes, mime)
+  } catch {
+    return null
+  }
+  const { image, revoke } = loaded
+  try {
+    const width = image.naturalWidth
+    const height = image.naturalHeight
+    if (!width || !height) return null
+    const pixels = width * height
+    if (pixels <= MAX_IMAGE_PIXELS) return { bytes, mime }
+    const scale = Math.sqrt(MAX_IMAGE_PIXELS / pixels)
+    const canvas = document.createElement('canvas')
+    canvas.width = Math.max(1, Math.round(width * scale))
+    canvas.height = Math.max(1, Math.round(height * scale))
+    const context = canvas.getContext('2d')
+    if (!context) return null
+    context.imageSmoothingQuality = 'high'
+    context.drawImage(image, 0, 0, canvas.width, canvas.height)
+    const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/webp', 0.92))
+    if (!blob) return null
+    const resized = new Uint8Array(await blob.arrayBuffer())
+    if (!resized.length || resized.length > MAX_ASSET_BYTES) return null
+    const resizedMime: AssetMime = blob.type === 'image/png' ? 'image/png' : 'image/webp'
+    return { bytes: resized, mime: resizedMime }
+  } finally {
+    revoke()
+  }
 }
 
 function validateAudioDuration(bytes: Uint8Array, mime: AssetMime): Promise<number | null> {
   return new Promise((resolve) => {
-    const url = URL.createObjectURL(assetBlob(bytes, mime))
+    const url = `data:${mime};base64,${encodeBase64(bytes)}`
     const audio = new Audio()
     let settled = false
     const finish = (duration: number | null) => {
@@ -211,9 +264,14 @@ async function saveAsset(bytes: Uint8Array, mime: AssetMime, kind: AssetKind) {
       error.value = 'Длительность звука не должна превышать 5 секунд.'
       return
     }
-  } else if (!(await validateImage(bytes, mime))) {
-    error.value = 'Не удалось прочитать изображение или оно слишком большое по разрешению.'
-    return
+  } else {
+    const prepared = await prepareImage(bytes, mime)
+    if (!prepared) {
+      error.value = 'Не удалось прочитать изображение.'
+      return
+    }
+    bytes = prepared.bytes
+    mime = prepared.mime
   }
   const safe = safeDataUrl(`data:${mime};base64,${encodeBase64(bytes)}`, kind === 'sound' ? 'audio' : 'image')
   if (!safe) {
@@ -304,6 +362,8 @@ function clamp(value: number, min: number, max: number): number {
       <label class="field"><span>Высота <strong>{{ settings.height }} px</strong></span><input type="range" min="28" max="64" step="2" :value="settings.height" @input="update('height', Number(($event.target as HTMLInputElement).value))" /></label>
       <label class="workspace-check"><input type="checkbox" :checked="settings.fill" @change="update('fill', ($event.target as HTMLInputElement).checked)" /><span><strong>Заливка</strong><small>Отключите, чтобы оставить прозрачную кнопку</small></span></label>
       <label class="workspace-check"><input type="checkbox" :checked="settings.border" @change="update('border', ($event.target as HTMLInputElement).checked)" /><span><strong>Контур кнопки</strong><small>Показывать границу кнопки</small></span></label>
+      <label class="workspace-check"><input type="checkbox" :checked="settings.auto_size" @change="update('auto_size', ($event.target as HTMLInputElement).checked)" /><span><strong>Размер по содержимому</strong><small>Кнопка сжимается до текста вместо фиксированной ширины</small></span></label>
+      <label v-if="showHideOption" class="workspace-check"><input type="checkbox" :checked="settings.hidden === true" @change="update('hidden', ($event.target as HTMLInputElement).checked)" /><span><strong>Скрыть кнопку</strong><small>Пункт пропадёт из меню; вернуть можно здесь же</small></span></label>
     </section>
 
     <section class="studio-inspector-group">
