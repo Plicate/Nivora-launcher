@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+PROJECT_ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)"
+cd "$PROJECT_ROOT"
+
+pkgname="nivora-launcher"
+archive_root="$pkgname"
+pkgver="$(sed -n 's/^pkgver=//p' packaging/arch/PKGBUILD | tr -d '[:space:]')"
+[ -n "$pkgver" ] || { echo "Не удалось прочитать pkgver из packaging/arch/PKGBUILD" >&2; exit 1; }
+
+# ключ подписи самообновления: допускаем и путь к файлу, и содержимое ключа
+if [ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ] && [ -f "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+  TAURI_SIGNING_PRIVATE_KEY="$(cat "$TAURI_SIGNING_PRIVATE_KEY")"
+  export TAURI_SIGNING_PRIVATE_KEY
+fi
+command -v makepkg >/dev/null 2>&1 || { echo "makepkg не найден: установите pacman-package-group/base-devel" >&2; exit 1; }
+
+log() { printf '\033[1;34m==> %s\033[0m\n' "$*"; }
+die() {
+  printf '\033[1;31mОшибка: %s\033[0m\n' "$*" >&2
+  log_dest="${OUTPUT_DIR:-$PROJECT_ROOT/dist/arch}"
+  if [ -n "${LOG_FILE:-}" ] && [ -f "$LOG_FILE" ]; then
+    mkdir -p "$log_dest"
+    cp "$LOG_FILE" "$log_dest/last-build.log"
+    printf 'Полный лог сборки сохранён: %s\n' "$log_dest/last-build.log" >&2
+  fi
+  exit 1
+}
+
+BUILD_DIR="$(mktemp -d --tmpdir "${pkgname}-build.XXXXXX")"
+LOG_FILE="$BUILD_DIR/makepkg.log"
+trap 'rm -rf "$BUILD_DIR"' EXIT
+STAGE_DIR="$BUILD_DIR/$archive_root"
+OUTPUT_DIR="$PROJECT_ROOT/dist/arch"
+ARCHIVE="$BUILD_DIR/${pkgname}-${pkgver}.tar.gz"
+
+log "Готовлю архив исходников ${pkgname}-${pkgver}.tar.gz"
+mkdir -p "$STAGE_DIR"
+# чистое дерево сборки: без node_modules, target и кэшей
+tar -cf - \
+  --exclude='node_modules' \
+  --exclude='frontend/dist' \
+  --exclude='frontend/src-tauri/target' \
+  --exclude='frontend/src-tauri/resources/backend' \
+  --exclude='__pycache__' \
+  --exclude='.build-windows' \
+  --exclude='dist' \
+  --exclude='.git' \
+  --exclude='.venv' \
+  --exclude='*.pyc' \
+  . | tar -xf - -C "$STAGE_DIR"
+
+tar -czf "$ARCHIVE" -C "$BUILD_DIR" "$archive_root"
+
+log "Проверяю SHA-256 архива"
+archive_sha256="$(sha256sum "$ARCHIVE" | awk '{print $1}')"
+printf '%s  %s\n' "$archive_sha256" "${ARCHIVE##*/}" > "$BUILD_DIR/${pkgname}-${pkgver}.tar.gz.sha256"
+(cd "$BUILD_DIR" && sha256sum -c "${pkgname}-${pkgver}.tar.gz.sha256") || die "Контрольная сумма архива не сошлась"
+
+log "Собираю пакет makepkg'ом (чистое дерево без старого target/)"
+mkdir -p "$BUILD_DIR/makepkg"
+cp packaging/arch/PKGBUILD "$BUILD_DIR/makepkg/PKGBUILD"
+cp "$ARCHIVE" "$BUILD_DIR/makepkg/"
+cd "$BUILD_DIR/makepkg"
+
+# makepkg отказывается работать от root: пересобираем под временным
+# непривилегированным пользователем с собственным HOME (cargo/npm пишут кэши)
+run_makepkg() {
+  if [ "$(id -u)" -eq 0 ]; then
+    local build_user="${SUDO_USER:-}"
+    if [ -z "$build_user" ] || ! id "$build_user" >/dev/null 2>&1; then build_user="nobody"; fi
+    mkdir -p "$BUILD_DIR/home"
+    chown -R "$build_user" "$BUILD_DIR"
+    chmod -R u+rwX,go-rwx "$BUILD_DIR"
+    runuser -u "$build_user" -- \
+      env HOME="$BUILD_DIR/home" NIVORA_LAUNCHER_SOURCE_SHA256="$archive_sha256" makepkg -f 2>&1 | tee "$LOG_FILE"
+  else
+    NIVORA_LAUNCHER_SOURCE_SHA256="$archive_sha256" makepkg -f 2>&1 | tee "$LOG_FILE"
+  fi
+}
+run_makepkg || die "makepkg завершился с ошибкой — смотрите вывод выше"
+
+package_file="$(ls -1t ${pkgname}-*.pkg.tar.zst 2>/dev/null | head -n 1 || true)"
+[ -n "$package_file" ] || die "makepkg не создал пакет в $BUILD_DIR/makepkg"
+
+mkdir -p "$OUTPUT_DIR"
+cp -f "$package_file" "$OUTPUT_DIR/"
+log "Пакет готов: $OUTPUT_DIR/$package_file"
+
+# подпись пакета для самообновления: стандартная подпись минисайна,
+# лаунчер проверяет её встроенным ключом перед pacman -U
+if [ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
+  sig_file="$OUTPUT_DIR/$package_file.sig"
+  rm -f "$sig_file"
+  sign_env=()
+  if [ -n "${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}" ]; then
+    sign_env+=(TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$TAURI_SIGNING_PRIVATE_KEY_PASSWORD")
+  fi
+  ( cd "$PROJECT_ROOT/frontend" && env TAURI_SIGNING_PRIVATE_KEY="$TAURI_SIGNING_PRIVATE_KEY" "${sign_env[@]}" \
+      ./node_modules/.bin/tauri signer sign "$OUTPUT_DIR/$package_file" >/dev/null ) \
+    || die "Не удалось подписать пакет ключом самообновления (проверьте TAURI_SIGNING_PRIVATE_KEY и TAURI_SIGNING_PRIVATE_KEY_PASSWORD)."
+  [ -f "$sig_file" ] || die "tauri signer не создал $sig_file"
+  log "Подпись пакета: $sig_file"
+  log "Загрузите в релиз на GitHub ОБА файла: $package_file и $(basename "$sig_file")"
+  log "Без .sig лаунчер откажется ставить пакет автоматически (защита от подмены)."
+  log "Ключ подписи храните отдельно и не добавляйте в git."
+else
+  log "Внимание: TAURI_SIGNING_PRIVATE_KEY не задан — пакет НЕ подписан."
+  log "Самообновление этот релиз поставить не сможет; лаунчер предложит скачать пакет вручную."
+fi
+log "Установка: sudo pacman -U \"$OUTPUT_DIR/$package_file\""
+log "ВНИМАНИЕ: устанавливайте пакет целиком. Ручная замена отдельных файлов"
+log "может рассинхронизировать интерфейс и нативное ядро; лаунчер покажет предупреждение."

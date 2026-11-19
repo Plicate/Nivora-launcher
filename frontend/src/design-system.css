@@ -1,0 +1,349 @@
+/* ============================================================
+   Nivora Launcher: переработка интерфейса (design system).
+   Единый визуальный язык поверх существующих классов:
+   - типографика: шкала размеров, плотный трекинг заголовков,
+     табличные цифры в метриках, читаемый мелкий текст;
+   - поверхности: три уровня, hairline-границы, высота заявлена
+     один раз (плавающие поверхности — меню, диалоги, тосты);
+   - радиусы: контролы 10, кнопки 9, карточки 14, диалоги 16;
+   - состояния: hover/active/focus/disabled у всех контролов;
+   - цвета только через токены темы (accent, panel, line...).
+   Грузится последним: styles.css -> visual-refresh -> motion -> этот файл.
+   ============================================================ */
+
+:root {
+  --ds-surface-0: var(--bg, #0f1115);
+  --ds-surface-1: var(--panel, #15181d);
+  --ds-surface-2: var(--panel-raised, #1a1e24);
+  --ds-border: var(--line, rgba(255, 255, 255, .07));
+  --ds-border-strong: var(--line-strong, rgba(255, 255, 255, .13));
+  --ds-radius-control: 10px;
+  --ds-radius-button: 9px;
+  --ds-radius-card: 14px;
+  --ds-radius-dialog: 16px;
+  --ds-shadow-menu: 0 4px 16px rgba(0, 0, 0, .22), 0 16px 48px rgba(0, 0, 0, .38);
+  --ds-shadow-dialog: 0 8px 24px rgba(0, 0, 0, .3), 0 32px 90px rgba(0, 0, 0, .45);
+  --ds-highlight: inset 0 1px 0 rgba(255, 255, 255, .045);
+}
+
+.app-shell[data-theme='light'] {
+  --ds-highlight: inset 0 1px 0 rgba(255, 255, 255, .65);
+  --ds-shadow-menu: 0 2px 8px rgba(15, 23, 42, .08), 0 16px 40px rgba(15, 23, 42, .14);
+  --ds-shadow-dialog: 0 4px 16px rgba(15, 23, 42, .1), 0 32px 80px rgba(15, 23, 42, .18);
+}
+
+/* --- типографика: шкала и ритм --- */
+
+body { font-size: 14px; line-height: 1.5; }
+.page-content { line-height: 1.5; }
+
+.page-heading h1, .section-intro h2 {
+  font-weight: 680;
+  letter-spacing: -.022em;
+}
+.page-heading h1 { font-size: 26px; margin-bottom: 4px; }
+.section-intro h2 { font-size: 21px; margin: 0 0 8px; }
+.section-intro { margin-bottom: 26px; }
+.section-intro p { font-size: 13.5px; line-height: 1.6; color: var(--muted); }
+.panel-heading { margin-bottom: 18px; }
+.panel-heading h2 { margin-top: 0; font-size: 15.5px; font-weight: 660; letter-spacing: -.012em; }
+.panel-heading p { font-size: 12.5px; line-height: 1.5; }
+.empty-card h3 { font-size: 16.5px; font-weight: 650; letter-spacing: -.01em; }
+.empty-card p { font-size: 12.5px; line-height: 1.6; }
+
+/* мелкий служебный текст: читаемость важнее компактности */
+.activity-log { font-size: 11px; line-height: 1.55; }
+.verification-card { font-size: 12.5px; }
+.verification-card strong { font-size: 22px; letter-spacing: .1em; }
+.sidebar-footer { font-size: 11.5px; }
+
+/* цифры в метриках выровнены таблично */
+.server-metric, .verification-card strong, .count-badge, .instance-tag-chip {
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- поверхности: карточки с hairline и верхним светом --- */
+
+.panel, .workspace-card, .workspace-header, .mod-card, .account-row, .launcher-profile-card,
+.settings-card, .server-header, .theme-card, .plugin-card, .resource-catalog-row,
+.cloud-card, .dep-graph-card, .file-browser-card, .skin-editor-card, .store-card,
+.instance-group-section, .instance-groups-toolbar, .first-run-choice-card, .first-run-account-option {
+  border: 1px solid var(--ds-border);
+  border-radius: var(--ds-radius-card);
+  box-shadow: var(--ds-highlight);
+}
+.panel, .workspace-header, .settings-card, .server-header, .instance-group-section,
+.instance-groups-toolbar { background: var(--ds-surface-1); }
+.mod-card, .account-row, .launcher-profile-card, .resource-catalog-row, .plugin-card,
+.theme-card, .cloud-card, .dep-graph-card, .file-browser-card, .skin-editor-card, .store-card {
+  background: var(--ds-surface-2);
+}
+.launch-panel, .account-panel, .create-account-panel, .search-panel {
+  border: 1px solid var(--ds-border);
+  border-radius: var(--ds-radius-card);
+  background: var(--ds-surface-1);
+  box-shadow: var(--ds-highlight);
+}
+.panel, .workspace-card, .settings-card, .mod-card, .theme-card, .plugin-card, .store-card,
+.cloud-card, .file-browser-card { padding: 18px 20px; }
+
+/* --- боковая навигация: явный активный пункт --- */
+
+.sidebar { padding: 20px 13px 14px; }
+.nav-list { gap: 2px; }
+.nav-item {
+  position: relative;
+  min-height: 36px;
+  padding: 8px 11px;
+  border-radius: var(--ds-radius-button);
+  font-size: 13px;
+  font-weight: 530;
+  color: var(--quiet);
+}
+.nav-item:hover { color: var(--text); background: color-mix(in srgb, var(--text) 6%, transparent); }
+.nav-item--active,
+.nav-item--active:hover {
+  color: var(--text);
+  background: color-mix(in srgb, var(--accent, var(--blue)) 13%, transparent);
+  font-weight: 620;
+}
+.nav-item--active::before {
+  content: '';
+  position: absolute;
+  left: -13px;
+  top: 8px;
+  bottom: 8px;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: var(--accent, var(--blue));
+}
+.nav-section-label { font-size: 11px; font-weight: 620; color: var(--muted); }
+.sidebar-group-item { border-radius: var(--ds-radius-button); font-size: 12.5px; }
+
+/* --- топбар и шапка страницы --- */
+
+.topbar { min-height: 58px; padding: 10px clamp(20px, 3.4vw, 40px); }
+.page-content { padding: 30px clamp(20px, 3vw, 38px) 48px; }
+
+/* --- кнопки: цельные варианты, честные состояния --- */
+
+.button {
+  min-height: 38px;
+  padding: 0 15px;
+  border-radius: var(--ds-radius-button);
+  font-size: 13px;
+  font-weight: 620;
+  letter-spacing: .002em;
+}
+.button--small { min-height: 32px; padding: 0 11px; font-size: 12px; border-radius: 8px; }
+.button--large { min-height: 44px; padding: 0 20px; font-size: 14px; }
+.button--accent {
+  border-color: transparent;
+  background: var(--accent, var(--blue));
+  color: var(--accent-foreground, #fff);
+}
+.button--accent:hover:not(:disabled) { background: color-mix(in srgb, var(--accent, var(--blue)) 86%, #fff); }
+.button--outline { border-color: var(--ds-border-strong); color: var(--quiet); background: transparent; }
+.button--outline:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent, var(--blue)) 55%, transparent);
+  color: var(--text);
+  background: color-mix(in srgb, var(--accent, var(--blue)) 9%, transparent);
+}
+.button--quiet { border-color: transparent; background: color-mix(in srgb, var(--text) 6%, transparent); }
+.button--quiet:hover:not(:disabled) { background: color-mix(in srgb, var(--text) 10%, transparent); color: var(--text); }
+.button--danger {
+  border-color: color-mix(in srgb, var(--danger, #e5484d) 60%, transparent);
+  background: color-mix(in srgb, var(--danger, #e5484d) 74%, #000);
+  color: #fff1f0;
+}
+.button--danger:hover:not(:disabled) { background: color-mix(in srgb, var(--danger, #e5484d) 86%, #000); }
+.button:disabled { opacity: .5; cursor: not-allowed; }
+
+/* --- поля ввода и селекты: высота, кольцо фокуса --- */
+
+.field input, .field select, .search-bar input, .search-bar select,
+.dialog-input, .create-offline-form input {
+  height: 40px;
+  border-radius: var(--ds-radius-control);
+  background: var(--ds-surface-2);
+  transition: border-color var(--motion-fast, 140ms) ease, background-color var(--motion-fast, 140ms) ease, box-shadow var(--motion-base, 220ms) var(--ease-out-expo, ease);
+}
+.field input:hover, .field select:hover, .search-bar input:hover { border-color: var(--ds-border-strong); }
+.field input:focus, .field select:focus, .search-bar input:focus, .dialog-input:focus {
+  border-color: color-mix(in srgb, var(--accent, var(--blue)) 65%, transparent);
+  background: var(--ds-surface-2);
+}
+.field > span { font-size: 12.5px; font-weight: 560; color: var(--quiet); }
+
+.custom-select-trigger {
+  min-height: 40px;
+  border-radius: var(--ds-radius-control);
+  transition: border-color var(--motion-fast, 140ms) ease, background-color var(--motion-fast, 140ms) ease, box-shadow var(--motion-base, 220ms) ease;
+}
+.custom-select-trigger:hover { border-color: var(--ds-border-strong); }
+.custom-select--open .custom-select-trigger {
+  border-color: color-mix(in srgb, var(--accent, var(--blue)) 65%, transparent);
+}
+
+/* --- плавающие поверхности: единая высота --- */
+
+.dialog-card, .modal-card, .context-menu, .account-menu, .custom-select-menu,
+.workspace-log-popover, .app-tooltip {
+  border: 1px solid var(--ds-border-strong);
+  box-shadow: var(--ds-shadow-menu);
+}
+.dialog-card, .modal-card {
+  border-radius: var(--ds-radius-dialog);
+  box-shadow: var(--ds-shadow-dialog);
+  padding: 24px;
+}
+.context-menu, .account-menu { border-radius: 12px; padding: 7px; }
+.custom-select-menu { border-radius: 12px; padding: 7px; }
+.custom-select-option { border-radius: 8px; min-height: 32px; padding: 6px 10px; }
+.dialog-scrim { background: rgba(4, 6, 10, .55); }
+.app-shell[data-theme='light'] .dialog-scrim { background: rgba(15, 23, 42, .28); }
+.dialog-heading { font-size: 17px; font-weight: 660; letter-spacing: -.012em; }
+.dialog-choice { border-radius: 12px; }
+
+/* --- тосты, статусы, прогресс --- */
+
+.toast-message {
+  border-radius: 14px;
+  padding: 13px 16px;
+  box-shadow: var(--ds-shadow-menu);
+  font-size: 12.5px;
+}
+.progress-track { height: 6px; background: color-mix(in srgb, var(--text) 8%, transparent); }
+.status-dot { border-radius: 999px; }
+
+/* --- чекбоксы и переключатели --- */
+
+input[type='checkbox'], input[type='radio'] { border-radius: 6px; }
+input[type='checkbox']:hover:not(:disabled), input[type='radio']:hover:not(:disabled) { border-color: var(--ds-border-strong); }
+input[type='checkbox']:checked, input[type='radio']:checked {
+  border-color: var(--accent, var(--blue));
+  background: var(--accent, var(--blue));
+}
+
+/* --- пустые состояния: простор и честная иерархия --- */
+
+.empty-card { border-radius: var(--ds-radius-card); border-style: dashed; padding: 40px 32px; }
+.empty-card p { margin-bottom: 14px; }
+
+/* --- контекстное меню и всплывающие подсказки --- */
+
+.app-tooltip {
+  border-radius: 9px;
+  padding: 7px 11px;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+/* ============================================================
+   Настройки: переработка страницы
+   - навигация разделов: липкая строка-чипы со стеклом;
+   - переключатели: тумблеры вместо квадратных чекбоксов;
+   - планка сохранения и карточки: единая поверхность.
+   ============================================================ */
+
+.settings-section-nav {
+  position: sticky;
+  top: 10px;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: 0 0 20px;
+  padding: 6px;
+  border: 1px solid var(--ds-border);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--ds-surface-1) 86%, transparent);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.settings-section-nav::-webkit-scrollbar { display: none; }
+.settings-section-nav button {
+  flex: 0 0 auto;
+  min-height: 30px;
+  padding: 0 13px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--quiet);
+  font-size: 12.5px;
+  font-weight: 560;
+  cursor: pointer;
+  transition: background-color var(--motion-fast, 140ms) ease, color var(--motion-fast, 140ms) ease;
+}
+.settings-section-nav button:hover {
+  color: var(--text);
+  background: color-mix(in srgb, var(--text) 7%, transparent);
+}
+.settings-section-nav button:active { transform: scale(.97); }
+
+/* тумблеры: фон-капсула + белый бегунок через background-position */
+.workspace-check { align-items: flex-start; gap: 11px; }
+.workspace-check input[type='checkbox'] {
+  width: 38px;
+  height: 22px;
+  flex: 0 0 38px;
+  margin-top: 1px;
+  border: 0;
+  border-radius: 999px;
+  background-color: color-mix(in srgb, var(--text) 16%, transparent);
+  background-image: radial-gradient(circle at center, #fff 7px, transparent 8px);
+  background-size: 16px 16px;
+  background-repeat: no-repeat;
+  background-position: 4px center;
+  box-shadow: none;
+  cursor: pointer;
+  transition:
+    background-color .18s ease,
+    background-position .2s var(--ease-spring, cubic-bezier(.22, 1.2, .36, 1)),
+    opacity .18s ease;
+}
+.workspace-check input[type='checkbox']:checked {
+  background-color: var(--accent, var(--blue, #3d8bfd));
+  background-image: radial-gradient(circle at center, #fff 7px, transparent 8px);
+  background-size: 16px 16px;
+  background-repeat: no-repeat;
+  background-position: 18px center;
+}
+.workspace-check input[type='checkbox']:disabled { opacity: .45; cursor: not-allowed; }
+.workspace-check input[type='checkbox']:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent, var(--blue, #3d8bfd)) 60%, transparent);
+  outline-offset: 2px;
+}
+
+.settings-save-bar {
+  border: 1px solid var(--ds-border);
+  border-radius: var(--ds-radius-card);
+  background: var(--ds-surface-1);
+  box-shadow: var(--ds-highlight);
+  padding: 12px 16px;
+  margin-bottom: 18px;
+}
+.settings-save-bar strong { font-size: 13px; }
+.settings-save-bar small { color: var(--muted); font-size: 12px; }
+
+.settings-form { gap: 14px; }
+.settings-toggle-grid { gap: 12px; }
+.settings-card { padding: 20px; }
+.settings-card > .panel-heading { padding-bottom: 2px; }
+.settings-profile-row {
+  border: 1px solid var(--ds-border);
+  border-radius: 12px;
+  background: var(--ds-surface-2);
+  padding: 12px 14px;
+}
+
+/* ============== round 3 polish (2026-11-17): кнопки не переносятся, панели импорта, рейл студии ============== */
+.button { white-space: nowrap; }
+.plugin-import-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 14px; }
+.studio-rail { min-width: 78px; }
+.studio-rail-item { padding-left: 4px; padding-right: 4px; }
+.studio-rail-item span { overflow-wrap: normal; word-break: normal; hyphens: none; }
+
+/* disabled-кнопки: рамка и фон остаются видимыми, гаснет только текст */
+.button:disabled { opacity: 1; color: var(--muted); border: 1px solid var(--line); background: transparent; box-shadow: none; }
+.button--accent:disabled { color: color-mix(in srgb, var(--accent-foreground, #fff) 70%, transparent); background: color-mix(in srgb, var(--accent, var(--blue)) 28%, transparent); border-color: transparent; }

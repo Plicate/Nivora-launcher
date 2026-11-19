@@ -1,0 +1,262 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+        with:
+          toolchain: "1.99.0"
+          build-warnings: allow
+      - name: Install Tauri Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential curl file zlib1g-dev \
+            libayatana-appindicator3-dev libssl-dev \
+            libwebkit2gtk-4.1-dev librsvg2-dev libxdo-dev
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go-modcat/go.mod
+      - name: Build Tauri helper resources
+        run: |
+          bash scripts/build_modcat.sh
+          bash scripts/build_turbo.sh
+      - name: Run Tauri Rust tests
+        working-directory: frontend/src-tauri
+        run: cargo test --locked
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci --no-audit --no-fund
+      - name: Node tests (мост/реестр операций и утилиты UI)
+        working-directory: frontend
+        run: npm test
+      - name: Typecheck and build frontend
+        working-directory: frontend
+        run: npm run build
+
+  desktop-windows:
+    runs-on: windows-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+        with:
+          toolchain: 1.99.0
+          build-warnings: allow
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go-modcat/go.mod
+      # nivora-turbo.exe требует mingw-g++ с posix-потоками; используем UCRT64 из Git Bash
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: false
+          install: git mingw-w64-ucrt-x86_64-gcc
+      - name: Expose MSYS2 UCRT64 g++ to Git Bash
+        shell: bash
+        run: echo "C:\msys64\ucrt64\bin" >> "$GITHUB_PATH"
+      - name: Build Windows helper resources
+        shell: bash
+        env:
+          GOOS: windows
+          GOARCH: amd64
+          TURBO_TARGET: windows
+        run: |
+          bash scripts/build_modcat.sh frontend/src-tauri/resources/backend/nivora-modcat.exe
+          bash scripts/build_turbo.sh frontend/src-tauri/resources/backend/nivora-turbo.exe
+      - name: Run Tauri Rust tests
+        working-directory: frontend/src-tauri
+        run: cargo test --locked
+      - name: Build helpers and Windows installers
+        shell: bash
+        run: bash scripts/build_windows_exe.sh
+        timeout-minutes: 60
+      - name: Smoke-test packaged app (portable exe, --smoke-test)
+        shell: bash
+        timeout-minutes: 10
+        run: |
+          rc=0
+          ./dist/windows/nivora-launcher.exe --smoke-test || rc=$?
+          echo "--- smoke-test.json ---"
+          cat "$LOCALAPPDATA/nivora-launcher/smoke-test.json" || true
+          exit $rc
+      - name: Install NSIS setup silently and smoke-test installed copy
+        shell: bash
+        timeout-minutes: 15
+        run: |
+          setup="$(ls -1 dist/windows/*-setup.exe | head -n 1)"
+          "$setup" /S
+          installed="$LOCALAPPDATA/Nivora Launcher/nivora-launcher.exe"
+          for _ in $(seq 1 60); do
+            [ -f "$installed" ] && break
+            sleep 2
+          done
+          [ -f "$installed" ] || { echo "установленная копия не найдена: $installed"; exit 1; }
+          rc=0
+          "$installed" --smoke-test || rc=$?
+          echo "--- smoke-test.json (установленная копия) ---"
+          cat "$LOCALAPPDATA/nivora-launcher/smoke-test.json" || true
+          exit $rc
+      - name: Upload Windows artifacts
+        id: upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nivora-launcher-windows
+          path: |
+            dist/windows/*
+            ${{ env.LOCALAPPDATA }}/nivora-launcher/smoke-test.json
+          if-no-files-found: error
+      - name: Attest Windows artifacts
+        if: github.event_name == 'push'
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: nivora-launcher-windows
+          subject-digest: sha256:${{ steps.upload.outputs.artifact-digest }}
+
+  desktop-macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-latest
+          - arch: x86_64
+            # если Intel-раннер недоступен, собирайте x86_64 на arm64 через MACOS_ARCH=x86_64
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+        with:
+          toolchain: 1.99.0
+          build-warnings: allow
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go-modcat/go.mod
+      - name: Build macOS helper resources
+        env:
+          GOOS: darwin
+          GOARCH: ${{ matrix.arch == 'arm64' && 'arm64' || 'amd64' }}
+        run: |
+          CXXFLAGS_EXTRA="-arch ${{ matrix.arch }} -mmacosx-version-min=10.15" \
+            bash scripts/build_turbo.sh frontend/src-tauri/resources/backend/nivora-turbo
+          bash scripts/build_modcat.sh frontend/src-tauri/resources/backend/nivora-modcat
+      - name: Run Tauri Rust tests
+        working-directory: frontend/src-tauri
+        run: cargo test --locked
+      - name: Build app, DMG and verify (codesign, Info.plist, DMG mount)
+        run: MACOS_ARCH=${{ matrix.arch }} bash scripts/build_macos_app.sh
+        timeout-minutes: 60
+      - name: Smoke-test packaged app (--smoke-test)
+        timeout-minutes: 10
+        run: |
+          app="$(ls -1 frontend/src-tauri/target/*/release/bundle/macos/*.app | head -n 1)"
+          rc=0
+          "$app/Contents/MacOS/nivora-launcher" --smoke-test || rc=$?
+          echo "--- smoke-test.json ---"
+          cat "$HOME/.local/share/nivora-launcher/smoke-test.json" || true
+          exit $rc
+      - name: Upload macOS artifacts
+        id: upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nivora-launcher-macos-${{ matrix.arch }}
+          path: |
+            dist/macos/*
+            ${{ env.HOME }}/.local/share/nivora-launcher/smoke-test.json
+          if-no-files-found: error
+      - name: Attest macOS artifacts
+        if: github.event_name == 'push'
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: nivora-launcher-macos-${{ matrix.arch }}
+          subject-digest: sha256:${{ steps.upload.outputs.artifact-digest }}
+
+  desktop-linux-packages:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+        with:
+          toolchain: 1.99.0
+          build-warnings: allow
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go-modcat/go.mod
+      - name: Install Tauri and RPM build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential curl file zlib1g-dev libayatana-appindicator3-dev libssl-dev libwebkit2gtk-4.1-dev librsvg2-dev libxdo-dev patchelf rpm xvfb
+      - name: Build deb and rpm (helpers included)
+        run: bash scripts/build_all.sh deb rpm
+        timeout-minutes: 60
+      - name: Install deb and smoke-test packaged app (xvfb, --smoke-test)
+        timeout-minutes: 10
+        run: |
+          sudo dpkg -i dist/deb/*.deb || sudo apt-get install -f -y
+          rc=0
+          xvfb-run -a --server-args="-screen 0 1280x800x24" /usr/bin/nivora-launcher --smoke-test || rc=$?
+          echo "--- smoke-test.json ---"
+          cat "$HOME/.local/share/nivora-launcher/smoke-test.json" || true
+          exit $rc
+      - name: Upload Linux packages
+        id: upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nivora-launcher-linux
+          path: |
+            dist/deb/*.deb
+            dist/rpm/*.rpm
+            $HOME/.local/share/nivora-launcher/smoke-test.json
+          if-no-files-found: error
+      - name: Attest Linux packages
+        if: github.event_name == 'push'
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: nivora-launcher-linux
+          subject-digest: sha256:${{ steps.upload.outputs.artifact-digest }}

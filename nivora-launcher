@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+set -euo pipefail
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+# при NVIDIA и XWayland WebKitGTK может выдавать ошибку протокола Wayland
+# если GDK_BACKEND не задан и доступен XWayland, используем его
+if [ -z "${GDK_BACKEND:-}" ] && [ -n "${WAYLAND_DISPLAY:-}" ] && [ -n "${DISPLAY:-}" ]; then
+  export GDK_BACKEND=x11
+fi
+# отключаем проблемный DMA-BUF renderer WebKitGTK при NVIDIA и XWayland
+if [ -z "${WEBKIT_DISABLE_DMABUF_RENDERER:-}" ]; then
+  export WEBKIT_DISABLE_DMABUF_RENDERER=1
+fi
+
+# запуск из меню скрывает stderr; записываем ошибки в лог и показываем уведомление
+report_startup_failure() {
+  local message="$1" log_dir="${XDG_DATA_HOME:-$HOME/.local/share}/nivora-launcher/logs"
+  mkdir -p "$log_dir" 2>/dev/null || true
+  printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$message" >> "$log_dir/gui-start.log" 2>/dev/null || true
+  echo "Nivora Launcher: $message" >&2
+  if command -v zenity >/dev/null 2>&1; then
+    zenity --error --title "Nivora Launcher — ошибка запуска" --text "$message" >/dev/null 2>&1 || true
+  elif command -v kdialog >/dev/null 2>&1; then
+    kdialog --title "Nivora Launcher — ошибка запуска" --error "$message" >/dev/null 2>&1 || true
+  elif command -v notify-send >/dev/null 2>&1; then
+    notify-send -u critical "Nivora Launcher" "$message" >/dev/null 2>&1 || true
+  fi
+}
+
+GUI_BIN="/usr/lib/nivora-launcher/nivora-launcher-gui"
+[ -x "$GUI_BIN" ] || GUI_BIN="${SCRIPT_DIR}/nivora-launcher-gui"
+
+if [ ! -x "$GUI_BIN" ]; then
+  report_startup_failure "Не найден бинарник nivora-launcher-gui ($GUI_BIN).
+Переустановите пакет: sudo pacman -S nivora-launcher
+Подробности: ${XDG_DATA_HOME:-$HOME/.local/share}/nivora-launcher/logs/gui-start.log"
+  exit 1
+fi
+
+# проверяем зависимости до exec, чтобы запуск из меню не скрыл ошибку линковки
+if command -v ldd >/dev/null 2>&1; then
+  missing_libs="$(ldd "$GUI_BIN" 2>/dev/null | grep 'not found' | awk '{print $1}' | sort -u || true)"
+  if [ -n "${missing_libs:-}" ]; then
+    report_startup_failure "Не хватает системных библиотек: ${missing_libs//$'\n'/, }.
+Переустановите зависимости (Arch/CachyOS): sudo pacman -S webkit2gtk-4.1 gtk3 libayatana-appindicator
+Подробности: ${XDG_DATA_HOME:-$HOME/.local/share}/nivora-launcher/logs/gui-start.log"
+    exit 1
+  fi
+fi
+# gui принимает аргументы ярлыка экземпляра, например --launch-instance <имя>
+exec "$GUI_BIN" "$@"

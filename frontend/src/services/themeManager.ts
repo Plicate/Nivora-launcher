@@ -1,0 +1,437 @@
+import type { ComputedRef, Ref } from 'vue'
+import type { PluginUiTone } from '../../../plugins/api'
+import { bridge } from './bridge'
+import type { AnimationSettings, AppState, AppearanceSettings, LauncherThemePreset, ThemeSaveRequest } from '../types'
+import { buttonCustomizationRole, DEFAULT_BUTTON_CUSTOMIZATION, normalizeButtonCustomization, type ButtonCustomizationTarget } from './buttonCustomization'
+import { registerFontFaces, themeFontFamilyId, normalizeFontAssets, isFontAsset } from './fonts'
+
+function stableResourceHash(value: string): string {
+  let hash = 0xcbf29ce484222325n
+  for (const byte of new TextEncoder().encode(value)) {
+    hash = BigInt.asUintN(64, (hash ^ BigInt(byte)) * 0x100000001b3n)
+  }
+  return hash.toString(16).padStart(16, '0')
+}
+
+function themeResourceUrl(theme: LauncherThemePreset, key: string, fallbackPath = ''): string {
+  const raw = theme.resource_data?.[key] || ''
+  if (!raw) return ''
+  if (raw.startsWith('data:')) return raw
+  const path = theme.resources?.[key] || fallbackPath
+  const extension = path.split('.').pop()?.toLowerCase() || ''
+  const mime = extension === 'png' ? 'image/png' : extension === 'jpg' || extension === 'jpeg' ? 'image/jpeg' : extension === 'webp' ? 'image/webp' : extension === 'ogg' ? 'audio/ogg' : extension === 'wav' ? 'audio/wav' : extension === 'webm' ? 'audio/webm' : extension === 'mp3' ? 'audio/mpeg' : ''
+  return mime ? `data:${mime};base64,${raw}` : ''
+}
+
+type ThemeManagerDependencies = {
+  state: AppState
+  appearanceDraft: AppearanceSettings
+  settingsDraft: { font_family: string; language: string | null }
+  localThemes: Ref<LauncherThemePreset[]>
+  themeOperationBusy: Ref<boolean>
+  githubThemeInstallBusy: Ref<boolean>
+  activeThemeId: Ref<string>
+  availableThemes: ComputedRef<LauncherThemePreset[]>
+  defaultColorTokens: Record<string, string>
+  lightColorTokens: Record<string, string>
+  defaultRadiusTokens: Record<string, number>
+  defaultAnimationSettings: AnimationSettings
+  busy: Ref<boolean>
+  wallpaperPreviewUrl: Ref<string>
+  wallpaperRenderBlur: Ref<number>
+  showToast: (message: string, tone?: PluginUiTone) => void
+  errorMessage: (error: unknown) => string
+  saveSettings: () => Promise<boolean>
+  releaseWallpaperPreview: () => void
+  setLanguageFromSettings: (value: string) => void
+}
+
+export function createThemeManager(deps: ThemeManagerDependencies) {
+  const {
+    state,
+    appearanceDraft,
+    settingsDraft,
+    localThemes,
+    themeOperationBusy,
+    githubThemeInstallBusy,
+    activeThemeId,
+    availableThemes,
+    defaultColorTokens,
+    lightColorTokens,
+    defaultRadiusTokens,
+    defaultAnimationSettings,
+    busy,
+    wallpaperPreviewUrl,
+    wallpaperRenderBlur,
+    showToast,
+    errorMessage,
+    saveSettings,
+    releaseWallpaperPreview,
+    setLanguageFromSettings,
+  } = deps
+
+  function applyTheme(theme: LauncherThemePreset) {
+    activeThemeId.value = theme.id
+    appearanceDraft.active_theme_id = theme.id
+    appearanceDraft.theme = theme.mode
+    appearanceDraft.accent_color = theme.accent
+    appearanceDraft.sidebar_mode = theme.sidebar_mode
+    appearanceDraft.sidebar_texture_data = themeResourceUrl(theme, 'sidebar', theme.resources?.sidebar)
+    appearanceDraft.radius_tokens = { ...defaultRadiusTokens, ...(theme.radius_tokens || {}) }
+    appearanceDraft.density = theme.density
+    // дополняем цвета пресета базовой палитрой, чтобы не сохранять цвета старой темы
+    const base = theme.mode === 'light' ? lightColorTokens : defaultColorTokens
+    appearanceDraft.color_tokens = {
+      ...base,
+      accent: theme.accent,
+      accent_strong: theme.accent_strong,
+      background: theme.background,
+      panel: theme.panel,
+      panel_soft: theme.panel_soft,
+      banner_shade: theme.background,
+    }
+    if (theme.button_customization) {
+      const button = normalizeButtonCustomization(theme.button_customization)
+      const resourceUrl = (key: string, fallbackPath = '') => {
+        return themeResourceUrl(theme, key, fallbackPath)
+      }
+      for (const kind of ['texture', 'icon', 'sound'] as const) {
+        const path = theme.resources?.[kind] || button[kind] || ''
+        button[kind] = path
+        button[`${kind}_data`] = resourceUrl(kind, path)
+      }
+      for (const [target, existingOverride] of Object.entries(button.overrides)) {
+        if (!buttonCustomizationRole(target)) continue
+        const override = existingOverride || {}
+        for (const kind of ['texture', 'icon', 'sound'] as const) {
+          const resourceKey = `${target}-${kind}`
+          const path = theme.resources?.[resourceKey] || override[kind] || ''
+          if (path) override[kind] = path
+          const data = resourceUrl(resourceKey, path)
+          if (data) override[`${kind}_data`] = data
+        }
+        button.overrides[target as ButtonCustomizationTarget] = override
+      }
+      appearanceDraft.button_customization = button
+    }
+    const surfaceOpacity = Number((theme as { surface_opacity?: unknown }).surface_opacity)
+    if (Number.isFinite(surfaceOpacity)) appearanceDraft.surface_opacity = Math.max(20, Math.min(100, Math.round(surfaceOpacity)))
+    const surfaceBlur = Number((theme as { surface_blur?: unknown }).surface_blur)
+    if (Number.isFinite(surfaceBlur)) appearanceDraft.surface_blur = Math.max(0, Math.min(24, Math.round(surfaceBlur)))
+    const shadowStrength = Number((theme as { shadow_strength?: unknown }).shadow_strength)
+    if (Number.isFinite(shadowStrength)) appearanceDraft.shadow_strength = Math.max(0, Math.min(100, Math.round(shadowStrength)))
+    const themeFont = typeof (theme as { font_family?: unknown }).font_family === 'string' ? (theme as { font_family: string }).font_family : ''
+    if (themeFont) {
+      if (themeFont.startsWith('theme-font:')) {
+        const fontId = themeFontFamilyId(themeFont)
+        const raw = theme.resource_data?.['font'] || ''
+        const path = theme.resources?.['font'] || ''
+        const extension = path.split('.').pop()?.toLowerCase() || ''
+        const mime = extension === 'ttf' ? 'font/ttf' : extension === 'otf' ? 'font/otf' : extension === 'woff' ? 'font/woff' : extension === 'woff2' ? 'font/woff2' : ''
+        if (raw && mime) registerFontFaces(`Nivora Font ${fontId}`, `data:${mime};base64,${raw}`)
+        settingsDraft.font_family = themeFont
+      } else if (/^(system|inter|manrope|mono)$/.test(themeFont) || themeFont.startsWith('font:')) {
+        settingsDraft.font_family = themeFont
+      }
+    }
+    if (theme.locale === 'ru' || theme.locale === 'en') setLanguageFromSettings(theme.locale)
+    showToast(`Тема «${theme.name}» применена`)
+    if (!busy.value) void saveSettings()
+  }
+
+  async function resetAppearance() {
+    if (appearanceDraft.wallpaper_path || appearanceDraft.wallpaper_data || wallpaperPreviewUrl.value) {
+      try {
+        const result = await bridge.clearWallpaper()
+        releaseWallpaperPreview()
+        appearanceDraft.wallpaper_path = result.settings.wallpaper_path
+        appearanceDraft.wallpaper_data = result.settings.wallpaper_data || ''
+        state.settings.wallpaper_path = result.settings.wallpaper_path
+        state.settings.wallpaper_data = result.settings.wallpaper_data || ''
+      } catch (error) {
+        showToast(errorMessage(error))
+      }
+    }
+    activeThemeId.value = 'nivora-dark'
+    appearanceDraft.active_theme_id = 'nivora-dark'
+    appearanceDraft.theme = 'dark'
+    appearanceDraft.accent_color = defaultColorTokens.accent
+    appearanceDraft.color_tokens = { ...defaultColorTokens }
+    appearanceDraft.radius_tokens = { ...defaultRadiusTokens }
+    appearanceDraft.button_customization = normalizeButtonCustomization(DEFAULT_BUTTON_CUSTOMIZATION)
+    appearanceDraft.sidebar_position = 'left'
+    appearanceDraft.sidebar_mode = 'adaptive'
+    appearanceDraft.sidebar_width_mode = 'content'
+    appearanceDraft.sidebar_width = 228
+    appearanceDraft.sidebar_floating = false
+    appearanceDraft.sidebar_visibility = 'always'
+    appearanceDraft.animations = 'full'
+    appearanceDraft.animation_settings = {
+      ...defaultAnimationSettings,
+      page_styles: { ...defaultAnimationSettings.page_styles },
+      page_durations_ms: { ...defaultAnimationSettings.page_durations_ms },
+    } as AnimationSettings
+    appearanceDraft.density = 'comfortable'
+    appearanceDraft.ui_scale = 100
+    appearanceDraft.surface_opacity = 100
+    appearanceDraft.surface_blur = 0
+    appearanceDraft.shadow_strength = 0
+    appearanceDraft.wallpaper_blur = 12
+    appearanceDraft.wallpaper_opacity = 34
+    appearanceDraft.sidebar_texture_data = ''
+    wallpaperRenderBlur.value = 12
+    appearanceDraft.page_themes = { instances: 'inherit', 'instance-settings': 'inherit', accounts: 'inherit', mods: 'inherit', modpacks: 'inherit', plugins: 'inherit', themes: 'inherit', store: 'inherit', rates: 'inherit', settings: 'inherit' }
+    appearanceDraft.page_layouts = { instances: 'balanced', 'instance-settings': 'balanced', accounts: 'balanced', mods: 'wide', modpacks: 'wide', plugins: 'wide', themes: 'wide', store: 'wide', rates: 'wide', settings: 'balanced' }
+    appearanceDraft.widget_visibility = { 'instances.workspace': true, 'accounts.status': true, 'mods.context': true }
+    settingsDraft.font_family = 'system'
+    syncActiveTheme()
+    showToast('Оформление сброшено к значениям по умолчанию')
+    if (!busy.value) void saveSettings()
+  }
+
+  function themeSlug(value: string): string {
+    const transliteration: Record<string, string> = {
+      а: 'a', б: 'b', в: 'v', г: 'g', д: 'd', е: 'e', ё: 'yo', ж: 'zh', з: 'z', и: 'i', й: 'y', к: 'k', л: 'l', м: 'm', н: 'n', о: 'o', п: 'p', р: 'r', с: 's', т: 't', у: 'u', ф: 'f', х: 'kh', ц: 'ts', ч: 'ch', ш: 'sh', щ: 'shch', ъ: '', ы: 'y', ь: '', э: 'e', ю: 'yu', я: 'ya',
+    }
+    const slug = [...value.toLowerCase()].map((char) => transliteration[char] ?? char).join('').normalize('NFKD').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40)
+    return slug || 'local-theme'
+  }
+
+  function uniqueThemeId(name: string): string {
+    const existing = new Set(availableThemes.value.map((theme) => theme.id))
+    const base = themeSlug(name)
+    let id = base
+    let suffix = 2
+    while (existing.has(id)) {
+      id = `${base.slice(0, 40 - String(suffix).length - 1)}-${suffix}`
+      suffix += 1
+    }
+    return id
+  }
+
+  async function refreshLocalThemes() {
+    try {
+      localThemes.value = (await bridge.themeList()).themes
+    } catch (error) {
+      showToast(errorMessage(error))
+    }
+  }
+
+  async function saveCurrentTheme(metadata: ThemeSaveRequest) {
+    themeOperationBusy.value = true
+    const tokens = appearanceDraft.color_tokens
+    const button = normalizeButtonCustomization(appearanceDraft.button_customization)
+    const resourceData: Record<string, string> = {}
+    const resources: Record<string, string> = {}
+    const registerResource = (key: string, dataUrl: string, prefix = `button-${key}`) => {
+      const separator = dataUrl.indexOf(',')
+      const mime = dataUrl.slice(5, dataUrl.indexOf(';'))
+      const extension = mime === 'image/png' ? 'png' : mime === 'image/jpeg' ? 'jpg' : mime === 'image/webp' ? 'webp' : mime === 'audio/ogg' ? 'ogg' : mime === 'audio/wav' ? 'wav' : mime === 'audio/webm' ? 'webm' : mime === 'audio/mpeg' ? 'mp3' : ''
+      if (!extension || separator < 0) return
+      const safePrefix = /^[a-z\d._-]{1,100}$/i.test(prefix) ? prefix : `button-${stableResourceHash(key)}`
+      resources[key] = `resources/${safePrefix}.${extension}`
+      resourceData[key] = dataUrl.slice(separator + 1)
+    }
+    const mimeExtension: Record<string, string> = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'audio/ogg': 'ogg', 'audio/wav': 'wav', 'audio/webm': 'webm', 'audio/mpeg': 'mp3', 'font/ttf': 'ttf', 'font/otf': 'otf', 'font/woff': 'woff', 'font/woff2': 'woff2' }
+    registerResource('sidebar', appearanceDraft.sidebar_texture_data || '', 'sidebar')
+    for (const key of ['texture', 'icon', 'sound'] as const) registerResource(key, button[`${key}_data`])
+    // шрифт темы: пользовательский файл попадает в resources как font.*
+    const chosenFontFamily = settingsDraft.font_family
+    let themeFontFamily = chosenFontFamily
+    if (chosenFontFamily.startsWith('custom:')) {
+      const fontId = chosenFontFamily.slice('custom:'.length)
+      const font = normalizeFontAssets(appearanceDraft.custom_fonts).find((entry) => isFontAsset(entry) && entry.id === fontId)
+      if (font) {
+        const separator = font.data.indexOf(',')
+        const mime = font.data.slice(5, font.data.indexOf(';'))
+        const extension = mimeExtension[mime] || ''
+        if (separator > 0 && extension) {
+          resources['font'] = `resources/theme-font.${extension}`
+          resourceData['font'] = font.data.slice(separator + 1)
+          themeFontFamily = `theme-font:${fontId}`
+        }
+      }
+    }
+    for (const [target, override] of Object.entries(button.overrides)) {
+      if (!override || !buttonCustomizationRole(target)) continue
+      for (const kind of ['texture', 'icon', 'sound'] as const) {
+        const key = `${target}-${kind}`
+        registerResource(key, override[`${kind}_data`] || '', `button-${key}`)
+      }
+    }
+    const themeOverrides = Object.fromEntries(Object.entries(button.overrides).flatMap(([target, override]) => {
+      if (!override || !buttonCustomizationRole(target)) return []
+      const { label, width, height, fill, border, font_family, font_size, outline, texture_fit, crop_enabled, crop, auto_size, hidden } = override as never
+      const stored = {
+        label,
+        width,
+        height,
+        fill,
+        border,
+        font_family,
+        font_size,
+        outline,
+        texture_fit,
+        crop_enabled,
+        crop,
+        auto_size,
+        hidden,
+        texture: resources[`${target}-texture`],
+        icon: resources[`${target}-icon`],
+        sound: resources[`${target}-sound`],
+      }
+      return Object.values(stored).some((value) => value !== undefined) ? [[target, stored]] : []
+    }))
+    const theme = {
+      schema_version: 2 as const,
+      id: uniqueThemeId(metadata.name),
+      name: metadata.name,
+      author: metadata.author,
+      description: metadata.description,
+      mode: appearanceDraft.theme,
+      accent: String(tokens.accent || appearanceDraft.accent_color),
+      accent_strong: String(tokens.accent_strong || defaultColorTokens.accent_strong),
+      background: String(tokens.background || defaultColorTokens.background),
+      panel: String(tokens.panel || defaultColorTokens.panel),
+      panel_soft: String(tokens.panel_soft || defaultColorTokens.panel_soft),
+      density: appearanceDraft.density,
+      sidebar_mode: appearanceDraft.sidebar_mode,
+      radius_tokens: { ...appearanceDraft.radius_tokens },
+      locale: settingsDraft.language === 'en' ? 'en' as const : 'ru' as const,
+      font_family: themeFontFamily,
+      surface_opacity: appearanceDraft.surface_opacity,
+      surface_blur: appearanceDraft.surface_blur,
+      shadow_strength: appearanceDraft.shadow_strength,
+      button_customization: {
+        width: button.width,
+        height: button.height,
+        fill: button.fill,
+        border: button.border,
+        font_family: button.font_family,
+        font_size: button.font_size,
+        outline: button.outline,
+        texture_fit: button.texture_fit,
+        crop_enabled: button.crop_enabled,
+        crop: button.crop,
+        labels: button.labels,
+        overrides: themeOverrides,
+      },
+      resources,
+    }
+    try {
+      const result = await bridge.themeSave(theme, metadata, resourceData)
+      localThemes.value = result.themes
+      syncActiveTheme()
+      await downloadThemeArchive(result.theme.id)
+      showToast(`Тема «${result.theme.name}» сохранена как ZIP и добавлена в лаунчер`)
+    } catch (error) {
+      showToast(errorMessage(error))
+    } finally {
+      themeOperationBusy.value = false
+    }
+  }
+
+  async function importThemeArchive(payload: { name: string; data: string; replace: boolean }) {
+    themeOperationBusy.value = true
+    try {
+      const result = await bridge.themeImport(payload.data, payload.replace)
+      localThemes.value = result.themes
+      showToast(`Тема «${result.theme.name}» импортирована`)
+    } catch (error) {
+      showToast(errorMessage(error))
+    } finally {
+      themeOperationBusy.value = false
+    }
+  }
+
+  async function deleteLocalTheme(themeId: string) {
+    themeOperationBusy.value = true
+    try {
+      const result = await bridge.themeDelete(themeId)
+      localThemes.value = result.themes
+      if (activeThemeId.value === themeId) {
+        activeThemeId.value = ''
+        appearanceDraft.active_theme_id = ''
+        syncActiveTheme()
+        if (!busy.value) void saveSettings()
+      }
+      showToast('Локальная тема удалена')
+    } catch (error) {
+      showToast(errorMessage(error))
+    } finally {
+      themeOperationBusy.value = false
+    }
+  }
+
+  async function downloadThemeArchive(themeId: string) {
+    const result = await bridge.themeExport(themeId)
+    const binary = atob(result.data)
+    const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0))
+    const url = URL.createObjectURL(new Blob([bytes], { type: 'application/zip' }))
+    const link = document.createElement('a')
+    link.href = url
+    link.download = result.file_name
+    link.click()
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+  }
+
+  async function exportLocalTheme(themeId: string) {
+    themeOperationBusy.value = true
+    try {
+      await downloadThemeArchive(themeId)
+      showToast(`Архив темы «${themeId}» сохранён`)
+    } catch (error) {
+      showToast(errorMessage(error))
+    } finally {
+      themeOperationBusy.value = false
+    }
+  }
+
+  async function installGithubTheme(payload: { owner: string; repo: string; replace: boolean }) {
+    if (githubThemeInstallBusy.value) return
+    githubThemeInstallBusy.value = true
+    try {
+      const result = await bridge.githubThemeInstall(payload.owner, payload.repo, payload.replace)
+      localThemes.value = result.themes
+      showToast(`Тема «${result.theme.name}» добавлена из GitHub · SHA-256 ${result.metadata.sha256}`)
+    } catch (error) {
+      showToast(errorMessage(error))
+    } finally {
+      githubThemeInstallBusy.value = false
+    }
+  }
+
+  function themeMatchesSettings(theme: LauncherThemePreset): boolean {
+    const tokens = appearanceDraft.color_tokens
+    return theme.mode === appearanceDraft.theme
+      && theme.accent.toLowerCase() === appearanceDraft.accent_color.toLowerCase()
+      && theme.accent.toLowerCase() === String(tokens.accent || '').toLowerCase()
+      && theme.accent_strong.toLowerCase() === String(tokens.accent_strong || '').toLowerCase()
+      && theme.background.toLowerCase() === String(tokens.background || '').toLowerCase()
+      && theme.panel.toLowerCase() === String(tokens.panel || '').toLowerCase()
+      && theme.panel_soft.toLowerCase() === String(tokens.panel_soft || '').toLowerCase()
+      && theme.density === appearanceDraft.density
+      && theme.sidebar_mode === appearanceDraft.sidebar_mode
+  }
+
+  function syncActiveTheme() {
+    const persisted = availableThemes.value.find((theme) => theme.id === appearanceDraft.active_theme_id && themeMatchesSettings(theme))
+    const matching = persisted || availableThemes.value.find((theme) => themeMatchesSettings(theme))
+    activeThemeId.value = matching?.id || ''
+    appearanceDraft.active_theme_id = activeThemeId.value
+  }
+
+
+  return {
+    applyTheme,
+    resetAppearance,
+    refreshLocalThemes,
+    saveCurrentTheme,
+    importThemeArchive,
+    deleteLocalTheme,
+    exportLocalTheme,
+    installGithubTheme,
+    themeMatchesSettings,
+    syncActiveTheme,
+  }
+}

@@ -1,0 +1,194 @@
+/* ============================================================
+   Nivora Launcher: слой движения (motion layer).
+   Единая система: токены длительности, кривые easing,
+   микровзаимодействия, хореография входа поверхностей.
+   Правила уважают настройки лончера:
+   - body[data-launcher-animations='off'] и .animations--off
+     гасят ВСЁ глобально (правила в styles.css сильнее);
+   - body[data-launcher-animations='reduced'] укорачивает всё;
+   - декоративные входы и «дыхание» живут под .animations--full;
+   - @media (prefers-reduced-motion) гасит декоративный слой.
+   Анимируются только transform/opacity/shadow/color.
+   ============================================================ */
+
+:root {
+  --motion-instant: 70ms;
+  --motion-fast: 140ms;
+  --motion-base: 220ms;
+  --motion-slow: 340ms;
+  --motion-deliberate: 560ms;
+  --ease-out-expo: cubic-bezier(.22, 1, .36, 1);
+  --ease-out-quart: cubic-bezier(.25, 1, .5, 1);
+  --ease-swift: cubic-bezier(.55, 0, .1, 1);
+  --ease-spring: cubic-bezier(.34, 1.42, .5, 1);
+  --ease-spring-soft: cubic-bezier(.3, 1.24, .5, 1);
+}
+
+/* --- базовая отделка: каретка, выделение, скроллбары, фокус --- */
+
+* { caret-color: var(--accent, var(--blue)); }
+*::selection { background: color-mix(in srgb, var(--accent, var(--blue)) 30%, transparent); }
+
+* { scrollbar-width: thin; scrollbar-color: color-mix(in srgb, var(--muted, #7d8591) 50%, transparent) transparent; }
+*::-webkit-scrollbar { width: 11px; height: 11px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-corner { background: transparent; }
+*::-webkit-scrollbar-thumb {
+  border: 3px solid transparent;
+  border-radius: 999px;
+  background-clip: content-box;
+  background-color: color-mix(in srgb, var(--muted, #7d8591) 42%, transparent);
+}
+*::-webkit-scrollbar-thumb:hover { background-color: color-mix(in srgb, var(--muted, #7d8591) 75%, transparent); }
+*::-webkit-scrollbar-thumb:active { background-color: color-mix(in srgb, var(--accent, var(--blue)) 60%, transparent); }
+
+:focus { outline: none; }
+:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent, var(--blue)) 72%, transparent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* --- переходы страниц: глубже хореография, пружина на zoom --- */
+
+.page-transition--animate { animation-timing-function: var(--ease-out-expo); }
+.animation-style--scale .page-transition--animate { animation-timing-function: var(--ease-spring-soft); }
+
+/* --- кнопки: шаг при наведении, нажатие, микро-подсказка иконки --- */
+
+.button {
+  transition:
+    transform var(--motion-fast) var(--ease-spring-soft),
+    box-shadow var(--motion-base) var(--ease-out-expo),
+    background-color var(--motion-fast) ease,
+    border-color var(--motion-fast) ease,
+    color var(--motion-fast) ease,
+    opacity var(--motion-fast) ease;
+}
+.button:hover:not(:disabled) { transform: translateY(-1px); }
+.button:active:not(:disabled) { transform: translateY(0) scale(.96); transition-duration: 60ms; }
+.button:disabled { transition: opacity var(--motion-fast) ease; }
+.button svg { transition: transform var(--motion-fast) var(--ease-spring-soft); }
+.button:hover:not(:disabled) svg { transform: translateY(-.5px) scale(1.05); }
+.button--accent:hover:not(:disabled) {
+  box-shadow: 0 6px 20px color-mix(in srgb, var(--accent, var(--blue)) 28%, transparent);
+}
+.button--danger:hover:not(:disabled) {
+  box-shadow: 0 6px 20px color-mix(in srgb, var(--danger, #e5484d) 30%, transparent);
+}
+
+
+/* --- карточки: подъём на 2px, тень и граница откликаются --- */
+
+.mod-card, .theme-card, .store-card, .plugin-card, .workspace-card, .workspace-asset,
+.settings-card, .cloud-card, .launcher-profile-card, .dep-graph-card, .file-browser-card,
+.empty-card, .first-run-card, .global-search-card, .skin-editor-card, .dep-tree-node {
+  transition:
+    transform var(--motion-base) var(--ease-out-expo),
+    box-shadow var(--motion-base) var(--ease-out-expo),
+    border-color var(--motion-base) ease,
+    background-color var(--motion-base) ease;
+}
+.mod-card:hover, .theme-card:hover, .store-card:hover, .plugin-card:hover, .workspace-card:hover,
+.workspace-asset:hover, .cloud-card:hover, .launcher-profile-card:hover, .dep-graph-card:hover,
+.file-browser-card:hover, .skin-editor-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, .24);
+  border-color: var(--line-strong, rgba(255, 255, 255, .13));
+}
+
+/* строки списков: мягкая подсветка без подъёма */
+.instance-row, .account-row, .server-file-row, .server-plugin-row, .server-snapshot-row,
+.cloud-file-row, .skin-library-item, .workspace-list-row, .sidebar-group-item, .rates-server-card {
+  transition: background-color var(--motion-fast) ease, border-color var(--motion-fast) ease, color var(--motion-fast) ease;
+}
+
+/* --- боковая навигация: сдвиг, отклик иконки, индикатор --- */
+
+.nav-item {
+  transition:
+    transform var(--motion-fast) var(--ease-spring-soft),
+    background-color var(--motion-fast) ease,
+    color var(--motion-fast) ease,
+    box-shadow var(--motion-base) var(--ease-out-expo);
+}
+.nav-item:hover { transform: translateX(2px); }
+.nav-item:active { transform: translateX(2px) scale(.985); transition-duration: 60ms; }
+.nav-item-icon { transition: transform var(--motion-base) var(--ease-spring), color var(--motion-fast) ease; }
+.nav-item:hover .nav-item-icon { transform: translateY(-1px) scale(1.08); }
+.nav-item:active .nav-item-icon { transform: scale(.94); }
+.sidebar-account, .sidebar-footer { transition: opacity var(--motion-base) ease, transform var(--motion-base) var(--ease-out-expo); }
+
+/* --- вкладки воркспейса: подчёркивание прорисовывается --- */
+
+.workspace-tab { position: relative; transition: color var(--motion-fast) ease, background-color var(--motion-fast) ease, border-color var(--motion-fast) ease, transform var(--motion-fast) var(--ease-spring-soft); }
+.workspace-tab::after {
+  content: '';
+  position: absolute;
+  left: 12%;
+  right: 12%;
+  bottom: -1px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--accent, var(--blue));
+  transform: scaleX(0);
+  transform-origin: left center;
+  transition: transform var(--motion-base) var(--ease-out-expo);
+}
+.workspace-tab:hover::after { transform: scaleX(.55); }
+.workspace-tab[aria-selected='true']::after, .workspace-tab--active::after { transform: scaleX(1); }
+
+/* --- чипы, бейджи, пилюли статусов --- */
+
+.dep-chip, .catalog-badge, .count-badge, .instance-tag-chip, .crash-mod-chip {
+  transition: transform var(--motion-fast) var(--ease-spring-soft), background-color var(--motion-fast) ease, border-color var(--motion-fast) ease;
+}
+.dep-chip:hover, .catalog-badge:hover, .count-badge:hover, .instance-tag-chip:hover { transform: translateY(-1px); }
+
+.cloud-status-pill, .asset-state-chip { transition: background-color var(--motion-base) ease, color var(--motion-base) ease, box-shadow var(--motion-base) ease; }
+
+/* --- селекты, диалоги, тосты: пружина вместо линейности --- */
+
+.custom-select-menu { animation: dropdown-in var(--motion-fast) var(--ease-spring-soft) both; }
+.custom-select-option { transition: background-color var(--motion-instant) ease, color var(--motion-instant) ease; }
+.dialog-scrim { transition: opacity var(--motion-base) ease; }
+.dialog-enter-active .dialog-card { transition: transform calc(var(--motion-base) + 120ms) var(--ease-spring), opacity var(--motion-base) ease; }
+.toast-enter-active { transition: opacity var(--motion-base) ease, transform var(--motion-base) var(--ease-spring); }
+.toast-enter-from { transform: translateY(16px) scale(.96); }
+
+/* --- вход оболочки: один раз при старте, только прозрачность --- */
+
+.app-shell { animation: shell-in var(--motion-slow) var(--ease-out-expo) both; }
+@keyframes shell-in { from { opacity: 0; } to { opacity: 1; } }
+.animations--full .brand-lockup { animation: brand-in var(--motion-deliberate) var(--ease-out-expo) both; }
+@keyframes brand-in { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
+
+/* --- стаггер входа: глубже каскад и шире покрытие --- */
+
+.animations--full .page-content > :nth-child(5), .animations--full .page-content .mod-card:nth-child(5n),
+.animations--full .page-content .theme-card:nth-child(5n), .animations--full .page-content .store-card:nth-child(5n) {
+  animation-delay: calc(var(--surface-stagger, .035s) * 4);
+}
+.animations--full .page-content > :nth-child(6), .animations--full .page-content .mod-card:nth-child(6n),
+.animations--full .page-content .theme-card:nth-child(6n), .animations--full .page-content .store-card:nth-child(6n) {
+  animation-delay: calc(var(--surface-stagger, .035s) * 5);
+}
+.animations--full .page-content .cloud-card, .animations--full .page-content .file-browser-card,
+.animations--full .page-content .dep-graph-card, .animations--full .page-content .first-run-card,
+.animations--full .page-content .settings-card, .animations--full .page-content .launcher-profile-card,
+.animations--full .page-content .skin-editor-card, .animations--full .page-content .dep-tree-node {
+  animation: surface-in var(--surface-duration, .3s) cubic-bezier(.22, .68, .32, 1) both;
+}
+
+/* --- уважение к системной настройке уменьшенного движения --- */
+
+@media (prefers-reduced-motion: reduce) {
+  .button, .nav-item, .nav-item-icon, .mod-card, .theme-card, .store-card, .plugin-card,
+  .workspace-card, .workspace-asset, .settings-card, .cloud-card, .launcher-profile-card,
+  .dep-graph-card, .file-browser-card, .empty-card, .first-run-card, .workspace-tab::after,
+  .dep-chip, .catalog-badge, .count-badge, .instance-tag-chip {
+    transition-duration: .01ms;
+  }
+  .animations--full .page-content .button--accent, .animations--full .brand-lockup { animation: none; }
+  .app-shell { animation-duration: .01ms; }
+}

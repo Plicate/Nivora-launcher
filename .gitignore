@@ -1,0 +1,40 @@
+# Артефакты сборки
+frontend/src-tauri/target/
+node_modules/
+dist/
+
+# Локальные данные лаунчера
+*.log
+
+# результаты тестов, не исходные тесты
+coverage
+test-results
+playwright-report
+.cache/
+.DS_Store
+Thumbs.db
+
+# Android: ключи подписи и локальные параметры Gradle
+frontend/src-tauri/keys/
+*.keystore
+*.key
+keystore.properties
+
+# Android: локальные артефакты генерации/сборки
+frontend/src-tauri/gen/android/.gradle/
+frontend/src-tauri/gen/android/app/build/
+frontend/src-tauri/gen/android/build/
+frontend/src-tauri/gen/android/local.properties
+frontend/src-tauri/gen/android/app/src/main/jniLibs/
+frontend/src-tauri/gen/android/buildSrc/build/
+frontend/src-tauri/gen/android/buildSrc/.gradle/
+frontend/src-tauri/gen/android/.kotlin/
+
+# локальные артефакты хелперов
+go-modcat/nivora-modcat
+
+frontend/src-tauri/resources/backend/
+frontend/src-tauri/gen/schemas/
+.build-windows/
+.build-macos/
+.build-linux/

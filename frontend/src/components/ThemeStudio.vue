@@ -1,0 +1,1190 @@
+<script setup lang="ts">
+import { computed, onBeforeUnmount, onMounted, ref, type WritableComputedRef } from 'vue'
+import ColorPicker from './ColorPicker.vue'
+import CustomSelect from './CustomSelect.vue'
+import CustomSlider from './CustomSlider.vue'
+import Icon from './Icon.vue'
+import NumericStepper from './NumericStepper.vue'
+import ThemeStudioPreview from './ThemeStudioPreview.vue'
+import ThemeButtonSettingsEditor from './ThemeButtonSettingsEditor.vue'
+import { buttonCustomizationRole, buttonCustomizationTarget, normalizeButtonCustomization, resolveButtonCustomization, resolveButtonLabel, safeDataUrl, type ButtonCustomizationTarget, type ButtonLabelKey } from '../services/buttonCustomization'
+import { normalizeFontAssets, registerFontAssets, getInstalledFontFamilies, fontIdFromName, uniqueFontId, validateFontFile, type FontAsset } from '../services/fonts'
+import { parseThemePluginZip, type ThemePluginPreviewResult } from '../services/themePluginPreview'
+import { pickFile } from '../services/fileBrowser'
+import type { ButtonCustomization } from '../services/buttonCustomization'
+import type { AppearanceSettings, InstanceInfo, SelectOption, ViewName } from '../types'
+
+const props = defineProps<{
+  appearance: AppearanceSettings
+  instances?: InstanceInfo[]
+  tokens: Record<string, string>
+  theme: string
+  baseTheme?: string
+  fontFamily: string
+  language: string
+  languageOptions: SelectOption[]
+  pages: Array<{ id: ViewName; title: string; kicker: string }>
+  wallpaperUrl: string
+  defaultColorTokens: Record<string, string>
+  defaultRadiusTokens: Record<string, number>
+  lightTokens?: Record<string, string>
+  saveState: string
+  saveMessage: string
+  busy: boolean
+}>()
+
+const emit = defineEmits<{
+  'update:fontFamily': [value: string]
+  'update:language': [value: string]
+  save: []
+  resetAppearance: []
+  importWallpaperFile: [] | [void]
+  clearWallpaper: []
+  commitWallpaperBlur: []
+  openPage: [view: ViewName]
+  startThemePlugin: [result: ThemePluginPreviewResult]
+  stopThemePlugin: []
+}>()
+
+const labelOptions: Array<{ key: ButtonLabelKey; label: string }> = [
+  { key: 'instances', label: 'Экземпляры' },
+  { key: 'accounts', label: 'Аккаунты' },
+  { key: 'mods', label: 'Каталог' },
+  { key: 'modpacks', label: 'Модпаки' },
+  { key: 'themes', label: 'Студия тем' },
+  { key: 'store', label: 'Маркет Plicate' },
+  // { key: 'rates', label: 'Рейтинг серверов' }, — rates временно скрыт
+  { key: 'settings', label: 'Настройки' },
+]
+const themeOptions: SelectOption[] = [
+  { value: 'system', label: 'Как в системе', meta: 'Автоматически' },
+  { value: 'dark', label: 'Тёмная', meta: 'Насыщенный интерфейс' },
+  { value: 'light', label: 'Светлая', meta: 'Чистый интерфейс' },
+  { value: 'glass', label: 'Glass', meta: 'Полупрозрачные панели' },
+]
+const baseFontFamilyOptions: SelectOption[] = [
+  { value: 'system', label: 'Системный', meta: 'Шрифт текущей ОС' },
+  { value: 'inter', label: 'Inter', meta: 'Нейтральная UI-гарнитура' },
+  { value: 'manrope', label: 'Manrope', meta: 'Более мягкие формы' },
+  { value: 'mono', label: 'DM Mono', meta: 'Технический моноширинный стиль' },
+]
+const customFonts = computed<FontAsset[]>(() => normalizeFontAssets(props.appearance.custom_fonts))
+const fontFamilyOptions = computed<SelectOption[]>(() => [
+  ...baseFontFamilyOptions,
+  ...installedFontFamilies.value.map((name) => {
+    const safe = name.replace(/["\\]/g, '')
+    return { value: `font:${name}`, label: name, style: { fontFamily: `"${safe}", system-ui, sans-serif` } }
+  }),
+  ...customFonts.value.map((font) => ({ value: `custom:${font.id}`, label: font.name, meta: 'Загруженный шрифт', style: { fontFamily: `"Nivora Font ${font.id}", system-ui, sans-serif` } })),
+])
+const installedFontFamilies = ref<string[]>([])
+onMounted(async () => {
+  installedFontFamilies.value = await getInstalledFontFamilies()
+})
+const accentPresets = ['#5b8dd9', '#3d6ba8', '#8b653f', '#65764b', '#65747a', '#8c5145', '#756157', '#596f5b']
+const colorTokenOptions: SelectOption[] = [
+  { value: 'accent', label: 'Основной акцент', meta: 'Кнопки, selection, focus' },
+  { value: 'accent_strong', label: 'Яркий акцент', meta: 'Hover и подсветка' },
+  { value: 'background', label: 'Фон приложения', meta: 'Основной фон' },
+  { value: 'panel', label: 'Панели', meta: 'Карточки и секции' },
+  { value: 'panel_raised', label: 'Поднятые панели', meta: 'Меню и dropdown' },
+  { value: 'panel_soft', label: 'Мягкие поверхности', meta: 'Hover и secondary' },
+  { value: 'text', label: 'Основной текст', meta: 'Заголовки и значения' },
+  { value: 'muted', label: 'Приглушённый текст', meta: 'Подписи и описания' },
+  { value: 'quiet', label: 'Вторичный текст', meta: 'Кнопки и метаданные' },
+  { value: 'border', label: 'Границы', meta: 'Контуры элементов' },
+  { value: 'danger', label: 'Ошибка / удаление', meta: 'Опасные действия' },
+  { value: 'success', label: 'Успех', meta: 'Статусы и подтверждения' },
+  { value: 'warning', label: 'Предупреждение', meta: 'Активность и внимание' },
+  { value: 'banner_shade', label: 'Затемнение баннера', meta: 'Нижний градиент карточки' },
+]
+const tokenLabels: Record<string, string> = Object.fromEntries(colorTokenOptions.map((option) => [option.value, option.label]))
+const pageThemeOptions: SelectOption[] = [
+  { value: 'inherit', label: 'Как глобальная', meta: 'Без переопределения' },
+  { value: 'dark', label: 'Тёмная' },
+  { value: 'light', label: 'Светлая' },
+  { value: 'glass', label: 'Glass' },
+]
+const pageLayoutOptions: SelectOption[] = [
+  { value: 'balanced', label: 'Сбалансированная', meta: 'Рекомендуется' },
+  { value: 'compact', label: 'Компактная', meta: 'Больше элементов' },
+  { value: 'wide', label: 'Свободная', meta: 'Больше воздуха' },
+]
+const densityOptions: SelectOption[] = [
+  { value: 'compact', label: 'Компактная', meta: 'Плотная сетка' },
+  { value: 'comfortable', label: 'Комфортная', meta: 'Стандарт' },
+  { value: 'spacious', label: 'Просторная', meta: 'Больше отступов' },
+]
+const instanceLayoutOptions: SelectOption[] = [
+  { value: 'default', label: 'Обычный список', meta: 'Строки с подборкой и действиями' },
+  { value: 'compact', label: 'Компактный режим', meta: 'Плотные плитки экземпляров' },
+]
+const sidebarPositionOptions: SelectOption[] = [
+  { value: 'left', label: 'Слева' },
+  { value: 'right', label: 'Справа' },
+  { value: 'top', label: 'Сверху' },
+  { value: 'bottom', label: 'Снизу' },
+]
+const sidebarModeOptions: SelectOption[] = [
+  { value: 'expanded', label: 'Развёрнутый', meta: 'Иконки и подписи' },
+  { value: 'adaptive', label: 'Адаптивный', meta: 'Текст только если есть место' },
+  { value: 'compact', label: 'Компактный', meta: 'Только иконки' },
+]
+const sidebarWidthModeOptions: SelectOption[] = [
+  { value: 'full', label: 'Во всю ширину', meta: 'Максимальный rail' },
+  { value: 'content', label: 'По содержимому', meta: 'Подстраивается под навигацию' },
+  { value: 'manual', label: 'Вручную', meta: 'Ползунок или растягивание' },
+]
+const sidebarVisibilityOptions: SelectOption[] = [
+  { value: 'always', label: 'Показывать всегда', meta: 'Закреплён на экране' },
+  { value: 'hover', label: 'Только при наведении', meta: 'Плавно скрывается к краю' },
+]
+const animationOptions: SelectOption[] = [
+  { value: 'full', label: 'Полные', meta: 'Все переходы и эффекты' },
+  { value: 'reduced', label: 'Умеренные', meta: 'Без тяжёлых эффектов' },
+  { value: 'off', label: 'Выключены', meta: 'Максимальная стабильность' },
+]
+const animationStyleOptions: SelectOption[] = [
+  { value: 'fade', label: 'Fade', meta: 'Мягкое появление' },
+  { value: 'slide', label: 'Slide', meta: 'Смещение по вертикали' },
+  { value: 'scale', label: 'Scale', meta: 'Лёгкое масштабирование' },
+  { value: 'none', label: 'Без эффекта', meta: 'Только мгновенная смена' },
+]
+const perPageAnimationStyleOptions: SelectOption[] = [
+  { value: '', label: 'Как глобальная', meta: 'Наследует общий стиль' },
+  ...animationStyleOptions,
+]
+const radiusPresets: Array<{ label: string; hint: string; value: Record<string, number> }> = [
+  { label: 'Острые', hint: 'Строгие прямые углы', value: { card: 0, button: 0, control: 0, sidebar: 0 } },
+  { label: 'Стандарт', hint: 'Значения Nivora по умолчанию', value: { card: 7, button: 8, control: 10, sidebar: 0 } },
+  { label: 'Скруглённые', hint: 'Мягкий современный вид', value: { card: 12, button: 12, control: 12, sidebar: 8 } },
+  { label: 'Мягкие', hint: 'Максимально плавные формы', value: { card: 18, button: 20, control: 22, sidebar: 16 } },
+]
+
+type RailSection = 'general' | 'buttons' | 'colors' | 'shape' | 'wallpaper' | 'navigation' | 'motion' | 'pages' | 'plugins'
+const railSections: Array<{ id: RailSection; label: string; icon: string; hint: string }> = [
+  { id: 'general', label: 'Тема', icon: 'palette', hint: 'Режим, акцент, шрифт, масштаб' },
+  { id: 'buttons', label: 'Кнопки', icon: 'settings', hint: 'Размер, текст, иконка, текстура и звук' },
+  { id: 'colors', label: 'Цвета', icon: 'mods', hint: 'Вся палитра лаунчера' },
+  { id: 'shape', label: 'Формы', icon: 'instances', hint: 'Закруглённости, плотность, поверхности' },
+  { id: 'wallpaper', label: 'Обои', icon: 'image', hint: 'Картинка, размытие, видимость' },
+  { id: 'navigation', label: 'Навигация', icon: 'monitor', hint: 'Сайдбар: положение, иконки пунктов' },
+  { id: 'motion', label: 'Движение', icon: 'activity', hint: 'Анимации страниц и поверхностей' },
+  { id: 'pages', label: 'Страницы', icon: 'file', hint: 'Темы и раскладки страниц' },
+  { id: 'plugins', label: 'Плагины для тем', icon: 'mods', hint: 'Живой предпросмотр плагина темы' },
+]
+const activeSection = ref<RailSection>('general')
+const selectedTarget = ref('')
+const selectedButtonLabelFallback = ref('')
+const hoveredTarget = ref('')
+const buttonScope = ref<'global' | 'specific'>('global')
+
+function selectRailSection(id: RailSection) {
+  activeSection.value = id
+  selectedTarget.value = ''
+  selectedButtonLabelFallback.value = ''
+  buttonScope.value = 'global'
+}
+
+function targetEditor(target: string): TargetEditor | undefined {
+  const registered = targetRegistry[target]
+  if (registered) return registered
+  const role = buttonCustomizationRole(target)
+  const group = role ? targetRegistry[role] : undefined
+  return group ? { ...group, buttonId: target as ButtonCustomizationTarget } : undefined
+}
+
+function selectTarget(target: string, label?: string) {
+  selectedTarget.value = target
+  selectedButtonLabelFallback.value = label || ''
+  const buttonId = targetEditor(target)?.buttonId
+  if (buttonId) {
+    activeSection.value = 'buttons'
+    buttonScope.value = 'specific'
+  } else {
+    buttonScope.value = 'global'
+  }
+}
+
+function clearSelection() {
+  selectedTarget.value = ''
+  selectedButtonLabelFallback.value = ''
+  buttonScope.value = 'global'
+}
+
+function handleEscape() {
+  if (selectedTarget.value) clearSelection()
+}
+
+onMounted(() => { window.addEventListener('keydown', handleStudioKeydown) })
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', handleStudioKeydown)
+  if (pluginPreviewName.value) emit('stopThemePlugin')
+})
+
+type TargetEditor = {
+  label: string
+  description: string
+  tokens: string[]
+  buttonId?: ButtonCustomizationTarget
+  radius?: { key: 'card' | 'button' | 'control' | 'sidebar'; label: string }
+  extras?: 'wallpaper' | 'sidebar' | 'text'
+  note?: string
+}
+
+const targetRegistry: Record<string, TargetEditor> = {
+  background: {
+    label: 'Фон лаунчера',
+    description: 'Подложка всего окна. Обои рисуются поверх этого цвета.',
+    tokens: ['background'],
+    extras: 'wallpaper',
+  },
+  sidebar: {
+    label: 'Сайдбар',
+    description: 'Навигационная панель с брендом и меню.',
+    tokens: ['panel'],
+    radius: { key: 'sidebar', label: 'Закруглённость сайдбара' },
+    extras: 'sidebar',
+  },
+  'nav-item': {
+    label: 'Пункт меню',
+    description: 'Кнопки навигации в сайдбаре.',
+    buttonId: 'nav-item',
+    tokens: ['quiet', 'muted', 'accent'],
+    radius: { key: 'button', label: 'Закруглённость пункта' },
+    note: 'Активный пункт подсвечивается акцентом, соседние — вторичным текстом.',
+  },
+  'account-chip': {
+    label: 'Чип аккаунта',
+    description: 'Карточка текущего пользователя внизу сайдбара.',
+    tokens: ['panel_soft', 'text', 'muted'],
+    radius: { key: 'control', label: 'Закруглённость чипа' },
+  },
+  'search-field': {
+    label: 'Поле поиска',
+    description: 'Строка поиска в верхней панели страницы.',
+    tokens: ['panel_raised', 'border', 'muted'],
+    radius: { key: 'control', label: 'Закруглённость поля' },
+  },
+  'topbar-button': {
+    label: 'Кнопка действия',
+    description: 'Акцентная кнопка в верхней панели («Импортировать»).',
+    buttonId: 'topbar-button',
+    tokens: ['accent', 'accent_strong'],
+    radius: { key: 'button', label: 'Закруглённость кнопки' },
+    note: 'Цвет текста на кнопке подбирается автоматически для контраста.',
+  },
+  'hero-card': {
+    label: 'Карточка экземпляра',
+    description: 'Главная строка выбранного экземпляра в библиотеке.',
+    tokens: ['panel', 'border', 'text'],
+    radius: { key: 'card', label: 'Закруглённость карточки' },
+  },
+  'hero-banner': {
+    label: 'Миниатюра строки',
+    description: 'Квадратная иконка-миниатюра слева в строке экземпляра.',
+    tokens: ['accent', 'accent_strong', 'banner_shade'],
+    note: 'Градиент строится от акцента к яркому акценту с затемнением.',
+  },
+  'hero-play': {
+    label: 'Кнопка «Играть»',
+    description: 'Главная кнопка запуска игры в строке экземпляра.',
+    buttonId: 'hero-play',
+    tokens: ['accent'],
+    radius: { key: 'button', label: 'Закруглённость кнопки' },
+  },
+  'grid-card': {
+    label: 'Карточка списка',
+    description: 'Карточки остальных экземпляров и списков.',
+    tokens: ['panel_raised', 'border', 'text', 'muted'],
+    radius: { key: 'card', label: 'Закруглённость карточки' },
+  },
+  'card-button': {
+    label: 'Вторичная кнопка',
+    description: 'Тихие кнопки на карточках («Открыть», «Запустить»).',
+    buttonId: 'card-button',
+    tokens: ['quiet', 'border'],
+    radius: { key: 'button', label: 'Закруглённость кнопки' },
+  },
+  'status-chip': {
+    label: 'Статус-чип',
+    description: 'Индикатор состояния внизу страницы.',
+    tokens: ['success', 'muted'],
+    radius: { key: 'control', label: 'Закруглённость чипа' },
+  },
+  text: {
+    label: 'Заголовок страницы',
+    description: 'Заголовки и подписи страниц лаунчера.',
+    tokens: ['text', 'muted'],
+    extras: 'text',
+  },
+}
+
+const currentTarget = computed(() => targetEditor(selectedTarget.value))
+const currentRailSection = computed(() => railSections.find((section) => section.id === activeSection.value)!)
+
+const inspectorTitle = computed(() => currentTarget.value?.label || currentRailSection.value.label)
+const inspectorSubtitle = computed(() => currentTarget.value?.description || currentRailSection.value.hint)
+const selectedButtonId = computed(() => currentTarget.value?.buttonId)
+const activeButtonSettings = computed(() => selectedButtonId.value && buttonScope.value === 'specific'
+  ? resolveButtonCustomization(props.appearance.button_customization, selectedButtonId.value)
+  : normalizeButtonCustomization(props.appearance.button_customization))
+const activeButtonOverride = computed(() => {
+  const target = selectedButtonId.value
+  return target ? props.appearance.button_customization.overrides?.[target] : undefined
+})
+const hasButtonOverride = computed(() => Boolean(activeButtonOverride.value && Object.keys(activeButtonOverride.value).length))
+const selectedButtonLabel = computed(() => {
+  const target = selectedButtonId.value
+  if (!target || buttonScope.value !== 'specific' || !selectedButtonLabelFallback.value) return undefined
+  return resolveButtonLabel(props.appearance.button_customization, target, selectedButtonLabelFallback.value)
+})
+
+function updateButtonSettings(patch: Partial<ButtonCustomization>) {
+  pushHistory()
+  const current = normalizeButtonCustomization(props.appearance.button_customization)
+  if (!selectedButtonId.value || buttonScope.value === 'global') {
+    props.appearance.button_customization = normalizeButtonCustomization({ ...current, ...patch })
+    return
+  }
+  const overrides = { ...current.overrides }
+  overrides[selectedButtonId.value] = { ...overrides[selectedButtonId.value], ...patch }
+  props.appearance.button_customization = normalizeButtonCustomization({ ...current, overrides })
+}
+
+function updateButtonLabel(value: string) {
+  const target = selectedButtonId.value
+  if (!target || buttonScope.value !== 'specific' || !selectedButtonLabelFallback.value) return
+  pushHistory()
+  const current = normalizeButtonCustomization(props.appearance.button_customization)
+  const overrides = { ...current.overrides }
+  const override = { ...overrides[target] }
+  const label = Array.from(value).slice(0, 16).join('')
+  if (label) override.label = label
+  else delete override.label
+  overrides[target] = override
+  props.appearance.button_customization = normalizeButtonCustomization({ ...current, overrides })
+}
+
+function resetButtonOverride() {
+  const target = selectedButtonId.value
+  if (!target) return
+  pushHistory()
+  const current = normalizeButtonCustomization(props.appearance.button_customization)
+  const overrides = { ...current.overrides }
+  delete overrides[target]
+  props.appearance.button_customization = normalizeButtonCustomization({ ...current, overrides })
+}
+const contextLabel = computed(() => selectedTarget.value
+  ? `Редактируется: ${currentTarget.value?.label}`
+  : `Общие настройки · ${currentRailSection.value.label}`)
+const statusHint = computed(() => {
+  if (hoveredTarget.value && targetEditor(hoveredTarget.value)) return `${targetEditor(hoveredTarget.value)?.label} — клик, чтобы настроить`
+  if (selectedTarget.value) return 'Esc или клик по фону — вернуться к общим настройкам'
+  return 'Кликните элемент в предпросмотре — откроется его редактор'
+})
+
+const themeLabel = computed(() => themeOptions.find((option) => option.value === props.appearance.theme)?.label || props.appearance.theme)
+const fontLabel = computed(() => {
+  const value = props.fontFamily
+  const option = fontFamilyOptions.value.find((entry) => entry.value === value)
+  if (option) return option.label
+  if (value.startsWith('custom:')) {
+    const font = customFonts.value.find((entry) => `custom:${entry.id}` === value)
+    return font ? font.name : 'Загруженный шрифт'
+  }
+  return value || 'Системный'
+})
+const radiusSummary = computed(() => `${props.appearance.radius_tokens.card}/${props.appearance.radius_tokens.button}/${props.appearance.radius_tokens.control}/${props.appearance.radius_tokens.sidebar ?? 0}`)
+
+function setAccentColor(value: string) {
+  const normalized = value.trim().toLowerCase()
+  if (!/^#[0-9a-f]{6}$/.test(normalized)) return
+  pushHistory()
+  props.appearance.accent_color = normalized
+  props.appearance.color_tokens.accent = normalized
+}
+
+const accentPickerColor = computed({
+  get: () => props.tokens.accent,
+  set: (value: string) => setAccentColor(value),
+})
+
+const tokenModels = Object.fromEntries(colorTokenOptions.map((option) => {
+  const token = option.value
+  return [token, computed<string>({
+    get: () => props.tokens[token] || '#ffffff',
+    set: (value: string) => {
+      const normalized = value.trim().toLowerCase()
+      if (!/^#[0-9a-f]{6}$/.test(normalized)) return
+      if (token === 'accent') {
+        setAccentColor(normalized)
+        return
+      }
+      pushHistory()
+      props.appearance.color_tokens[token] = normalized
+    },
+  })]
+})) as Record<string, WritableComputedRef<string>>
+
+const selectedColorToken = ref('accent')
+const selectedTokenPickerColor = computed({
+  get: () => props.tokens[selectedColorToken.value] || '#ffffff',
+  set: (value: string) => {
+    const model = tokenModels[selectedColorToken.value]
+    if (model) model.value = value
+  },
+})
+
+function resetToken(token: string) {
+  pushHistory()
+  if (token === 'accent') {
+    setAccentColor(props.defaultColorTokens.accent)
+    return
+  }
+  props.appearance.color_tokens[token] = props.defaultColorTokens[token] || props.appearance.color_tokens[token]
+}
+
+function resetColorTokens() {
+  pushHistory()
+  props.appearance.color_tokens = { ...props.defaultColorTokens }
+  props.appearance.accent_color = props.defaultColorTokens.accent
+}
+
+const activeRadiusPreset = computed(() => {
+  const tokens = props.appearance.radius_tokens
+  return radiusPresets.findIndex((preset) =>
+    Object.entries(preset.value).every(([key, value]) => tokens[key] === value),
+  )
+})
+
+function applyRadiusPreset(preset: Record<string, number>) {
+  pushHistory()
+  props.appearance.radius_tokens = { ...preset }
+}
+
+function resetRadiusTokens() {
+  pushHistory()
+  props.appearance.radius_tokens = { ...props.defaultRadiusTokens }
+}
+
+type StudioSnapshot = { accent: string; tokens: Record<string, string>; radius: Record<string, number>; sidebarTexture: string; buttons: ButtonCustomization }
+const undoStack = ref<StudioSnapshot[]>([])
+const redoStack = ref<StudioSnapshot[]>([])
+
+function snapshotAppearance(): StudioSnapshot {
+  return {
+    accent: props.appearance.accent_color,
+    tokens: { ...props.appearance.color_tokens },
+    radius: { ...props.appearance.radius_tokens },
+    sidebarTexture: props.appearance.sidebar_texture_data,
+    buttons: JSON.parse(JSON.stringify(normalizeButtonCustomization(props.appearance.button_customization))) as ButtonCustomization,
+  }
+}
+
+function pushHistory() {
+  const current = JSON.stringify(snapshotAppearance())
+  if (undoStack.value.length && JSON.stringify(undoStack.value[undoStack.value.length - 1]) === current) return
+  undoStack.value = [...undoStack.value.slice(-49), snapshotAppearance()]
+  redoStack.value = []
+}
+
+function restoreSnapshot(snapshot: StudioSnapshot) {
+  props.appearance.accent_color = snapshot.accent
+  props.appearance.color_tokens = { ...snapshot.tokens }
+  props.appearance.radius_tokens = { ...snapshot.radius }
+  props.appearance.sidebar_texture_data = snapshot.sidebarTexture
+  props.appearance.button_customization = normalizeButtonCustomization(snapshot.buttons)
+}
+
+function undoAppearance() {
+  if (!undoStack.value.length) return
+  const previous = undoStack.value[undoStack.value.length - 1]
+  undoStack.value = undoStack.value.slice(0, -1)
+  redoStack.value = [...redoStack.value, snapshotAppearance()]
+  restoreSnapshot(previous)
+}
+
+function redoAppearance() {
+  if (!redoStack.value.length) return
+  const next = redoStack.value[redoStack.value.length - 1]
+  redoStack.value = redoStack.value.slice(0, -1)
+  undoStack.value = [...undoStack.value, snapshotAppearance()]
+  restoreSnapshot(next)
+}
+
+function handleStudioKeydown(event: KeyboardEvent) {
+  if (!(event.ctrlKey || event.metaKey)) return
+  const key = event.key.toLowerCase()
+  if (key === 'z' && !event.shiftKey) { event.preventDefault(); undoAppearance() }
+  else if (key === 'y' || (key === 'z' && event.shiftKey)) { event.preventDefault(); redoAppearance() }
+}
+
+function relativeLuminance(hex: string): number {
+  const match = /^#?([0-9a-f]{6})$/i.exec(hex.trim())
+  if (!match) return 0
+  const raw = match[1]
+  const channel = (index: number) => {
+    const value = parseInt(raw.slice(index * 2, index * 2 + 2), 16) / 255
+    return value <= 0.03928 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4
+  }
+  return 0.2126 * channel(0) + 0.7152 * channel(1) + 0.0722 * channel(2)
+}
+
+function contrastRatio(first: string, second: string): number {
+  const a = relativeLuminance(first)
+  const b = relativeLuminance(second)
+  const [lighter, darker] = a >= b ? [a, b] : [b, a]
+  return (lighter + 0.05) / (darker + 0.05)
+}
+
+const contrastPairs: Array<{ id: string; label: string; foreground: string; background: string; minimum: number }> = [
+  { id: 'text', label: 'Текст на фоне', foreground: 'text', background: 'background', minimum: 4.5 },
+  { id: 'text-panel', label: 'Текст на панели', foreground: 'text', background: 'panel', minimum: 4.5 },
+  { id: 'muted-panel', label: 'Второстепенный текст на панели', foreground: 'muted', background: 'panel', minimum: 3 },
+  { id: 'accent-text', label: 'Акцентный текст на фоне', foreground: 'accent', background: 'background', minimum: 3 },
+  { id: 'button', label: 'Текст кнопки на акценте', foreground: 'background', background: 'accent', minimum: 3 },
+  { id: 'danger', label: 'Опасное действие на фоне', foreground: 'danger', background: 'background', minimum: 3 },
+  { id: 'success', label: 'Успех на фоне', foreground: 'success', background: 'background', minimum: 3 },
+]
+
+const contrastAudit = computed(() => contrastPairs.map((pair) => {
+  const foreground = String(props.tokens[pair.foreground] || '#000000')
+  const background = String(props.tokens[pair.background] || '#ffffff')
+  const ratio = contrastRatio(foreground, background)
+  return {
+    ...pair,
+    ratio,
+    passes: ratio >= pair.minimum,
+    grade: ratio >= 7 ? 'AAA' : ratio >= 4.5 ? 'AA' : ratio >= pair.minimum ? `AA-крупный (${pair.minimum}:1)` : 'провал',
+  }
+}))
+const contrastFailures = computed(() => contrastAudit.value.filter((entry) => !entry.passes))
+
+function fixContrast(entry: { foreground: string; background: string }) {
+  // сдвигаем яркость текста от фона, пока контраст не станет комфортным
+  const foregroundToken = entry.foreground
+  const background = String(props.tokens[entry.background] || '#000000')
+  const backgroundIsLight = relativeLuminance(background) > 0.5
+  const adjust = (hex: string, lighten: boolean): string => {
+    const raw = /^#?([0-9a-f]{6})$/i.exec(hex.trim())?.[1]
+    if (!raw) return hex
+    const channel = (index: number) => {
+      const value = parseInt(raw.slice(index * 2, index * 2 + 2), 16)
+      const step = 26
+      return Math.max(0, Math.min(255, lighten ? value + step : value - step))
+    }
+    return `#${[0, 1, 2].map((index) => channel(index).toString(16).padStart(2, '0')).join('')}`
+  }
+  pushHistory()
+  let current = String(props.tokens[foregroundToken] || (backgroundIsLight ? '#000000' : '#ffffff'))
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    if (contrastRatio(current, background) >= 4.5) break
+    current = adjust(current, backgroundIsLight)
+  }
+  props.appearance.color_tokens[foregroundToken] = current
+}
+
+async function copyTokensJson() {
+  const payload = JSON.stringify({
+    accent: props.tokens.accent,
+    tokens: { ...props.tokens },
+    radius: { ...props.appearance.radius_tokens },
+  }, null, 2)
+  try {
+    await navigator.clipboard.writeText(payload)
+    copiedTokens.value = true
+    window.setTimeout(() => { copiedTokens.value = false }, 1600)
+  } catch {
+    copiedTokens.value = false
+  }
+}
+const copiedTokens = ref(false)
+
+const accentSuggestions = computed(() => {
+  // гармоничные оттенки от тона фона: приглушённые и достаточно контрастные
+  const background = String(props.tokens.background || '#0b1220')
+  const match = /^#?([0-9a-f]{6})$/i.exec(background.trim())
+  if (!match) return []
+  const raw = match[1]
+  const [r, g, b] = [0, 1, 2].map((index) => parseInt(raw.slice(index * 2, index * 2 + 2), 16) / 255)
+  const max = Math.max(r, g, b), min = Math.min(r, g, b)
+  let hue = 0
+  if (max !== min) {
+    const delta = max - min
+    if (max === r) hue = ((g - b) / delta + (g < b ? 6 : 0)) / 6
+    else if (max === g) hue = ((b - r) / delta + 3) / 6
+    else hue = ((r - g) / delta + 6) / 6
+    hue = (hue * 360 + 360) % 360
+  }
+  return [-30, 0, 30, 150, 210].map((offset) => {
+    const nextHue = (hue + offset + 360) % 360
+    const h = nextHue / 360
+    const l = 0.42
+    const s = 0.3
+    const q = l < 0.5 ? l * (1 + s) : l + s - l * s
+    const p = 2 * l - q
+    const channel = (t: number) => {
+      let tt = t
+      if (tt < 0) tt += 1
+      if (tt > 1) tt -= 1
+      if (tt < 1 / 6) return p + (q - p) * 6 * tt
+      if (tt < 1 / 2) return q
+      if (tt < 2 / 3) return p + (q - p) * (2 / 3 - tt) * 6
+      return p
+    }
+    return `#${[channel(h + 1 / 3), channel(h), channel(h - 1 / 3)]
+      .map((value) => Math.round(value * 255).toString(16).padStart(2, '0'))
+      .join('')}`
+  })
+})
+
+type PreviewWidth = 'compact' | 'standard' | 'wide'
+const previewWidth = ref<PreviewWidth>('standard')
+const previewWidthOptions: Array<{ id: PreviewWidth; label: string; hint: string }> = [
+  { id: 'compact', label: 'Компакт', hint: 'Узкое окно' },
+  { id: 'standard', label: 'Стандарт', hint: 'Обычное окно' },
+  { id: 'wide', label: 'Широкое', hint: 'Максимум места' },
+]
+const previewDesignWidth = computed(() => ({ compact: 560, standard: 860, wide: 1180 }[previewWidth.value]))
+
+const radiusKeys: Array<{ key: 'card' | 'button' | 'control' | 'sidebar'; label: string; hint: string }> = [
+  { key: 'card', label: 'Панели и карточки', hint: 'Карточки, модальные окна, секции' },
+  { key: 'button', label: 'Кнопки и навигация', hint: 'Кнопки, пункты меню, чипы действий' },
+  { key: 'control', label: 'Поля ввода', hint: 'Поиск, поля, мелкие элементы' },
+  { key: 'sidebar', label: 'Сайдбар', hint: 'Только навигационная панель' },
+]
+
+const sidebarWidthDisabled = computed(() =>
+  props.appearance.sidebar_position === 'top' ||
+  props.appearance.sidebar_position === 'bottom' ||
+  props.appearance.sidebar_width_mode !== 'manual',
+)
+
+function chooseWallpaper() {
+  emit('importWallpaperFile')
+}
+
+const sidebarTextureError = ref('')
+const SIDEBAR_TEXTURE_LIMIT = 15 * 1024 * 1024
+
+async function chooseSidebarTexture() {
+  const file = await pickFile({ accept: '.png,.jpg,.jpeg,.webp', title: 'Текстура сайдбара' })
+  if (!file) return
+  if (file.size > SIDEBAR_TEXTURE_LIMIT) {
+    sidebarTextureError.value = 'Изображение должно быть не больше 15 МБ.'
+    return
+  }
+  const extension = file.fileName.split('.').pop()?.toLowerCase()
+  const mime = extension === 'png' ? 'image/png' : extension === 'jpg' || extension === 'jpeg' ? 'image/jpeg' : extension === 'webp' ? 'image/webp' : ''
+  const data = mime ? `data:${mime};base64,${file.data}` : ''
+  if (!safeDataUrl(data, 'image')) {
+    sidebarTextureError.value = 'Выберите PNG, JPEG или WebP не больше 15 МБ.'
+    return
+  }
+  pushHistory()
+  props.appearance.sidebar_texture_data = data
+  sidebarTextureError.value = ''
+}
+
+function clearSidebarTexture() {
+  pushHistory()
+  props.appearance.sidebar_texture_data = ''
+  sidebarTextureError.value = ''
+}
+
+const fontError = ref('')
+const MAX_FONTS = 8
+
+async function chooseFontFile() {
+  const file = await pickFile({ accept: '.ttf,.otf,.woff,.woff2', title: 'Загрузка шрифта' })
+  if (!file) return
+  let binary: Uint8Array
+  try {
+    binary = Uint8Array.from(atob(file.data), (char) => char.charCodeAt(0))
+  } catch {
+    fontError.value = 'Не удалось прочитать файл шрифта.'
+    return
+  }
+  const validated = validateFontFile(file.fileName, '', binary)
+  if (!validated) {
+    fontError.value = 'Поддерживаются TTF, OTF, WOFF и WOFF2 до 20 МБ.'
+    return
+  }
+  const current = normalizeFontAssets(props.appearance.custom_fonts)
+  if (current.length >= MAX_FONTS) {
+    fontError.value = 'Максимум 8 загруженных шрифтов. Сначала удалите один.'
+    return
+  }
+  const id = uniqueFontId(fontIdFromName(file.fileName), current)
+  const name = (file.fileName.replace(/\.[^.]+$/, '') || id).slice(0, 64)
+  pushHistory()
+  props.appearance.custom_fonts = [...current, { id, name, data: `data:${validated.mime};base64,${validated.base64}` }] as never
+  registerFontAssets(props.appearance.custom_fonts as FontAsset[])
+  fontError.value = ''
+  emit('update:fontFamily', `custom:${id}`)
+}
+
+function removeFont(id: string) {
+  pushHistory()
+  const current = normalizeFontAssets(props.appearance.custom_fonts)
+  props.appearance.custom_fonts = current.filter((font) => font.id !== id) as never
+  if (props.fontFamily === `custom:${id}`) emit('update:fontFamily', 'system')
+}
+
+/* иконки и скрытие пунктов меню: каждая навигационная кнопка получает собственный override */
+const navIconError = ref('')
+
+function navItemTarget(key: ButtonLabelKey): ButtonCustomizationTarget {
+  return buttonCustomizationTarget('nav-item', key)
+}
+
+function navOverride(key: ButtonLabelKey) {
+  return props.appearance.button_customization.overrides?.[navItemTarget(key)]
+}
+
+function navItemHidden(key: ButtonLabelKey): boolean {
+  return navOverride(key)?.hidden === true
+}
+
+function updateNavOverride(key: ButtonLabelKey, patch: Record<string, unknown>) {
+  pushHistory()
+  const current = normalizeButtonCustomization(props.appearance.button_customization)
+  const target = navItemTarget(key)
+  const overrides = { ...current.overrides }
+  overrides[target] = { ...overrides[target], ...patch } as never
+  props.appearance.button_customization = normalizeButtonCustomization({ ...current, overrides })
+}
+
+async function chooseNavIcon(key: ButtonLabelKey) {
+  const file = await pickFile({ accept: '.png,.jpg,.jpeg,.webp', title: 'Иконка пункта меню' })
+  if (!file) return
+  if (file.size > 15 * 1024 * 1024) {
+    navIconError.value = 'Изображение должно быть не больше 15 МБ.'
+    return
+  }
+  const extension = file.fileName.split('.').pop()?.toLowerCase()
+  const mime = extension === 'png' ? 'image/png' : extension === 'jpg' || extension === 'jpeg' ? 'image/jpeg' : extension === 'webp' ? 'image/webp' : ''
+  const data = mime ? `data:${mime};base64,${file.data}` : ''
+  if (!safeDataUrl(data, 'image')) {
+    navIconError.value = 'Выберите PNG, JPEG или WebP не больше 15 МБ.'
+    return
+  }
+  updateNavOverride(key, { icon_data: data })
+  navIconError.value = ''
+}
+
+function clearNavIcon(key: ButtonLabelKey) {
+  updateNavOverride(key, { icon_data: '' })
+  navIconError.value = ''
+}
+
+function toggleNavHidden(key: ButtonLabelKey, value: boolean) {
+  updateNavOverride(key, { hidden: value })
+}
+
+/* плагин для темы: предпросмотр */
+const pluginBusy = ref(false)
+const pluginError = ref('')
+const pluginPreviewName = ref('')
+const pluginPreviewVersion = ref('')
+
+async function chooseThemePlugin() {
+  if (pluginBusy.value) return
+  const file = await pickFile({ accept: '.zip', title: 'Плагин для темы' })
+  if (!file) return
+  pluginBusy.value = true
+  pluginError.value = ''
+  try {
+    const result = parseThemePluginZip(`data:application/zip;base64,${file.data}`)
+    emit('startThemePlugin', result)
+    pluginPreviewName.value = result.manifest.name
+    pluginPreviewVersion.value = result.manifest.version || ''
+  } catch (error) {
+    pluginError.value = error instanceof Error ? error.message : 'Не удалось прочитать архив плагина.'
+    pluginPreviewName.value = ''
+    pluginPreviewVersion.value = ''
+  } finally {
+    pluginBusy.value = false
+  }
+}
+
+function stopThemePluginPreview() {
+  emit('stopThemePlugin')
+  pluginPreviewName.value = ''
+  pluginPreviewVersion.value = ''
+}
+
+const fontFamilyValue = computed({
+  get: () => props.fontFamily,
+  set: (value: string) => emit('update:fontFamily', value),
+})
+
+const effectiveAnimationStyle = computed(() => props.appearance.animation_settings.page_style)
+const effectiveAnimationDuration = computed(() => props.appearance.animation_settings.page_duration_ms)
+
+const saveLabel = computed(() => {
+  if (props.saveState === 'saving') return 'Сохраняю…'
+  if (props.saveState === 'error') return 'Повторить сохранение'
+  if (props.saveState === 'dirty') return 'Сохранить изменения'
+  return 'Всё сохранено'
+})
+</script>
+
+<template>
+  <section class="studio-app" @keydown.esc="handleEscape">
+    <header class="studio-toolbar">
+      <div class="studio-toolbar-copy">
+        
+        <strong>Центр настройки тем</strong>
+        <span class="studio-toolbar-context">{{ contextLabel }}</span>
+      </div>
+      <div class="studio-toolbar-actions">
+        <span class="tag" :class="{ 'tag--danger': saveState === 'error' }">{{ saveMessage || 'Изменения применяются после сохранения' }}</span>
+        <div class="studio-history-controls">
+          <button class="icon-button" type="button" aria-label="Отменить" v-tooltip="'Отменить (Ctrl+Z)'" :disabled="!undoStack.length" @click="undoAppearance"><Icon name="undo" :size="16" /></button>
+          <button class="icon-button" type="button" aria-label="Повторить" v-tooltip="'Повторить (Ctrl+Shift+Z)'" :disabled="!redoStack.length" @click="redoAppearance"><Icon name="redo" :size="16" /></button>
+        </div>
+        <button class="button button--quiet" type="button" :class="{ 'button--outline': copiedTokens }" @click="copyTokensJson"><Icon name="copy" :size="15" />{{ copiedTokens ? 'Скопировано' : 'JSON палитры' }}</button>
+        <button class="button button--outline" type="button" :disabled="busy" @click="emit('resetAppearance')"><Icon name="refresh" :size="15" />Сбросить оформление</button>
+        <button class="button button--accent" type="button" :disabled="busy || saveState === 'saving' || saveState === 'saved'" @click="emit('save')"><Icon name="check" :size="15" />{{ saveLabel }}</button>
+      </div>
+    </header>
+
+    <div class="studio-workbench">
+      <nav class="studio-rail" aria-label="Разделы студии">
+        <button
+          v-for="section in railSections"
+          :key="section.id"
+          type="button"
+          :class="{ 'studio-rail-item--active': !selectedTarget && activeSection === section.id }"
+          class="studio-rail-item"
+          v-tooltip="section.hint"
+          @click="selectRailSection(section.id)"
+        >
+          <Icon :name="section.icon" :size="16" />
+          <span>{{ section.label }}</span>
+        </button>
+      </nav>
+
+      <div class="studio-viewport">
+        <div class="studio-viewport-bar">
+          <span><Icon name="search" :size="13" />{{ statusHint }}</span>
+          <div class="studio-preview-widths" role="group" aria-label="Ширина превью">
+            <button v-for="option in previewWidthOptions" :key="option.id" type="button" :class="{ active: previewWidth === option.id }" v-tooltip="option.hint" @click="previewWidth = option.id">{{ option.label }}</button>
+          </div>
+          <button v-if="selectedTarget" class="text-button" type="button" @click="clearSelection"><Icon name="close" :size="13" />Общие настройки</button>
+        </div>
+        <div class="studio-preview-host" :style="{ maxWidth: `${previewDesignWidth}px` }">
+          <ThemeStudioPreview
+            interactive
+            :appearance="appearance"
+            :instances="instances"
+            :tokens="tokens"
+            :theme="baseTheme || theme"
+            :default-tokens="defaultColorTokens"
+            :light-tokens="lightTokens"
+            :font-family="fontFamily"
+            :language="language"
+            :wallpaper-url="wallpaperUrl"
+            :selected="selectedTarget"
+            :hovered="hoveredTarget"
+            @select="selectTarget"
+            @hover="hoveredTarget = $event || ''"
+          />
+        </div>
+      </div>
+
+      <aside class="studio-inspector">
+        <header class="studio-inspector-head">
+          <div>
+            <small>{{ selectedTarget ? 'Элемент интерфейса' : 'Общие настройки' }}</small>
+            <strong>{{ inspectorTitle }}</strong>
+            <span>{{ inspectorSubtitle }}</span>
+          </div>
+          <button v-if="selectedTarget" class="icon-button" type="button" aria-label="Закрыть редактор элемента" @click="clearSelection"><Icon name="close" :size="15" /></button>
+        </header>
+
+        <div class="studio-inspector-body">
+          <template v-if="currentTarget">
+            <div v-if="currentTarget.buttonId" class="studio-button-inspector">
+              <div class="studio-button-scope" role="group" aria-label="Область настройки кнопок">
+                <button type="button" :class="{ active: buttonScope === 'global' }" @click="buttonScope = 'global'">Все кнопки</button>
+                <button type="button" :class="{ active: buttonScope === 'specific' }" @click="buttonScope = 'specific'">Только эта</button>
+              </div>
+              <p v-if="buttonScope === 'specific'" class="studio-inspector-note">Собственные параметры этой кнопки. Остальные используют общие настройки.</p>
+              <button v-if="buttonScope === 'specific' && hasButtonOverride" class="text-button" type="button" @click="resetButtonOverride"><Icon name="refresh" :size="13" />Сбросить её настройки</button>
+            </div>
+            <ThemeButtonSettingsEditor
+              v-if="currentTarget.buttonId"
+              :settings="activeButtonSettings"
+              :resource-prefix="buttonScope === 'specific' ? (buttonCustomizationRole(currentTarget.buttonId) || currentTarget.buttonId) : 'global'"
+              :button-label="selectedButtonLabel"
+              label-placeholder="Играть"
+              show-hide-option
+              @update:settings="updateButtonSettings"
+              @update:button-label="updateButtonLabel"
+            />
+            <div v-for="token in currentTarget.tokens" :key="token" class="studio-token-row">
+              <div class="studio-token-meta">
+                <span class="studio-token-swatch" :style="{ background: tokens[token] }" />
+                <div>
+                  <strong>{{ tokenLabels[token] || token }}</strong>
+                  <small>{{ tokens[token] }}</small>
+                </div>
+                <button class="icon-button" type="button" :aria-label="`Сбросить ${tokenLabels[token] || token}`" v-tooltip="'Вернуть стандартный цвет'" @click="resetToken(token)"><Icon name="refresh" :size="13" /></button>
+              </div>
+              <ColorPicker :model-value="tokenModels[token]?.value ?? '#ffffff'" @update:model-value="tokenModels[token] && (tokenModels[token].value = $event)" />
+            </div>
+
+            <div v-if="currentTarget.radius" class="studio-inspector-field">
+              <label class="field"><span>{{ currentTarget.radius.label }} <strong>{{ appearance.radius_tokens[currentTarget.radius.key] }} px</strong></span><CustomSlider v-model="appearance.radius_tokens[currentTarget.radius.key]" :min="0" :max="24" /></label>
+            </div>
+
+            <div v-if="currentTarget.extras === 'wallpaper'" class="studio-inspector-group">
+              <h4>Обои</h4>
+              <div class="wallpaper-controls">
+                
+                <button class="button button--small button--outline" type="button" @click="chooseWallpaper">Загрузить</button>
+                <button v-if="appearance.wallpaper_path" class="button button--small button--quiet" type="button" @click="emit('clearWallpaper')">Убрать</button>
+              </div>
+              <label class="field"><span>Размытие <strong>{{ appearance.wallpaper_blur }} px</strong></span><CustomSlider v-model="appearance.wallpaper_blur" :min="0" :max="32" @change="emit('commitWallpaperBlur')" /></label>
+              <label class="field"><span>Видимость <strong>{{ appearance.wallpaper_opacity }}%</strong></span><CustomSlider v-model="appearance.wallpaper_opacity" :min="0" :max="80" /></label>
+            </div>
+
+            <div v-else-if="currentTarget.extras === 'sidebar'" class="studio-inspector-group">
+              <h4>Поведение сайдбара</h4>
+              <div class="field"><span>Положение</span><CustomSelect v-model="appearance.sidebar_position" :options="sidebarPositionOptions" /></div>
+              <div class="field"><span>Режим содержимого</span><CustomSelect v-model="appearance.sidebar_mode" :options="sidebarModeOptions" /></div>
+              <div class="button-asset-row"><span><strong>Текстура фона</strong><small>{{ appearance.sidebar_texture_data ? 'Изображение выбрано' : 'Не выбрана' }}</small></span><button class="button button--small button--outline" type="button" @click="chooseSidebarTexture">{{ appearance.sidebar_texture_data ? 'Заменить' : 'Выбрать' }}</button><button v-if="appearance.sidebar_texture_data" class="icon-button" type="button" aria-label="Убрать текстуру сайдбара" @click="clearSidebarTexture"><Icon name="close" :size="14" /></button></div>
+              <p v-if="sidebarTextureError" class="studio-inspector-note studio-inspector-note--error" role="alert">{{ sidebarTextureError }}</p>
+              <small class="studio-inspector-note">PNG, JPEG или WebP · до 15 МБ</small>
+              <label class="workspace-check"><input v-model="appearance.sidebar_floating" type="checkbox" /><span><strong>Плавающий режим</strong><small>Сайдбар не приклеен к краю окна</small></span></label>
+              <button class="text-button" type="button" @click="selectRailSection('navigation')"><Icon name="monitor" :size="13" />Все настройки навигации</button>
+            </div>
+
+            <div v-else-if="currentTarget.extras === 'text'" class="studio-inspector-group">
+              <h4>Шрифт интерфейса</h4>
+              <div class="field"><span>Гарнитура</span><CustomSelect v-model="fontFamilyValue" :options="fontFamilyOptions" /></div>
+              <p class="studio-inspector-note">Шрифт применяется ко всему лаунчеру, не только к заголовкам.</p>
+            </div>
+
+            <p v-if="currentTarget.note" class="studio-inspector-note">{{ currentTarget.note }}</p>
+          </template>
+
+          <template v-else-if="activeSection === 'general'">
+            <div class="studio-inspector-field"><div class="field"><span>Основная тема</span><CustomSelect v-model="appearance.theme" :options="themeOptions" /></div></div>
+            <div class="studio-inspector-field"><div class="field"><span>Шрифт интерфейса</span><CustomSelect v-model="fontFamilyValue" :options="fontFamilyOptions" /></div></div>
+            <div class="studio-inspector-group">
+              <h4>Шрифты</h4>
+              <div class="wallpaper-controls">
+                <button class="button button--small button--outline" type="button" @click="chooseFontFile">Загрузить шрифт</button>
+              </div>
+              <div v-for="font in customFonts" :key="font.id" class="button-asset-row">
+                <span><strong :style="{ fontFamily: `&quot;Nivora Font ${font.id}&quot;, system-ui, sans-serif` }">{{ font.name }}</strong><small>Загруженный шрифт</small></span>
+                <button class="icon-button" type="button" aria-label="Удалить шрифт" v-tooltip="`Удалить шрифт ${font.name}`" @click="removeFont(font.id)"><Icon name="close" :size="14" /></button>
+              </div>
+              <p v-if="fontError" class="studio-inspector-note studio-inspector-note--error" role="alert">{{ fontError }}</p>
+              <small class="studio-inspector-note">TTF, OTF, WOFF или WOFF2 · до 20 МБ · до 8 файлов</small>
+            </div>
+            <div class="studio-inspector-field"><div class="field"><span>Язык интерфейса</span><CustomSelect :model-value="language" :options="languageOptions" @update:model-value="emit('update:language', $event)" /></div></div>
+            <p class="studio-inspector-note">При применении темы её язык выбирается автоматически. Здесь можно переключить язык отдельно от темы.</p>
+            <div class="studio-inspector-group">
+              <h4>Акцент</h4>
+              <div class="studio-token-row">
+                <div class="studio-token-meta">
+                  <span class="studio-token-swatch" :style="{ background: tokens.accent }" />
+                  <div><strong>Основной акцент</strong><small>{{ tokens.accent }}</small></div>
+                  <button class="icon-button" type="button" aria-label="Сбросить акцент" v-tooltip="'Вернуть стандартный цвет'" @click="resetToken('accent')"><Icon name="refresh" :size="13" /></button>
+                </div>
+                <ColorPicker :model-value="accentPickerColor" @update:model-value="accentPickerColor = $event" />
+              </div>
+              <div class="studio-swatches"><button v-for="color in accentPresets" :key="color" type="button" v-tooltip="color" :aria-label="`Акцент ${color}`" :class="{ active: tokens.accent.toLowerCase() === color }" :style="{ background: color }" @click="setAccentColor(color)" /></div>
+              <div v-if="accentSuggestions.length" class="studio-accent-suggest">
+                <small>Подобрано под фон интерфейса:</small>
+                <div class="studio-swatches"><button v-for="color in accentSuggestions" :key="color" type="button" v-tooltip="color" :aria-label="`Акцент ${color}`" :class="{ active: tokens.accent.toLowerCase() === color }" :style="{ background: color }" @click="setAccentColor(color)" /></div>
+              </div>
+            </div>
+            <div class="studio-inspector-field"><div class="field"><span>Плотность</span><CustomSelect v-model="appearance.density" :options="densityOptions" /></div></div>
+            <div class="studio-inspector-field"><div class="field"><span>Экземпляры</span><CustomSelect v-model="appearance.instance_layout" :options="instanceLayoutOptions" /></div></div>
+            <label class="field"><span>Масштаб интерфейса <strong>{{ appearance.ui_scale }}%</strong></span><CustomSlider v-model="appearance.ui_scale" :min="80" :max="125" :step="5" /></label>
+          </template>
+
+          <template v-else-if="activeSection === 'buttons'">
+            <ThemeButtonSettingsEditor :settings="appearance.button_customization" resource-prefix="global" @update:settings="updateButtonSettings" />
+            <div class="studio-inspector-group">
+              <h4>Подписи навигации</h4>
+              <label v-for="item in labelOptions" :key="item.key" class="field"><span>{{ item.label }} <strong>{{ Array.from(appearance.button_customization.labels[item.key]).length }}/16</strong></span><input v-model="appearance.button_customization.labels[item.key]" type="text" maxlength="16" :placeholder="item.label" /></label>
+              <p class="studio-inspector-note">Если подпись не помещается, она сокращается с многоточием. Наведение показывает полный текст в подсказке лаунчера.</p>
+            </div>
+          </template>
+
+          <template v-else-if="activeSection === 'colors'">
+            <div class="studio-inspector-toolbar">
+              <div class="field"><span>Токен цвета</span><CustomSelect v-model="selectedColorToken" :options="colorTokenOptions" /></div>
+              <button class="button button--small button--quiet" type="button" @click="resetColorTokens"><Icon name="refresh" :size="13" />Сбросить палитру</button>
+            </div>
+            <div class="studio-token-row">
+              <div class="studio-token-meta">
+                <span class="studio-token-swatch" :style="{ background: tokens[selectedColorToken] }" />
+                <div><strong>{{ tokenLabels[selectedColorToken] }}</strong><small>{{ tokens[selectedColorToken] }}</small></div>
+                <button class="icon-button" type="button" aria-label="Сбросить цвет" v-tooltip="'Вернуть стандартный цвет'" @click="resetToken(selectedColorToken)"><Icon name="refresh" :size="13" /></button>
+              </div>
+              <ColorPicker :model-value="selectedTokenPickerColor" @update:model-value="selectedTokenPickerColor = $event" />
+            </div>
+            <div class="studio-contrast-audit">
+              <div class="studio-contrast-head">
+                <h4><Icon name="eye" :size="13" />Аудит контраста WCAG</h4>
+                <span class="tag" :class="contrastFailures.length ? 'tag--danger' : 'tag--success'">{{ contrastFailures.length ? `${contrastFailures.length} проблем` : 'всё читаемо' }}</span>
+              </div>
+              <ul>
+                <li v-for="entry in contrastAudit" :key="entry.id" :class="{ 'studio-contrast-row--fail': !entry.passes }">
+                  <span class="studio-contrast-pair"><i :style="{ background: tokens[entry.background] }" /><i :style="{ background: tokens[entry.foreground] }" />{{ entry.label }}</span>
+                  <span class="studio-contrast-grade">{{ entry.ratio.toFixed(2) }}:1 · {{ entry.grade }}</span>
+                  <button v-if="!entry.passes" class="text-button" type="button" @click="fixContrast(entry)">Исправить</button>
+                </li>
+              </ul>
+              <p class="studio-inspector-note">Пороги: 4.5:1 для обычного текста, 3:1 для крупного и второстепенного. «Исправить» двигает яркость текста, пока контраст не станет достаточным.</p>
+            </div>
+            <div class="studio-token-list">
+              <button
+                v-for="option in colorTokenOptions"
+                :key="option.value"
+                type="button"
+                :class="{ active: selectedColorToken === option.value }"
+                v-tooltip="option.meta"
+                @click="selectedColorToken = option.value"
+              ><span :style="{ background: tokens[option.value] }" />{{ option.label }}</button>
+            </div>
+          </template>
+
+          <template v-else-if="activeSection === 'shape'">
+            <div class="studio-radius-presets">
+              <button
+                v-for="(preset, index) in radiusPresets"
+                :key="preset.label"
+                type="button"
+                :class="{ active: activeRadiusPreset === index }"
+                @click="applyRadiusPreset(preset.value)"
+              ><strong>{{ preset.label }}</strong><small>{{ preset.hint }}</small></button>
+            </div>
+            <label v-for="item in radiusKeys" :key="item.key" class="field">
+              <span>{{ item.label }} <strong>{{ appearance.radius_tokens[item.key] }} px</strong></span>
+              <CustomSlider v-model="appearance.radius_tokens[item.key]" :min="0" :max="24" />
+              <small>{{ item.hint }}</small>
+            </label>
+            <div class="studio-inspector-field"><div class="field"><span>Плотность</span><CustomSelect v-model="appearance.density" :options="densityOptions" /></div></div>
+            <div class="studio-inspector-group">
+              <h4>Поверхности</h4>
+              <p class="studio-inspector-note">Панели, карточки и окна: прозрачность, размытие фона и сила теней.</p>
+              <label class="field"><span>Непрозрачность панелей <strong>{{ appearance.surface_opacity }}%</strong></span><CustomSlider v-model="appearance.surface_opacity" :min="20" :max="100" :step="5" /><small>Чем ниже, тем прозрачнее карточки</small></label>
+              <label class="field"><span>Размытие панелей <strong>{{ appearance.surface_blur }} px</strong></span><CustomSlider v-model="appearance.surface_blur" :min="0" :max="24" /><small>Мягкое стекло за панелями; 0 выключено</small></label>
+              <label class="field"><span>Сила теней <strong>{{ appearance.shadow_strength }}%</strong></span><CustomSlider v-model="appearance.shadow_strength" :min="0" :max="100" :step="5" /><small>Мощные тени подходят тёмным темам</small></label>
+            </div>
+            <button class="button button--small button--quiet" type="button" @click="resetRadiusTokens"><Icon name="refresh" :size="13" />Сбросить формы</button>
+          </template>
+
+          <template v-else-if="activeSection === 'wallpaper'">
+            <div class="wallpaper-controls">
+              
+              <button class="button button--small button--outline" type="button" @click="chooseWallpaper">Загрузить изображение</button>
+              <button v-if="appearance.wallpaper_path" class="button button--small button--quiet" type="button" @click="emit('clearWallpaper')">Убрать обои</button>
+            </div>
+            <label class="field"><span>Размытие <strong>{{ appearance.wallpaper_blur }} px</strong></span><CustomSlider v-model="appearance.wallpaper_blur" :min="0" :max="32" @change="emit('commitWallpaperBlur')" /></label>
+            <label class="field"><span>Видимость <strong>{{ appearance.wallpaper_opacity }}%</strong></span><CustomSlider v-model="appearance.wallpaper_opacity" :min="0" :max="80" /></label>
+            <p class="studio-inspector-note">Изображение уменьшается и размывается заранее, поэтому обои не нагружают интерфейс. Максимальный размер файла — 32 MiB.</p>
+          </template>
+
+          <template v-else-if="activeSection === 'navigation'">
+            <div class="studio-inspector-field"><div class="field"><span>Положение</span><CustomSelect v-model="appearance.sidebar_position" :options="sidebarPositionOptions" /></div></div>
+            <div class="studio-inspector-field"><div class="field"><span>Режим содержимого</span><CustomSelect v-model="appearance.sidebar_mode" :options="sidebarModeOptions" /></div></div>
+            <div class="studio-inspector-field"><div class="field"><span>Ширина</span><CustomSelect v-model="appearance.sidebar_width_mode" :options="sidebarWidthModeOptions" /></div></div>
+            <div class="studio-inspector-field"><div class="field"><span>Видимость</span><CustomSelect v-model="appearance.sidebar_visibility" :options="sidebarVisibilityOptions" /></div></div>
+            <label class="field" :class="{ 'field--disabled': sidebarWidthDisabled }"><span>Размер rail <strong>{{ sidebarWidthDisabled ? 'фиксированный' : `${appearance.sidebar_width} px` }}</strong></span><CustomSlider v-model="appearance.sidebar_width" :min="168" :max="360" :disabled="sidebarWidthDisabled" /><small>{{ appearance.sidebar_position === 'top' || appearance.sidebar_position === 'bottom' ? 'Для верхней и нижней панели ширина задаётся окном.' : appearance.sidebar_width_mode === 'manual' ? 'Перетащите ползунок или растяните rail за край.' : 'Ползунок недоступен: выберите режим «Вручную», чтобы менять ширину.' }}</small></label>
+            <div class="studio-inspector-group">
+              <h4>Внешний вид сайдбара</h4>
+              <label class="field"><span>Закруглённость <strong>{{ appearance.radius_tokens.sidebar ?? 0 }} px</strong></span><CustomSlider v-model="appearance.radius_tokens.sidebar" :min="0" :max="24" /></label>
+              <div class="button-asset-row"><span><strong>Текстура фона</strong><small>{{ appearance.sidebar_texture_data ? 'Изображение выбрано' : 'Не выбрана' }}</small></span><button class="button button--small button--outline" type="button" @click="chooseSidebarTexture">{{ appearance.sidebar_texture_data ? 'Заменить' : 'Выбрать' }}</button><button v-if="appearance.sidebar_texture_data" class="icon-button" type="button" aria-label="Убрать текстуру сайдбара" @click="clearSidebarTexture"><Icon name="close" :size="14" /></button></div>
+              <p v-if="sidebarTextureError" class="studio-inspector-note studio-inspector-note--error" role="alert">{{ sidebarTextureError }}</p>
+              <small class="studio-inspector-note">PNG, JPEG или WebP · до 15 МБ</small>
+            </div>
+            <label class="workspace-check"><input v-model="appearance.sidebar_floating" type="checkbox" /><span><strong>Плавающий режим</strong><small>Сайдбар не приклеен к краю окна</small></span></label>
+            <div class="studio-inspector-group">
+              <h4>Пункты меню</h4>
+              <p class="studio-inspector-note">Своя иконка для каждого пункта, текст и переключение видимости. Пункт можно вернуть тем же переключателем.</p>
+              <div v-for="item in labelOptions" :key="`nav-item-${item.key}`" class="studio-nav-item-row">
+                <span class="studio-nav-item-icon">
+                  <img v-if="navOverride(item.key)?.icon_data" :src="String(navOverride(item.key)?.icon_data)" alt="" draggable="false" />
+                  <Icon v-else :name="item.key === 'themes' ? 'palette' : item.key === 'mods' ? 'mods' : 'settings'" :size="16" />
+                </span>
+                <span class="studio-nav-item-copy"><strong>{{ item.label }}</strong><small>{{ navItemHidden(item.key) ? 'Скрыт из меню' : 'Показан в меню' }}</small></span>
+                <span class="studio-nav-item-actions">
+                  <button class="button button--small button--outline" type="button" @click="chooseNavIcon(item.key)">{{ navOverride(item.key)?.icon_data ? 'Заменить' : 'Иконка' }}</button>
+                  <button v-if="navOverride(item.key)?.icon_data" class="icon-button" type="button" aria-label="Убрать иконку" @click="clearNavIcon(item.key)"><Icon name="close" :size="14" /></button>
+                  <label class="workspace-check studio-nav-item-toggle"><input type="checkbox" :checked="navItemHidden(item.key)" @change="toggleNavHidden(item.key, ($event.target as HTMLInputElement).checked)" /><span>Скрыть</span></label>
+                </span>
+              </div>
+              <p v-if="navIconError" class="studio-inspector-note studio-inspector-note--error" role="alert">{{ navIconError }}</p>
+              <small class="studio-inspector-note">PNG, JPEG или WebP · до 15 МБ</small>
+            </div>
+          </template>
+
+          <template v-else-if="activeSection === 'motion'">
+            <div class="studio-inspector-field"><div class="field"><span>Анимации</span><CustomSelect v-model="appearance.animations" :options="animationOptions" /></div></div>
+            <div class="studio-inspector-group">
+              <h4>Тонкая настройка <span class="tag">{{ effectiveAnimationStyle }} · {{ effectiveAnimationDuration }} ms</span></h4>
+              <div class="studio-inspector-field"><div class="field"><span>Стиль страницы</span><CustomSelect v-model="appearance.animation_settings.page_style" :options="animationStyleOptions" /></div></div>
+              <label class="field"><span>Длительность страницы <strong>{{ appearance.animation_settings.page_duration_ms }} ms</strong></span><CustomSlider v-model="appearance.animation_settings.page_duration_ms" :min="0" :max="1000" :step="10" /></label>
+              <label class="field"><span>Длительность поверхностей <strong>{{ appearance.animation_settings.surface_duration_ms }} ms</strong></span><CustomSlider v-model="appearance.animation_settings.surface_duration_ms" :min="0" :max="1200" :step="10" /></label>
+              <label class="field"><span>Шаг каскада <strong>{{ appearance.animation_settings.surface_stagger_ms }} ms</strong></span><CustomSlider v-model="appearance.animation_settings.surface_stagger_ms" :min="0" :max="200" :step="5" /></label>
+            </div>
+            <div class="studio-inspector-group">
+              <h4>Отдельные страницы</h4>
+              <p class="studio-inspector-note">«Как глобальная» наследует общий стиль. Переключайте страницы в предпросмотре — смена проигрывает анимацию именно этой страницы.</p>
+              <div v-for="page in pages" :key="`animation-${page.id}`" class="page-animation-row"><span><strong>{{ page.title }}</strong></span><CustomSelect v-model="appearance.animation_settings.page_styles[page.id]" :options="perPageAnimationStyleOptions" /><NumericStepper v-model="appearance.animation_settings.page_durations_ms[page.id]" :min="0" :max="1000" :step="10" :aria-label="`Длительность страницы ${page.title}`" /></div>
+            </div>
+          </template>
+
+          <template v-else-if="activeSection === 'pages'">
+            <p class="studio-inspector-note">Тема и раскладка применяются к конкретной странице. Название страницы открывает её в лаунчере.</p>
+            <div v-for="page in pages" :key="page.id" class="page-customization-row">
+              <span class="page-customization-target" role="button" tabindex="0" v-tooltip="`Открыть страницу «${page.title}»`" @click="emit('openPage', page.id)" @keydown.enter="emit('openPage', page.id)"><strong>{{ page.title }}</strong><small>{{ page.kicker }}</small></span>
+              <CustomSelect v-model="appearance.page_themes[page.id]" :options="pageThemeOptions" />
+              <CustomSelect v-model="appearance.page_layouts[page.id]" :options="pageLayoutOptions" />
+            </div>
+            <div class="studio-inspector-group">
+              <h4>Виджеты</h4>
+              <label class="workspace-check"><input v-model="appearance.widget_visibility['instances.workspace']" type="checkbox" /><span>Рабочая область экземпляра</span></label>
+              <label class="workspace-check"><input v-model="appearance.widget_visibility['accounts.status']" type="checkbox" /><span>Статус аккаунтов</span></label>
+              <label class="workspace-check"><input v-model="appearance.widget_visibility['mods.context']" type="checkbox" /><span>Контекст каталога ресурсов</span></label>
+            </div>
+          </template>
+
+          <template v-else-if="activeSection === 'plugins'">
+            <div class="studio-inspector-group">
+              <h4>Плагин для темы</h4>
+              <p class="studio-inspector-note">Архив плагина (api_version 3, только разрешения темы) запускается здесь в живом предпросмотре: он меняет те элементы, которые меняет. Пока плагин запущен, остальные плагины приостановлены, а после выхода из студии предпросмотр останавливается сам.</p>
+              <div v-if="pluginPreviewName" class="button-asset-row">
+                <span><strong>{{ pluginPreviewName }}</strong><small>{{ pluginPreviewVersion ? `Версия ${pluginPreviewVersion} · предпросмотр активен` : 'Предпросмотр активен' }}</small></span>
+                <button class="button button--small button--quiet" type="button" @click="stopThemePluginPreview">Остановить</button>
+              </div>
+              <div class="wallpaper-controls">
+                <button class="button button--small button--outline" type="button" :disabled="pluginBusy" @click="chooseThemePlugin">{{ pluginPreviewName ? 'Заменить плагин' : 'Загрузить плагин (.zip)' }}</button>
+              </div>
+              <p v-if="pluginError" class="studio-inspector-note studio-inspector-note--error" role="alert">{{ pluginError }}</p>
+              <small class="studio-inspector-note">ZIP с plugin.json и входным JS · код до 1 МБ · архив до 30 МБ</small>
+            </div>
+          </template>
+        </div>
+      </aside>
+    </div>
+
+    <footer class="studio-statusbar">
+      <span>Тема: {{ themeLabel }}</span>
+      <span>Шрифт: {{ fontLabel }}</span>
+      <span>Масштаб: {{ appearance.ui_scale }}%</span>
+      <span>Радиусы: {{ radiusSummary }}</span>
+      <span class="studio-statusbar-hint">{{ statusHint }}</span>
+    </footer>
+  </section>
+</template>

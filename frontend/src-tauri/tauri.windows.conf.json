@@ -1,0 +1,21 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "resources": {
+      "resources/backend/nivora-turbo.exe": "backend/nivora-turbo.exe",
+      "resources/backend/nivora-modcat.exe": "backend/nivora-modcat.exe",
+      "resources/backend/ModScan.java": "backend/ModScan.java"
+    },
+    "windows": {
+      "nsis": {
+        "template": "windows/installer.nsi",
+        "installMode": "currentUser",
+        "languages": [
+          "Russian",
+          "English"
+        ],
+        "displayLanguageSelector": false
+      }
+    }
+  }
+}
