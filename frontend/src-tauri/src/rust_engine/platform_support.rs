@@ -27,6 +27,53 @@ pub(crate) fn strip_verbatim_prefix(text: &str) -> Option<String> {
     None
 }
 
+/// проверка «path равен root или лежит внутри него». На Windows сравнение через
+/// `starts_with`/`strip_prefix` ломается о регистр букв, префикс `\\?\` и
+/// канонизацию, поэтому обе стороны канонизируются и сравниваются без учёта регистра.
+pub(crate) fn path_within(path: &Path, root: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        let child = windows_path_key(path);
+        let base = windows_path_key(root);
+        if child == base {
+            return true;
+        }
+        let mut prefix = base;
+        if !prefix.ends_with('\\') {
+            prefix.push('\\');
+        }
+        child.starts_with(&prefix)
+    }
+    #[cfg(not(windows))]
+    {
+        path.starts_with(root)
+    }
+}
+
+/// точка повторной обработки, которую нельзя пропускать: настоящая символическая
+/// ссылка или репарс, чьё разрешение уводит путь за пределы root. Junction'ы
+/// Windows (перенесённые каталоги, OneDrive) разрешаем, пока путь остаётся внутри.
+pub(crate) fn is_unsafe_reparse(path: &Path, root: &Path) -> bool {
+    if !is_reparse_point(path) {
+        return false;
+    }
+    let resolved_root = canonical_path(root).unwrap_or_else(|_| root.to_path_buf());
+    match canonical_path(path) {
+        Ok(resolved) => !path_within(&resolved, &resolved_root),
+        Err(_) => true,
+    }
+}
+
+#[cfg(windows)]
+fn windows_path_key(path: &Path) -> String {
+    let canonical = canonical_path(path).unwrap_or_else(|_| path.to_path_buf());
+    let mut text = canonical.to_string_lossy().replace('/', "\\");
+    if let Some(simple) = strip_verbatim_prefix(&text) {
+        text = simple;
+    }
+    text.to_lowercase()
+}
+
 #[cfg(not(unix))]
 pub(crate) fn set_private_fd(_fd: i32, _mode: u32) {}
 

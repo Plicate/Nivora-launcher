@@ -1,9 +1,8 @@
 name: Release
 
 # тег v* собирает и публикует релиз. scripts/build_windows_exe.sh создаёт
-# latest.json только если задан TAURI_SIGNING_PRIVATE_KEY
-# настройте обязательные секреты в Settings → Secrets → Actions:
-# переменная TAURI_SIGNING_PRIVATE_KEY (minisign) и TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+# scripts/build_windows_exe.sh всегда создаёт latest.json; minisign-подпись
+# обновлений больше не используется
 # переменная WINDOWS_CERT_FILE и WINDOWS_CERT_PASSWORD включают подпись Authenticode
 # переменная APPLE_CERTIFICATE, APPLE_CERTIFICATE_PASSWORD и APPLE_SIGNING_IDENTITY включают
 # developer ID; без них сборка macOS будет ad-hoc и не нотариализуется
@@ -45,8 +44,6 @@ jobs:
       - name: "Build signed Windows installers (script: helpers+NSIS)"
         shell: bash
         env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           WINDOWS_CERT_FILE: ${{ secrets.WINDOWS_CERT_FILE }}
           WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
           RELEASE_TAG: ${{ github.ref_name }}

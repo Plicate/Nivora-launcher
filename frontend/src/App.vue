@@ -3972,7 +3972,7 @@ const settingsPageModel = {
 
                 <section data-page-view="instance-settings" class="page-content instance-workspace-page">
                   <div class="section-intro">
-                    <div><h2>{{ selectedInstance?.display_name || selectedInstance?.name || 'Рабочая область экземпляра' }}</h2><p>{{ selectedInstance ? [selectedInstance.kind === 'server' ? (selectedInstance.server_core || 'Сервер') : selectedInstance.game_edition === 'bedrock' ? 'Bedrock Edition' : (selectedInstance.loader || 'Vanilla'), selectedInstance.minecraft_version || selectedInstance.version_id || ''].filter(Boolean).join(' · ') : '' }}</p></div>
+                    <div><h2>{{ selectedInstance?.display_name || selectedInstance?.name || 'Рабочая область экземпляра' }}</h2></div>
                     <button class="button button--outline" type="button" @click="setView('instances')"><Icon name="arrow-left" :size="15" />К экземплярам</button>
                   </div>
                    <ServerWorkspace v-if="currentView === 'instance-settings' && selectedInstance?.kind === 'server'" ref="serverWorkspaceRef" :key="`workspace-server-${selectedInstance.name}`" :instance="selectedInstance" :plugin-catalogs="state.settings.plugin_catalogs" :server-cores="state.server_cores" :focus-tab="instanceWorkspaceFocus" :confirm-destructive="settingsDraft.confirm_destructive_actions" :file-editor-mode="settingsDraft.file_editor" :snapshot-created="notifyPluginSnapshotCreated" @toast="showToast" @changed="refreshBootstrap" />

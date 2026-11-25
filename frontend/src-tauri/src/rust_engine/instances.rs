@@ -1882,7 +1882,7 @@ fn is_symlink(path: &Path) -> bool {
 }
 
 fn within(path: &Path, root: &Path) -> bool {
-    path.starts_with(root)
+    super::platform_support::path_within(path, root)
 }
 
 fn file_name_of(path: &Path) -> String {

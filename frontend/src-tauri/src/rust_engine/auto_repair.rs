@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use regex::Regex;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 use super::platform;
 
@@ -30,7 +30,7 @@ mod apply;
 mod diagnose;
 mod java_requirement;
 mod scan;
-pub(crate) use scan::{scan_mods, scan_mods_full, wrong_loader, ModEntry};
+pub(crate) use scan::{ModEntry, scan_mods, scan_mods_full, wrong_loader};
 
 /// имя файла с локальным состоянием диагностики
 pub(crate) const STATE_FILE: &str = ".nivora-auto-repair.json";
@@ -150,9 +150,10 @@ fn epoch_seconds() -> f64 {
 }
 
 /// используется для показа проблем в настройках и окне починки
-const ISSUE_ORDER: [(&str, &str); 20] = [
+const ISSUE_ORDER: [(&str, &str); 25] = [
     ("account", "Проблема с аккаунтом"),
     ("security_sandbox", "Запуску мешают настройки безопасности"),
+    ("files_locked", "Файлы заняты другой программой"),
     ("loader_broken", "Модлоадер повреждён или не запускается"),
     ("loader_outdated", "Устаревшая версия модлоадера"),
     ("missing_dependencies", "Не хватает зависимостей модов"),
@@ -162,13 +163,17 @@ const ISSUE_ORDER: [(&str, &str); 20] = [
     ("mixin_failure", "Ошибка Mixin в моде"),
     ("corrupted_mods", "Повреждённые файлы модов"),
     ("broken_config", "Повреждённые конфиги модов"),
+    ("world_data", "Мир не открывается"),
+    ("game_settings", "Повреждены игровые настройки"),
     ("out_of_memory", "Не хватило памяти"),
     ("memory_too_high", "Выделено слишком много памяти"),
+    ("disk_full", "На диске закончилось место"),
     ("java_version", "Неподходящая версия Java"),
     ("jvm_arguments", "Ошибочные аргументы JVM"),
     ("jvm_crash", "Аварийное падение Java"),
     ("game_files", "Повреждены файлы игры или загрузчика"),
     ("graphics", "Проблема с графикой"),
+    ("network_issue", "Нет связи с серверами"),
     ("recent_mods", "Недавно добавленные моды"),
     ("unknown_crash", "Неизвестная причина краша"),
 ];
@@ -342,6 +347,11 @@ struct Patterns {
     java_missing: Regex,
     suspect_block: Regex,
     non_latin_path: Regex,
+    disk_full: Regex,
+    network_issue: Regex,
+    world_load_error: Regex,
+    game_settings_error: Regex,
+    files_locked: Regex,
 }
 
 fn ci(pattern: &str) -> Regex {
@@ -371,9 +381,9 @@ fn patterns() -> &'static Patterns {
         config_path: ci(r"config[/\\]([\w.\-/\\ ]+?\.(?:toml|json5?|cfg|properties|ya?ml|txt|snbt))"),
         forge_config_file: ci(r"(?:Failed loading config file|Failed to load config|Error loading config|Configuration file) ([\w.\-]+\.(?:toml|json5?|cfg))"),
         oom: ci(r"java\.lang\.OutOfMemoryError|GC overhead limit exceeded|Java heap space"),
-        memory_too_high: ci(r"Could not reserve enough space for|Invalid maximum heap size|insufficient memory for the Java Runtime|Native memory allocation \(mmap\) failed|Cannot allocate memory"),
+        memory_too_high: ci(r"Could not reserve enough space for|Invalid maximum heap size|insufficient memory for the Java Runtime|Native memory allocation \(mmap\) failed|Cannot allocate memory|Windows error 1455|Insufficient system resources exist"),
         jvm_arguments: ci(r"Unrecognized VM option|Unrecognized option:|Error occurred during initialization of VM|Invalid initial heap size|Conflicting collector combinations|Multiple garbage collectors selected|Improperly specified VM option|Could not create the Java Virtual Machine"),
-        jvm_crash: ci(r"A fatal error has been detected by the Java Runtime|SIGSEGV|SIGBUS|EXCEPTION_ACCESS_VIOLATION|hs_err_pid\d+"),
+        jvm_crash: ci(r"A fatal error has been detected by the Java Runtime|SIGSEGV|SIGBUS|SIGILL|EXCEPTION_ACCESS_VIOLATION|EXCEPTION_ILLEGAL_INSTRUCTION|EXCEPTION_STACK_OVERFLOW|hs_err_pid\d+"),
         driver_frame: ci(r"atio6axx|atioglxx|nvoglv|ig\d+icd|libnvidia|amdvlk|radeonsi|iris_dri|i965_dri|libGLX|opengl32"),
         graphics: ci(r"no OpenGL context|could not create (?:the )?(?:GL|OpenGL)|GLFW error (?:65542|65543|65544|65545)|failed to create window|Pixel format not accelerated|WGL: The driver does not appear to support OpenGL|OpenGL[^\n]{0,40}not supported|GLX: Failed to create context|Failed to create OpenGL context"),
         game_files: ci(r"Could not find or load main class|ClassNotFoundException: (?:net\.fabricmc\.loader|cpw\.mods|net\.minecraftforge\.(?:fml|bootstrap)|net\.neoforged\.(?:fml|bootstrap)|org\.quiltmc\.loader|net\.minecraft\.client\.main|net\.minecraft\.launchwrapper)|NoClassDefFoundError: (?:org/lwjgl|net/fabricmc/loader|cpw/mods|net/minecraftforge/fml/loading|net/neoforged/fml)|no lwjgl[\w]* in java\.library\.path|UnsatisfiedLinkError|Failed to locate library|checksum mismatch|SHA-?1 mismatch|hash mismatch|Failed to download|(?:FileNotFound|NoSuchFile)Exception[^\n]*(?:libraries|versions|assets)[/\\]|zip END header not found[^\n]*(?:libraries|versions)|Файл версии не найден|не найден JSON версии"),
@@ -396,6 +406,11 @@ fn patterns() -> &'static Patterns {
         java_missing: ci(r#"Java не найден|Java executable не найден|Java должна быть исполняемым|Cannot run program \"[^\"]*java"#),
         suspect_block: Regex::new(r"(?is)Suspected Mods\?:(.*?)(?:\n\S|\n\n|\z)").unwrap(),
         non_latin_path: Regex::new(r#"[A-Za-z]:\\[^\n]*[^\x00-\x7F]"#).unwrap(),
+        disk_full: ci(r"No space left on device|There is not enough space on the (?:disk|drive)|Not enough space on (?:the )?(?:disk|drive)|Disk quota exceeded|os error 28"),
+        network_issue: ci(r"UnknownHostException|ConnectException|SSLException|Connection (?:reset|refused)|connect timed out|Read timed out|SocketTimeoutException|Cannot resolve host|No route to host|Network is unreachable"),
+        world_load_error: ci(r"Failed to load level|Exception loading level|Failed to load world|Unable to load world|Failed to (?:read|load) level\.dat|Corrupted level data|Failed to read region file|Bad padding in|LevelException"),
+        game_settings_error: ci(r"Failed to load options|Failed to load server list|Could not read options|Exception reading options|Failed to (?:read|load) servers\.dat|Error loading options"),
+        files_locked: ci(r"AccessDeniedException|Access is denied|Permission denied|Отказано в доступе|being used by another process|The process cannot access the file|file in use"),
     })
 }
 
@@ -830,7 +845,8 @@ fn update_loader_fix(
 }
 
 fn config_fix(files: &[String]) -> Option<Value> {
-    let files = &unique(files.iter().cloned())[..MAX_FILES_PER_FIX];
+    let files = unique(files.iter().cloned());
+    let files = &files[..files.len().min(MAX_FILES_PER_FIX)];
     if files.is_empty() {
         return None;
     }
@@ -841,6 +857,42 @@ fn config_fix(files: &[String]) -> Option<Value> {
             format!("Перенести в резервную папку: {}", files.iter().take(6).cloned().collect::<Vec<_>>().join(", ")),
             format!("Копии лежат в {BACKUP_DIRECTORY}/ внутри экземпляра — их можно вернуть вручную."),
             "При следующем запуске моды создадут конфиги по умолчанию.".to_owned(),
+        ],
+        "params": {"files": files},
+    }))
+}
+
+fn restore_world_dat_fix(files: &[String]) -> Option<Value> {
+    let files = unique(files.iter().cloned());
+    let files = &files[..files.len().min(MAX_FILES_PER_FIX)];
+    if files.is_empty() {
+        return None;
+    }
+    Some(json!({
+        "action": "restore_world_dat",
+        "label": "Восстановить level.dat из level.dat_old",
+        "steps": [
+            format!("Заменить повреждённый level.dat копией level.dat_old: {}", files.iter().take(4).cloned().collect::<Vec<_>>().join(", ")),
+            "Текущий level.dat сохраняется в резервной папке внутри экземпляра.".to_owned(),
+            "Мир откроется с состояния последнего автосохранения игры.".to_owned(),
+        ],
+        "params": {"files": files},
+    }))
+}
+
+fn reset_game_settings_fix(files: &[String]) -> Option<Value> {
+    let files = unique(files.iter().cloned());
+    let files = &files[..files.len().min(MAX_FILES_PER_FIX)];
+    if files.is_empty() {
+        return None;
+    }
+    Some(json!({
+        "action": "reset_game_settings",
+        "label": "Сбросить повреждённые игровые настройки",
+        "steps": [
+            format!("Перенести в резервную папку: {}", files.iter().take(6).cloned().collect::<Vec<_>>().join(", ")),
+            format!("Копии лежат в {BACKUP_DIRECTORY}/ внутри экземпляра — их можно вернуть вручную."),
+            "При следующем запуске игра создаст настройки по умолчанию.".to_owned(),
         ],
         "params": {"files": files},
     }))
@@ -1063,6 +1115,99 @@ fn broken_configs(text: &str, instance_path: Option<&Path>) -> Vec<String> {
         ));
     }
     unique(found)
+}
+
+/// файл читается как gzip (первые байты 1f 8b) и имеет разумный размер
+fn gzip_file_ok(path: &Path) -> bool {
+    let Ok(meta) = fs::symlink_metadata(path) else {
+        return false;
+    };
+    if meta.is_symlink() || !meta.is_file() || meta.len() < 32 {
+        return false;
+    }
+    let mut bytes = [0u8; 2];
+    let Ok(mut handle) = fs::File::open(path) else {
+        return false;
+    };
+    if handle.read_exact(&mut bytes).is_err() {
+        return false;
+    }
+    bytes == [0x1f, 0x8b]
+}
+
+/// options.txt читается как обычный текст без NUL-байтов
+fn options_file_ok(path: &Path) -> bool {
+    let Ok(meta) = fs::symlink_metadata(path) else {
+        return false;
+    };
+    if meta.is_symlink() || !meta.is_file() || meta.len() > 2 * 1024 * 1024 {
+        return false;
+    }
+    let mut bytes = Vec::new();
+    let Ok(mut handle) = fs::File::open(path) else {
+        return false;
+    };
+    let mut limited = (&mut handle).take(2 * 1024 * 1024);
+    if limited.read_to_end(&mut bytes).is_err() {
+        return false;
+    }
+    std::str::from_utf8(&bytes).is_ok() && !bytes.contains(&0)
+}
+
+/// миры с повреждённым level.dat: (восстановимые из level.dat_old, без копии)
+fn broken_world_dats(instance_path: &Path) -> (Vec<String>, Vec<String>) {
+    let saves = instance_path.join("saves");
+    let Ok(meta) = fs::symlink_metadata(&saves) else {
+        return (Vec::new(), Vec::new());
+    };
+    if meta.is_symlink() || !meta.is_dir() {
+        return (Vec::new(), Vec::new());
+    }
+    let Ok(entries) = fs::read_dir(&saves) else {
+        return (Vec::new(), Vec::new());
+    };
+    let mut restorable: Vec<String> = Vec::new();
+    let mut unrestorable: Vec<String> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if fs::symlink_metadata(&path)
+            .map(|meta| meta.is_symlink() || !meta.is_dir())
+            .unwrap_or(true)
+        {
+            continue;
+        }
+        let level = path.join("level.dat");
+        let Ok(level_meta) = fs::symlink_metadata(&level) else {
+            continue;
+        };
+        if level_meta.is_symlink() || !level_meta.is_file() || gzip_file_ok(&level) {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().replace('\\', "/");
+        let relative = format!("saves/{name}/level.dat");
+        if gzip_file_ok(&path.join("level.dat_old")) {
+            restorable.push(relative);
+        } else {
+            unrestorable.push(relative);
+        }
+    }
+    restorable.sort();
+    unrestorable.sort();
+    (restorable, unrestorable)
+}
+
+/// игровые настройки с нечитаемыми файлами (options.txt, servers.dat)
+fn broken_game_settings(instance_path: &Path) -> Vec<String> {
+    let mut broken: Vec<String> = Vec::new();
+    let options = instance_path.join("options.txt");
+    if fs::symlink_metadata(&options).is_ok() && !options_file_ok(&options) {
+        broken.push("options.txt".to_owned());
+    }
+    let servers = instance_path.join("servers.dat");
+    if fs::symlink_metadata(&servers).is_ok() && !gzip_file_ok(&servers) {
+        broken.push("servers.dat".to_owned());
+    }
+    broken
 }
 
 /// моды, код которых находится в стеке рядом с ошибкой песочницы
@@ -2344,6 +2489,94 @@ mod tests {
     }
 
     #[test]
+    fn gzip_helpers_and_world_detection() {
+        let root =
+            std::env::temp_dir().join(format!("nivora-repair-{}-{}", std::process::id(), line!()));
+        let _ = fs::remove_dir_all(&root);
+        let mut good = vec![0x1f_u8, 0x8b];
+        good.extend(std::iter::repeat_n(0_u8, 64));
+        let world = root.join("saves").join("W1");
+        fs::create_dir_all(&world).unwrap();
+        fs::write(
+            world.join("level.dat"),
+            b"not a gzip file at all...........",
+        )
+        .unwrap();
+        fs::write(world.join("level.dat_old"), &good).unwrap();
+        let (restorable, unrestorable) = broken_world_dats(&root);
+        assert_eq!(restorable, vec!["saves/W1/level.dat".to_owned()]);
+        assert!(unrestorable.is_empty());
+        // мир с исправным level.dat не попадает в отчёт
+        let world2 = root.join("saves").join("W2");
+        fs::create_dir_all(&world2).unwrap();
+        fs::write(world2.join("level.dat"), &good).unwrap();
+        let (restorable, unrestorable) = broken_world_dats(&root);
+        assert_eq!(restorable.len(), 1);
+        assert!(unrestorable.is_empty());
+        // повреждённый level.dat без копии — только совет, без починки
+        let world3 = root.join("saves").join("W3");
+        fs::create_dir_all(&world3).unwrap();
+        fs::write(
+            world3.join("level.dat"),
+            b"also broken, no old copy.........",
+        )
+        .unwrap();
+        let (restorable, unrestorable) = broken_world_dats(&root);
+        assert_eq!(restorable.len(), 1);
+        assert_eq!(unrestorable, vec!["saves/W3/level.dat".to_owned()]);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn game_settings_detection_requires_unreadable_files() {
+        let root =
+            std::env::temp_dir().join(format!("nivora-repair-{}-{}", std::process::id(), line!()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        assert!(broken_game_settings(&root).is_empty());
+        fs::write(root.join("options.txt"), b"snooperEnabled:false\n").unwrap();
+        fs::write(root.join("servers.dat"), b"not gzip either...............").unwrap();
+        assert_eq!(broken_game_settings(&root), vec!["servers.dat".to_owned()]);
+        fs::write(root.join("options.txt"), [b'a', 0, b'b'].as_slice()).unwrap();
+        let found = broken_game_settings(&root);
+        assert!(found.contains(&"options.txt".to_owned()));
+        assert!(found.contains(&"servers.dat".to_owned()));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn disk_network_and_settings_kinds_reported() {
+        let report = diagnose::diagnose(&diagnose_input(
+            &["java.io.IOException: No space left on device"],
+            "vanilla",
+        ));
+        assert!(issue_kinds(&report).contains(&"disk_full".to_owned()));
+
+        let report = diagnose::diagnose(&diagnose_input(
+            &["java.net.ConnectException: Connection refused: no further information"],
+            "vanilla",
+        ));
+        assert!(issue_kinds(&report).contains(&"network_issue".to_owned()));
+
+        // валидный options.txt не даёт починку, даже если лог упоминает настройки
+        let root =
+            std::env::temp_dir().join(format!("nivora-repair-{}-{}", std::process::id(), line!()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("options.txt"), b"musicVolume:1.0\n").unwrap();
+        let mut input = diagnose_input(&["Failed to load options.txt"], "vanilla");
+        let leaked: &'static std::path::PathBuf = Box::leak(Box::new(root.clone()));
+        input.instance_path = Some(leaked.as_path());
+        let report = diagnose::diagnose(&input);
+        assert!(!issue_kinds(&report).contains(&"game_settings".to_owned()));
+        // NUL-байт в options.txt при ошибке чтения — починка предлагается
+        fs::write(root.join("options.txt"), [b'a', 0, b'b'].as_slice()).unwrap();
+        let report = diagnose::diagnose(&input);
+        assert!(issue_kinds(&report).contains(&"game_settings".to_owned()));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn java_version_diagnosis_offers_install_for_required_major() {
         let mut input = diagnose_input(
             &["Настроенная Java 17 слишком старая для этой версии; требуется Java 21"],
@@ -2397,17 +2630,21 @@ mod tests {
             .iter()
             .find(|issue| issue["id"] == "java_version")
             .unwrap();
-        assert!(!issue["fixes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|fix| fix["action"] == "install_java"));
+        assert!(
+            !issue["fixes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|fix| fix["action"] == "install_java")
+        );
     }
 
     #[test]
     fn diagnose_reports_fabric_missing_dependency() {
         let input = diagnose_input(
-            &["Mod 'Create' (create) 1.20.1 requires ^0.92.0+1.20.1 of mod 'Fabric API' (fabric-api), which is missing"],
+            &[
+                "Mod 'Create' (create) 1.20.1 requires ^0.92.0+1.20.1 of mod 'Fabric API' (fabric-api), which is missing",
+            ],
             "fabric",
         );
         let report = diagnose::diagnose(&input);
@@ -2426,7 +2663,9 @@ mod tests {
     #[test]
     fn diagnose_reports_outdated_loader_with_minimum() {
         let input = diagnose_input(
-            &["Mod 'Create' (create) requires 0.16.10 of fabricloader, but only the wrong version is present"],
+            &[
+                "Mod 'Create' (create) requires 0.16.10 of fabricloader, but only the wrong version is present",
+            ],
             "fabric",
         );
         let report = diagnose::diagnose(&input);
@@ -2514,10 +2753,12 @@ mod tests {
             .map(|fix| fix["action"].as_str().unwrap())
             .collect();
         assert_eq!(actions, ["login_microsoft"]);
-        assert!(report["issues"][0]["title"]
-            .as_str()
-            .unwrap()
-            .contains("войти"));
+        assert!(
+            report["issues"][0]["title"]
+                .as_str()
+                .unwrap()
+                .contains("войти")
+        );
     }
 
     #[test]
@@ -2556,10 +2797,12 @@ mod tests {
         let report = diagnose::diagnose(&input);
         assert_eq!(issue_kinds(&report), ["mixin_failure"]);
         let issue = &report["issues"][0];
-        assert!(issue["detail"]
-            .as_str()
-            .unwrap()
-            .contains("Виновник: abc.jar"));
+        assert!(
+            issue["detail"]
+                .as_str()
+                .unwrap()
+                .contains("Виновник: abc.jar")
+        );
         let disable = &issue["fixes"][0];
         assert_eq!(disable["action"], "disable_mods");
         assert_eq!(disable["params"]["files"], json!(["abc.jar"]));
@@ -2580,9 +2823,11 @@ mod tests {
         let fix = &report["issues"][0]["fixes"][0];
         assert_eq!(fix["action"], "repair_version");
         let evidence = report["issues"][0]["evidence"].as_array().unwrap();
-        assert!(evidence
-            .iter()
-            .any(|line| line.as_str().unwrap().contains("IllegalStateException")));
+        assert!(
+            evidence
+                .iter()
+                .any(|line| line.as_str().unwrap().contains("IllegalStateException"))
+        );
     }
 
     #[test]

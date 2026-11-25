@@ -81,4 +81,4 @@ nivora-launcher --smoke-test                                          # Linux (�
 `.github/workflows/ci.yml` использует те же скрипты для сборки трёх
 платформ и запускает `--smoke-test` на упакованных приложениях.
 `release.yml` публикует артефакты для тегов `v*`; `build_windows_exe.sh`
-создаёт `latest.json`, если задан `TAURI_SIGNING_PRIVATE_KEY`.
+всегда создаёт `latest.json` (подпись обновлений больше не требуется).

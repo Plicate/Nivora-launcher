@@ -7,6 +7,8 @@ import velocityLogo from '../assets/loaders/velocity.svg'
 import leafLogo from '../assets/loaders/leaf.png'
 import pufferfishLogo from '../assets/loaders/pufferfish.png'
 import patinaLogo from '../assets/loaders/patina.png'
+import fabricLogo from '../assets/loaders/fabric.svg'
+import forgeLogo from '../assets/loaders/forge.svg'
 
 const props = withDefaults(defineProps<{ core?: string; name?: string; compact?: boolean }>(), { core: 'custom', name: '', compact: false })
 
@@ -19,6 +21,8 @@ const logos: Record<string, string> = {
   leaf: leafLogo,
   pufferfish: pufferfishLogo,
   patina: patinaLogo,
+  fabric: fabricLogo,
+  forge: forgeLogo,
 }
 
 const meta: Record<string, { label: string; className: string }> = {
@@ -31,6 +35,8 @@ const meta: Record<string, { label: string; className: string }> = {
   patina: { label: 'Patina', className: 'core-badge--patina' },
   velocity: { label: 'Velocity', className: 'core-badge--velocity' },
   waterfall: { label: 'Waterfall', className: 'core-badge--waterfall' },
+  fabric: { label: 'Fabric', className: 'core-badge--fabric' },
+  forge: { label: 'Forge', className: 'core-badge--forge' },
   custom: { label: 'Custom server JAR', className: 'core-badge--custom' },
 }
 

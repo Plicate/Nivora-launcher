@@ -446,6 +446,7 @@ const visibleTabs = computed(() => tabs.filter((item) =>
 ))
 const snapshots = computed<ServerSnapshot[]>(() => details.value?.snapshots?.[snapshotCategory.value] || [])
 const snapshotCount = computed(() => Object.values(details.value?.snapshots || {}).reduce((total, values) => total + values.length, 0))
+const datapackCount = computed(() => details.value?.worlds.reduce((total, world) => total + (world.datapacks?.length || 0), 0) || 0)
 const consoleDisplayLines = computed(() => {
   const source = activeArchiveId.value ? archiveText.value : logs.value.join('\n')
   return source ? source.replace(/\r/g, '').split('\n') : []
@@ -475,6 +476,24 @@ function selectTab(value: WorkspaceTab) {
   if (value === 'screenshots') void loadScreenshots()
   if (value === 'versions') void loadVersions()
 }
+
+const tabsNav = ref<HTMLElement | null>(null)
+const tabIndicatorReady = ref(false)
+const tabIndicatorStyle = ref<{ transform: string; width: string }>({ transform: 'translateX(0px)', width: '0px' })
+
+function syncTabIndicator() {
+  const nav = tabsNav.value
+  if (!nav) return
+  const active = nav.querySelector<HTMLElement>('.workspace-tab--active')
+  if (!active || !active.offsetWidth) {
+    tabIndicatorReady.value = false
+    return
+  }
+  tabIndicatorStyle.value = { transform: `translateX(${active.offsetLeft}px)`, width: `${active.offsetWidth}px` }
+  tabIndicatorReady.value = true
+}
+
+watch(tab, () => { void nextTick(syncTabIndicator) })
 
 async function handleUpgradeChanged() {
   emit('changed')
@@ -2341,6 +2360,9 @@ function handleWorkspaceVisibility() {
 
 onMounted(async () => {
   document.addEventListener('visibilitychange', handleWorkspaceVisibility)
+  window.addEventListener('resize', syncTabIndicator)
+  void nextTick(syncTabIndicator)
+  document.fonts?.ready.then(() => syncTabIndicator()).catch(() => {})
   void refreshShortcutStatus()
   stopBackendEvents = await bridge.subscribeEvents((event) => {
     if (event.instance_name !== props.instance?.name) return
@@ -2386,6 +2408,7 @@ onBeforeUnmount(() => {
   screenshotRequestId += 1
   stopBackendEvents?.()
   document.removeEventListener('visibilitychange', handleWorkspaceVisibility)
+  window.removeEventListener('resize', syncTabIndicator)
   if (liveLogTimer) window.clearInterval(liveLogTimer)
   if (workspaceRefreshTimer) window.clearInterval(workspaceRefreshTimer)
   if (profileIconPreview.value.startsWith('blob:')) URL.revokeObjectURL(profileIconPreview.value)
@@ -2409,33 +2432,51 @@ defineExpose({ openConsoleIfOverview, openSettings, stop, ensureLoaded, launch }
 <template>
   <section v-if="instance" ref="workspaceRoot" class="workspace-shell">
     <template v-if="!settingsOnly">
-    <div class="workspace-header">
-      <div>
-         <p><LoaderBadge :loader="instance.loader" size="sm" /> <span class="workspace-header-meta-copy">{{ instance.minecraft_version || instance.version_id || 'Версия не установлена' }} · {{ instance.name }}</span><span v-if="workspacePathLabel" class="workspace-header-path" :title="details?.instance.path">{{ workspacePathLabel }}</span></p>
-      </div>
-      <div class="workspace-header-actions">
-        <div class="workspace-log-history">
-          <button class="button button--quiet" type="button" :aria-expanded="archiveListOpen" @click="toggleLogHistory"><Icon name="archive" :size="15" />История логов<small v-if="logArchives.length">{{ logArchives.length }}</small></button>
-          <div v-if="archiveListOpen" class="workspace-log-popover">
-            <div class="workspace-log-popover-heading"><strong>Журналы запуска</strong><span>{{ logArchives.length }}</span></div>
-            <button class="workspace-log-row workspace-log-row--live" type="button" @click="selectTab('console')"><Icon name="activity" :size="15" /><span><strong>Консоль в реальном времени</strong><small>Текущий поток вывода</small></span></button>
-            <button v-for="log in logArchives" :key="log.id" class="workspace-log-row" type="button" @click="openLogArchive(log)"><Icon name="file" :size="15" /><span><strong>{{ formatDate(Math.round(log.modified_at)) }}</strong><small>{{ formatSize(log.size) }}</small></span></button>
-            <button v-if="archiveListLoading" class="workspace-log-more" type="button" disabled>Загружаю журналы…</button>
-            <button v-else-if="nextArchiveOffset !== null" class="workspace-log-more" type="button" @click="loadLogArchives(true)">Показать ещё</button>
-            <span v-else-if="!logArchives.length" class="workspace-log-empty">Предыдущих запусков пока нет.</span>
-          </div>
-        </div>
-        <button class="button button--quiet" type="button" @click="openFolder"><Icon name="folder" :size="15" />Папка</button>
-        <button v-if="canExportModpack" class="button button--quiet" type="button" :disabled="exportBusy" @click="exportModpack"><Icon name="archive" :size="15" />{{ exportBusy ? 'Экспорт…' : 'Экспорт .mrpack' }}</button>
-        <button class="button button--quiet" type="button" :disabled="duplicateBusy" @click="duplicateCurrent"><Icon name="instances" :size="15" />{{ duplicateBusy ? 'Копирую…' : 'Дублировать' }}</button>
-      </div>
-    </div>
+    <header class="ws-bar">
+      <span class="ws-bar-icon">
+        <img v-if="profileIconPreview" :src="profileIconPreview" alt="" />
+        <Icon v-else name="instances" :size="18" />
+      </span>
+      <LoaderBadge :loader="instance.loader" size="sm" />
+      <p class="ws-bar-meta">
+        <span>{{ instance.minecraft_version || instance.version_id || 'Версия не установлена' }}</span>
+        <span>{{ instance.game_edition === 'bedrock' ? 'Bedrock' : 'Java' }}</span>
+        <span v-if="details">{{ formatPlayedTime(details.instance.played_seconds) }} в игре</span>
+      </p>
+      <span v-if="workspacePathLabel" class="ws-bar-path" :title="details?.instance.path">{{ workspacePathLabel }}</span>
+      <div class="ws-bar-actions">
 
-    <nav class="workspace-tabs workspace-tabs--flat" role="tablist" aria-label="Разделы экземпляра">
+        <button v-if="running" class="button workspace-launch-button" type="button" @click="stop"><Icon name="stop" :size="16" />Остановить</button>
+        <button v-else class="button workspace-launch-button" type="button" :disabled="loading" @click="launch()"><Icon name="play" :size="16" />{{ loading ? 'Запускаю…' : 'Запустить игру' }}</button>
+        <div class="ws-bar-tools">
+          <button v-if="instance.game_edition !== 'bedrock' && instance.kind !== 'server'" class="workspace-tool" type="button" :disabled="running" v-tooltip="'Память, Java, JVM и запуск — одной кнопкой по анализу сборки'" aria-label="Автонастройка" @click="emit('autotune')"><Icon name="sparkle" :size="15" /></button>
+          <button class="workspace-tool" type="button" :disabled="diagnoseBusy || running" v-tooltip="diagnoseBusy ? 'Проверяю…' : 'Проверить и починить'" aria-label="Проверить и починить" @click="diagnoseInstance()"><Icon name="shield" :size="15" /></button>
+          <button class="workspace-tool" type="button" :disabled="repairBusy || running" v-tooltip="repairBusy ? 'Восстанавливаю…' : 'Восстановить версию'" aria-label="Восстановить версию" @click="repairVersion"><Icon name="refresh" :size="15" /></button>
+          <button class="workspace-tool" type="button" v-tooltip="'Снапшоты'" aria-label="Снапшоты" @click="selectTab('snapshots')"><Icon name="archive" :size="15" /></button>
+          <span class="ws-sep" aria-hidden="true"></span>
+          <div class="workspace-log-history">
+            <button class="workspace-tool" type="button" :aria-expanded="archiveListOpen" v-tooltip="'История логов'" aria-label="История логов" @click="toggleLogHistory"><Icon name="activity" :size="15" /><small v-if="logArchives.length">{{ logArchives.length }}</small></button>
+            <div v-if="archiveListOpen" class="workspace-log-popover">
+              <div class="workspace-log-popover-heading"><strong>Журналы запуска</strong><span>{{ logArchives.length }}</span></div>
+              <button class="workspace-log-row workspace-log-row--live" type="button" @click="selectTab('console')"><Icon name="activity" :size="15" /><span><strong>Консоль в реальном времени</strong><small>Текущий поток вывода</small></span></button>
+              <button v-for="log in logArchives" :key="log.id" class="workspace-log-row" type="button" @click="openLogArchive(log)"><Icon name="file" :size="15" /><span><strong>{{ formatDate(Math.round(log.modified_at)) }}</strong><small>{{ formatSize(log.size) }}</small></span></button>
+              <button v-if="archiveListLoading" class="workspace-log-more" type="button" disabled>Загружаю журналы…</button>
+              <button v-else-if="nextArchiveOffset !== null" class="workspace-log-more" type="button" @click="loadLogArchives(true)">Показать ещё</button>
+              <span v-else-if="!logArchives.length" class="workspace-log-empty">Предыдущих запусков пока нет.</span>
+            </div>
+          </div>
+          <button class="workspace-tool" type="button" v-tooltip="'Открыть папку экземпляра'" aria-label="Папка" @click="openFolder"><Icon name="folder" :size="15" /></button>
+          <button v-if="canExportModpack" class="workspace-tool" type="button" :disabled="exportBusy" v-tooltip="exportBusy ? 'Экспортирую…' : 'Экспорт .mrpack'" aria-label="Экспорт .mrpack" @click="exportModpack"><Icon name="download" :size="15" /></button>
+          <button class="workspace-tool" type="button" :disabled="duplicateBusy" v-tooltip="duplicateBusy ? 'Копирую…' : 'Дублировать экземпляр'" aria-label="Дублировать" @click="duplicateCurrent"><Icon name="instances" :size="15" /></button>
+        </div>
+      </div>
+    </header>
+
+    <nav ref="tabsNav" class="workspace-tabs workspace-tabs--flat" role="tablist" aria-label="Разделы экземпляра">
       <button v-for="item in visibleTabs" :key="item.id" class="workspace-tab" :class="{ 'workspace-tab--active': tab === item.id }" type="button" role="tab" :aria-selected="tab === item.id" @click="selectTab(item.id)">
         <Icon :name="item.icon" :size="14" />{{ item.label }}
         <small v-if="item.id === 'mods' && details">{{ details.assets.mods?.length || 0 }}</small>
-        <small v-if="item.id === 'datapacks' && details">{{ details.worlds.reduce((total, world) => total + (world.datapacks?.length || 0), 0) }}</small>
+        <small v-if="item.id === 'datapacks' && details">{{ datapackCount }}</small>
         <small v-if="item.id === 'worlds' && details">{{ details.worlds.length }}</small>
         <small v-if="item.id === 'servers' && details">{{ details.servers.length }}</small>
         <small v-if="item.id === 'snapshots' && details">{{ snapshotCount }}</small>
@@ -2449,22 +2490,54 @@ defineExpose({ openConsoleIfOverview, openSettings, stop, ensureLoaded, launch }
     <div v-else-if="details" class="workspace-content">
       <div v-if="detailsError" class="workspace-load-error workspace-load-error--inline" role="alert"><div><strong>Не удалось обновить данные</strong><span>{{ detailsError }}</span></div><button class="button button--small button--outline" type="button" :disabled="loading" @click="queueLoad(true)">{{ loading ? 'Повторяю…' : 'Повторить' }}</button></div>
       <Transition name="workspace-tab" mode="out-in">
-      <div v-if="tab === 'overview'" key="overview" class="workspace-overview">
+                  <div v-if="tab === 'overview'" key="overview" class="workspace-overview">
         <WorldPreviewCard :instance="instance.name" :has-mods="hasModsForProgress" />
-        <section class="workspace-launch-banner">
-          <div class="workspace-launch-copy">
-            <span class="workspace-instance-status" :class="{ 'workspace-instance-status--running': running }"><i />{{ running ? 'Игра запущена' : 'Готов к запуску' }}</span>
-            <p>{{ instance.minecraft_version || instance.version_id || 'Версия не установлена' }} · {{ instance.loader }} · {{ formatPlayedTime(details.instance.played_seconds) }} в игре</p>
+        <section class="ov-grid" aria-label="Запуск">
+          <div class="ov-card">
+            <div class="ov-card-head"><h3>Продолжить игру</h3></div>
+            <template v-if="sortedWorlds.length">
+              <div class="ov-resume">
+                <img v-if="sortedWorlds[0].icon" :src="sortedWorlds[0].icon" alt="" class="ov-resume-icon" />
+                <span v-else class="ov-resume-icon"><Icon name="instances" :size="22" /></span>
+                <div class="ov-resume-copy">
+                  <strong>{{ sortedWorlds[0].name }}</strong>
+                  <small>{{ formatSize(sortedWorlds[0].size) }} · {{ formatDate(sortedWorlds[0].last_played) }}</small>
+                </div>
+                <div class="ov-resume-actions">
+                  <button class="button button--accent" type="button" :disabled="loading || running" @click="launchWorld(sortedWorlds[0].id)"><Icon name="play" :size="14" />Играть</button>
+                  <button class="button button--outline" type="button" :disabled="loading" @click="openWorldMap(sortedWorlds[0])"><Icon name="map" :size="14" />Карта</button>
+                </div>
+              </div>
+            </template>
+            <div v-else class="ov-card-empty">
+              <strong>Миров пока нет</strong>
+              <span class="muted">Создайте мир, чтобы запускать его отсюда.</span>
+              <button class="button button--accent" type="button" @click="selectTab('worlds')"><Icon name="map" :size="14" />К мирам</button>
+            </div>
           </div>
-          <div class="workspace-launch-actions">
-            <button v-if="running" class="button button--outline" type="button" @click="stop"><Icon name="stop" :size="14" />Остановить</button>
-            <button v-else class="button button--accent" type="button" :disabled="loading" @click="launch()"><Icon name="play" :size="15" />{{ loading ? 'Запускаю…' : 'Запустить игру' }}</button>
-            <button v-if="instance.game_edition !== 'bedrock' && instance.kind !== 'server'" class="button button--quiet" type="button" :disabled="running" v-tooltip="'Память, Java, JVM и запуск — одной кнопкой по анализу сборки'" @click="emit('autotune')"><Icon name="sparkle" :size="14" />Автонастройка</button>
-            <button class="button button--quiet" type="button" :disabled="repairBusy || running" @click="repairVersion"><Icon name="refresh" :size="14" />{{ repairBusy ? 'Восстанавливаю…' : 'Восстановить версию' }}</button>
-            <button class="button button--quiet" type="button" :disabled="diagnoseBusy || running" @click="diagnoseInstance()"><Icon name="shield" :size="14" />{{ diagnoseBusy ? 'Проверяю…' : 'Проверить и починить' }}</button>
-            <button class="button button--quiet" type="button" @click="selectTab('snapshots')"><Icon name="archive" :size="14" />Снапшоты</button>
+          <div class="ov-card">
+            <div class="ov-card-head"><h3>Недавнее</h3></div>
+            <template v-if="details.worlds.length > 1 || details.servers.length">
+              <button v-for="world in sortedWorlds.slice(1, 5)" :key="`w:${world.id}`" class="ov-row" type="button" :disabled="loading || running" @click="launchWorld(world.id)">
+                <img v-if="world.icon" :src="world.icon" alt="" class="ov-row-icon" />
+                <span v-else class="ov-row-icon"><Icon name="instances" :size="14" /></span>
+                <span class="ov-row-copy"><strong>{{ world.name }}</strong><small>{{ formatSize(world.size) }} · {{ formatDate(world.last_played) }}</small></span>
+                <Icon name="play" :size="14" />
+              </button>
+              <button v-for="server in sortedServers.slice(0, 3)" :key="`s:${server.id}`" class="ov-row" type="button" :disabled="loading || running" @click="launchServer(server.address)">
+                <span class="ov-row-icon"><Icon name="globe" :size="14" /></span>
+                <span class="ov-row-copy"><strong>{{ server.name }}</strong><small>{{ server.address }}</small></span>
+                <Icon name="play" :size="14" />
+              </button>
+              <div class="ov-recent-links">
+                <button v-if="details.worlds.length > 1" class="text-button" type="button" @click="selectTab('worlds')">Все миры</button>
+                <button v-if="details.servers.length" class="text-button" type="button" @click="selectTab('servers')">Все серверы</button>
+              </div>
+            </template>
+            <div v-else class="ov-card-empty"><span class="muted">Здесь появятся миры и серверы, в которые вы играли.</span></div>
           </div>
         </section>
+
         <section class="workspace-card workspace-console workspace-overview-console">
           <div class="workspace-card-heading">
             <div><h3>Консоль в реальном времени</h3><span class="muted">{{ running ? 'Игра запущена · вывод обновляется автоматически' : 'Последний вывод запуска' }}</span></div>
@@ -2475,41 +2548,6 @@ defineExpose({ openConsoleIfOverview, openSettings, stop, ensureLoaded, launch }
             <span v-else class="muted workspace-empty">Логи появятся здесь после запуска игры.</span>
             <button v-if="logs.length && !consoleStickToBottom" class="console-jump-button" type="button" @click="consoleStickToBottom = true; void scrollConsoleIfNeeded()"><Icon name="arrow-down" :size="14" />К последней строке</button>
           </div>
-        </section>
-        <div class="workspace-stat-grid">
-          <div class="workspace-stat"><strong>{{ details.assets.mods?.length || 0 }}</strong><span>модов</span></div>
-          <div class="workspace-stat"><strong>{{ details.worlds.length }}</strong><span>миров</span></div>
-          <div class="workspace-stat"><strong>{{ details.servers.length }}</strong><span>серверов</span></div>
-          <div class="workspace-stat"><strong>{{ snapshotCount }}</strong><span>снапшотов</span></div>
-        </div>
-        <div class="workspace-columns">
-          <section class="workspace-card">
-            <div class="workspace-card-heading"><div><h3>Недавние миры</h3><span class="muted">Быстрое подключение к сохранённым мирам</span></div><button class="text-button" type="button" @click="selectTab('worlds')">Все миры</button></div>
-            <button v-for="world in sortedWorlds.slice(0, 4)" :key="world.id" class="workspace-list-row" type="button" :disabled="loading || running" @click="launchWorld(world.id)">
-              <img v-if="world.icon" :src="world.icon" alt="" class="world-icon" />
-              <span v-else class="world-icon world-icon--empty"><Icon name="instances" :size="16" /></span>
-              <span><strong>{{ world.name }}</strong><small>{{ formatSize(world.size) }} · {{ formatDate(world.last_played) }}</small></span>
-              <Icon name="play" :size="15" />
-            </button>
-            <div v-if="!details.worlds.length" class="workspace-connect-empty"><span class="world-icon world-icon--empty"><Icon name="instances" :size="16" /></span><span><strong>Миров пока нет</strong><small>Ваши сохранения появятся здесь.</small></span><button class="text-button" type="button" @click="selectTab('worlds')">Открыть</button></div>
-          </section>
-          <section class="workspace-card">
-            <div class="workspace-card-heading"><div><h3>Недавние серверы</h3><span class="muted">Быстрое подключение к сохранённым серверам</span></div><button class="text-button" type="button" @click="selectTab('servers')">Все серверы</button></div>
-            <button v-for="server in sortedServers.slice(0, 4)" :key="server.id" class="workspace-list-row" type="button" :disabled="loading || running" @click="launchServer(server.address)">
-              <span class="world-icon world-icon--server"><Icon name="globe" :size="16" /></span>
-              <span><strong>{{ server.name }}</strong><small>{{ server.address }}</small></span>
-              <Icon name="play" :size="15" />
-            </button>
-            <div v-if="!details.servers.length" class="workspace-connect-empty"><span class="world-icon world-icon--server"><Icon name="globe" :size="16" /></span><span><strong>Серверов пока нет</strong><small>Сохранённые адреса появятся здесь.</small></span><button class="text-button" type="button" @click="selectTab('servers')">Открыть</button></div>
-          </section>
-        </div>
-        <section class="workspace-quick-access" aria-label="Инструменты экземпляра">
-          <span>Инструменты</span>
-          <button type="button" @click="selectTab('mods')"><Icon name="mods" :size="14" />Моды</button>
-          <button type="button" @click="selectTab('resourcepacks')"><Icon name="archive" :size="14" />Ресурспаки</button>
-          <button type="button" @click="selectTab('shaders')"><Icon name="image" :size="14" />Шейдеры</button>
-          <button type="button" @click="selectTab('files')"><Icon name="folder" :size="14" />Файлы</button>
-          <button type="button" @click="selectTab('screenshots')"><Icon name="image" :size="14" />Скриншоты</button>
         </section>
       </div>
 

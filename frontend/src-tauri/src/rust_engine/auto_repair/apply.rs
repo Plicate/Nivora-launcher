@@ -1,6 +1,6 @@
 use super::*;
 
-const FIX_ACTIONS: [&str; 13] = [
+const FIX_ACTIONS: [&str; 15] = [
     "disable_mods",
     "install_dependencies",
     "set_memory",
@@ -14,6 +14,8 @@ const FIX_ACTIONS: [&str; 13] = [
     "set_account",
     "login_microsoft",
     "set_security",
+    "restore_world_dat",
+    "reset_game_settings",
 ];
 
 /// выбирает стабильную версию загрузчика не ниже заданного минимума
@@ -68,11 +70,7 @@ pub(super) fn string_list(value: Option<&Value>, limit: usize) -> Result<Vec<Str
         .take(limit)
         .filter_map(|item| {
             let text = item.as_str()?.trim().to_owned();
-            if text.is_empty() {
-                None
-            } else {
-                Some(text)
-            }
+            if text.is_empty() { None } else { Some(text) }
         })
         .collect())
 }
@@ -338,7 +336,12 @@ fn apply_one(
             if installed.is_empty() {
                 return Err(format!(
                     "Не удалось найти зависимости в каталоге: {}. Установите их вручную на вкладке «Моды».",
-                    failed.iter().take(6).cloned().collect::<Vec<_>>().join(", ")
+                    failed
+                        .iter()
+                        .take(6)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 ));
             }
             let extra = if failed.is_empty() {
@@ -604,6 +607,93 @@ fn apply_one(
                 );
             }
             Ok("Безопасность экземпляра: ".to_owned() + &changes.join("; "))
+        }
+        "restore_world_dat" => {
+            let files = string_list(params.get("files"), MAX_FILES_PER_FIX)?;
+            let backup_root = info
+                .path
+                .join(BACKUP_DIRECTORY)
+                .join(super::backups::timestamp());
+            let mut restored: Vec<String> = Vec::new();
+            for name in files {
+                let relative = name.replace('\\', "/");
+                if !relative.starts_with("saves/") || !relative.ends_with("level.dat") {
+                    continue;
+                }
+                let Some(level) = safe_child(&info.path, &relative) else {
+                    continue;
+                };
+                if !level.is_file() || gzip_file_ok(&level) {
+                    continue;
+                }
+                let old = level
+                    .parent()
+                    .map(|parent| parent.join("level.dat_old"))
+                    .unwrap_or_default();
+                if !gzip_file_ok(&old) {
+                    continue;
+                }
+                let backup_target = backup_root.join(&relative);
+                if !backup_target.exists() {
+                    if let Some(parent) = backup_target.parent() {
+                        fs::create_dir_all(parent)
+                            .map_err(|error| format!("Ошибка файловой системы: {error}"))?;
+                    }
+                    fs::copy(&level, &backup_target)
+                        .map_err(|error| format!("Ошибка файловой системы: {error}"))?;
+                }
+                fs::copy(&old, &level)
+                    .map_err(|error| format!("Ошибка файловой системы: {error}"))?;
+                restored.push(relative);
+            }
+            if restored.is_empty() {
+                return Err("Не удалось восстановить ни одного мира: level.dat уже читается или копии level.dat_old нет".to_owned());
+            }
+            Ok(format!(
+                "Восстановлен level.dat из level.dat_old: {}",
+                restored.join(", ")
+            ))
+        }
+        "reset_game_settings" => {
+            let files = string_list(params.get("files"), MAX_FILES_PER_FIX)?;
+            let backup_root = info
+                .path
+                .join(BACKUP_DIRECTORY)
+                .join(super::backups::timestamp());
+            let mut moved: Vec<String> = Vec::new();
+            for name in files {
+                let relative = name.replace('\\', "/");
+                if !matches!(relative.as_str(), "options.txt" | "servers.dat") {
+                    continue;
+                }
+                let Some(source) = safe_child(&info.path, &relative) else {
+                    continue;
+                };
+                if !source.is_file() {
+                    continue;
+                }
+                let target = backup_root.join(&relative);
+                if target.exists() {
+                    continue;
+                }
+                if let Some(parent) = target.parent() {
+                    fs::create_dir_all(parent)
+                        .map_err(|error| format!("Ошибка файловой системы: {error}"))?;
+                }
+                fs::rename(&source, &target)
+                    .map_err(|error| format!("Ошибка файловой системы: {error}"))?;
+                moved.push(relative);
+            }
+            if moved.is_empty() {
+                return Err(
+                    "Повреждённых игровых настроек не найдено — возможно, их уже пересоздали"
+                        .to_owned(),
+                );
+            }
+            Ok(format!(
+                "Перенесено в {BACKUP_DIRECTORY}/: {}",
+                moved.join(", ")
+            ))
         }
         other => Err(format!("Неизвестная починка: {other}")),
     }

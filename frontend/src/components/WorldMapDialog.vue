@@ -502,6 +502,7 @@ onBeforeUnmount(() => {
   box-shadow: var(--ds-shadow-dialog, 0 24px 64px rgba(0, 0, 0, 0.35));
   padding: 14px 16px;
   animation: wmap-card-in 0.34s cubic-bezier(0.22, 1, 0.36, 1) both;
+  --wmap-biome: var(--wmap-biome); --wmap-ore: var(--wmap-ore); --wmap-marker: var(--wmap-marker); --wmap-player: var(--wmap-player);
 }
 .wmap-head {
   animation: wmap-fade-up 0.4s cubic-bezier(0.22, 1, 0.36, 1) 0.1s both;
@@ -651,20 +652,20 @@ onBeforeUnmount(() => {
   background: var(--accent);
 }
 .wmap-marker--biome {
-  background: #4caf6e;
+  background: var(--wmap-biome);
 }
 .wmap-marker--ore {
-  background: #e2a53f;
+  background: var(--wmap-ore);
 }
 .wmap-marker--marker {
-  background: #d66ba0;
+  background: var(--wmap-marker);
 }
 .wmap-marker--player {
-  background: #4fb6d8;
+  background: var(--wmap-player);
 }
 .wmap-marker--bed {
   background: transparent;
-  border-color: #4fb6d8;
+  border-color: var(--wmap-player);
 }
 .wmap-marker--death {
   background: var(--danger, #e5484d);
@@ -716,20 +717,20 @@ onBeforeUnmount(() => {
   background: var(--accent);
 }
 .wmap-dot--biome {
-  background: #4caf6e;
+  background: var(--wmap-biome);
 }
 .wmap-dot--ore {
-  background: #e2a53f;
+  background: var(--wmap-ore);
 }
 .wmap-dot--marker {
-  background: #d66ba0;
+  background: var(--wmap-marker);
 }
 .wmap-dot--player {
-  background: #4fb6d8;
+  background: var(--wmap-player);
 }
 .wmap-dot--bed {
   background: transparent;
-  border: 1px solid #4fb6d8;
+  border: 1px solid var(--wmap-player);
 }
 .wmap-dot--death {
   background: var(--danger, #e5484d);

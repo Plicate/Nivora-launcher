@@ -215,11 +215,7 @@ else
 fi
 
 # конфиг Windows передаём явно: при Linux cross-build Tauri выбирает конфиг по ОС хоста
-# updater-артефакты создаются только при наличии ключа подписи
 TAURI_CONFIG_ARGS=(--config src-tauri/tauri.windows.conf.json)
-if [ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
-  TAURI_CONFIG_ARGS+=(--config '{"bundle":{"createUpdaterArtifacts":false}}')
-fi
 
 # установщик включает нативные helper-файлы из backend/
 for helper in nivora-turbo.exe nivora-modcat.exe ModScan.java; do
@@ -277,7 +273,7 @@ else
   log "Внимание: exe НЕ подписан (нет WINDOWS_CERT_FILE). Windows SmartScreen покажет предупреждение — это нормально для файлов без кодовой подписи, см. README «Windows предупреждает при запуске»."
 fi
 
-# latest.json нужен встроенному updater; подписываем финальный установщик после Authenticode
+# latest.json нужен встроенному updater; подпись обновления больше не обязательна
 APP_VERSION_TAURI="$(grep -m1 '"version"' frontend/src-tauri/tauri.conf.json | cut -d'"' -f4)"
 [ -n "$APP_VERSION_TAURI" ] || die "Не удалось прочитать версию из tauri.conf.json"
 RELEASE_TAG="${RELEASE_TAG:-$APP_VERSION_TAURI}"
@@ -288,29 +284,16 @@ update_asset="${setup_name// /.}"
 if [ "$update_asset" != "$setup_name" ]; then
   mv -f "$OUTPUT_DIR/$setup_name" "$OUTPUT_DIR/$update_asset"
 fi
-# ключ подписи самообновления: допускаем и путь к файлу, и содержимое ключа
-if [ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ] && [ -f "$TAURI_SIGNING_PRIVATE_KEY" ]; then
-  TAURI_SIGNING_PRIVATE_KEY="$(cat "$TAURI_SIGNING_PRIVATE_KEY")"
-  export TAURI_SIGNING_PRIVATE_KEY
-fi
-if [ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
-  log "Подписываю установщик для апдейтера и собираю latest.json (тег $RELEASE_TAG)"
-  rm -f "$OUTPUT_DIR/$update_asset.sig"
-  ( cd frontend && npm run tauri -- signer sign "$OUTPUT_DIR/$update_asset" >/dev/null ) \
-    || die "Не удалось подписать установщик ключом апдейтера (проверьте TAURI_SIGNING_PRIVATE_KEY и TAURI_SIGNING_PRIVATE_KEY_PASSWORD)."
-  [ -f "$OUTPUT_DIR/$update_asset.sig" ] || die "tauri signer не создал $update_asset.sig"
-  signature="$(tr -d '\r\n' < "$OUTPUT_DIR/$update_asset.sig")"
-  pub_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  rm -f "$OUTPUT_DIR/latest.json"
-  node "$SCRIPT_DIR/write_updater_manifest.mjs" \
-    "$OUTPUT_DIR/latest.json" "$APP_VERSION_TAURI" "$GITHUB_RELEASE_REPO" "$RELEASE_TAG" \
-    "$update_asset" "$signature" "$pub_date" \
-    || die "Не удалось создать валидный latest.json для Tauri updater."
-  log "latest.json: $OUTPUT_DIR/latest.json — загрузите его в релиз $RELEASE_TAG вместе с $update_asset"
-  log "Например: gh release create $RELEASE_TAG \"$OUTPUT_DIR/$update_asset\" \"$OUTPUT_DIR/latest.json\" --title \"Nivora Launcher $APP_VERSION_TAURI\""
-else
-  log "Внимание: нет TAURI_SIGNING_PRIVATE_KEY — latest.json НЕ создан. Встроенное самообновление этот релиз не увидит; лаунчер 1.1+ всё равно найдёт его через GitHub API и предложит скачать вручную."
-fi
+# подпись обновления (minisign) больше не обязательна: latest.json всегда создаётся
+# без подписи, вендоренный апдейтер пропускает проверку при пустом pubkey
+pub_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+rm -f "$OUTPUT_DIR/latest.json"
+node "$SCRIPT_DIR/write_updater_manifest.mjs" \
+  "$OUTPUT_DIR/latest.json" "$APP_VERSION_TAURI" "$GITHUB_RELEASE_REPO" "$RELEASE_TAG" \
+  "$update_asset" "$pub_date" \
+  || die "Не удалось создать валидный latest.json для Tauri updater."
+log "latest.json: $OUTPUT_DIR/latest.json (без подписи) — загрузите его в релиз $RELEASE_TAG вместе с $update_asset"
+log "Например: gh release create $RELEASE_TAG \"$OUTPUT_DIR/$update_asset\" \"$OUTPUT_DIR/latest.json\" --title \"Nivora Launcher $APP_VERSION_TAURI\""
 
 ( cd "$OUTPUT_DIR" && sha256sum ./*.exe > sha256sums.txt )
 log "Суммы SHA256: $OUTPUT_DIR/sha256sums.txt"

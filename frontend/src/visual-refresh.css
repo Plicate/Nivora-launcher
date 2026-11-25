@@ -1092,7 +1092,7 @@ input[type='color']::-moz-color-swatch { border: 0; border-radius: 5px; }
 .app-shell .button:not(.icon-button) {
   box-sizing: border-box;
   min-width: 0;
-  max-width: min(var(--button-width, 100%), 100%);
+  max-width: 100%;
   min-height: var(--button-height, 36px);
   font-family: var(--button-font-family, inherit);
   font-size: var(--button-font-size, inherit);

@@ -1,15 +1,15 @@
 // выбор Java, проверка песочницы и каталог серверных ядер
 use regex::Regex;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-use super::state::{launcher_roots, MAX_SETTINGS_JSON_BYTES};
+use super::state::{MAX_SETTINGS_JSON_BYTES, launcher_roots};
 
-const SERVER_CORES: [[&str; 4]; 10] = [
+const SERVER_CORES: [[&str; 4]; 12] = [
     [
         "paper",
         "Paper",
@@ -51,6 +51,18 @@ const SERVER_CORES: [[&str; 4]; 10] = [
         "Patina",
         "Paper",
         "Производительный Paper-based дистрибутив.",
+    ],
+    [
+        "fabric",
+        "Fabric",
+        "FabricMC",
+        "Лёгкое модовое ядро с быстрым запуском.",
+    ],
+    [
+        "forge",
+        "Forge",
+        "MinecraftForge",
+        "Классическое модовое ядро с полным API.",
     ],
     [
         "velocity",
@@ -220,8 +232,8 @@ fn linux_display_refresh_hz() -> Option<i64> {
 #[cfg(target_os = "windows")]
 fn windows_display_refresh_hz() -> Option<i64> {
     use windows_sys::Win32::Graphics::Gdi::{
-        EnumDisplayDevicesW, EnumDisplaySettingsW, DEVMODEW, DISPLAY_DEVICEW,
-        DISPLAY_DEVICE_ATTACHED_TO_DESKTOP, DM_DISPLAYFREQUENCY, ENUM_CURRENT_SETTINGS,
+        DEVMODEW, DISPLAY_DEVICE_ATTACHED_TO_DESKTOP, DISPLAY_DEVICEW, DM_DISPLAYFREQUENCY,
+        ENUM_CURRENT_SETTINGS, EnumDisplayDevicesW, EnumDisplaySettingsW,
     };
 
     let mut rates = Vec::new();
@@ -422,10 +434,14 @@ fn validate_java(resolved: &Path) -> Result<(), String> {
         for meta in [&meta, &bin_meta, &root_meta] {
             let uid = meta.uid();
             if uid != euid && uid != 0 {
-                return Err(err("Java executable и каталог JDK/JRE должны принадлежать текущему пользователю или root"));
+                return Err(err(
+                    "Java executable и каталог JDK/JRE должны принадлежать текущему пользователю или root",
+                ));
             }
             if meta.mode() & 0o022 != 0 {
-                return Err(err("Java executable и каталог JDK/JRE не должны быть доступны для записи группе или всем"));
+                return Err(err(
+                    "Java executable и каталог JDK/JRE не должны быть доступны для записи группе или всем",
+                ));
             }
         }
     }
@@ -437,11 +453,7 @@ fn err(message: &str) -> String {
 }
 
 fn java_executable_name() -> &'static str {
-    if cfg!(windows) {
-        "java.exe"
-    } else {
-        "java"
-    }
+    if cfg!(windows) { "java.exe" } else { "java" }
 }
 
 fn discover_java_paths() -> Vec<PathBuf> {
@@ -731,14 +743,14 @@ mod tests {
     fn server_cores_catalog_is_unique_and_complete() {
         let response = server_cores(&json!({})).expect("server_cores");
         let cores = response["cores"].as_array().expect("список ядер");
-        assert_eq!(cores.len(), 10);
+        assert_eq!(cores.len(), 12);
         let mut ids: Vec<&str> = cores
             .iter()
             .map(|core| core["id"].as_str().unwrap())
             .collect();
         ids.sort();
         ids.dedup();
-        assert_eq!(ids.len(), 10);
+        assert_eq!(ids.len(), 12);
         assert_eq!(cores[0]["id"], json!("paper"));
     }
 

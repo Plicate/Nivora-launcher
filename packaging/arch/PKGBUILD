@@ -1,5 +1,5 @@
 pkgname=nivora-launcher
-pkgver=2.3.0
+pkgver=2.3.1
 pkgrel=1
 pkgdesc='Universal Minecraft launcher'
 arch=('x86_64')
@@ -33,13 +33,6 @@ build() {
     # убираем LTO-флаги и задаём BFD, включая переопределения cc-rs
     # добавление -fuse-ld=bfd не исправляет LTO-объекты в rlibs
     bash scripts/arch_native_build.sh || return $?
-  else
-    install -dm755 cpp-ui/build
-    g++ -std=c++17 -O2 -pipe -fPIC -pie -Wall -Wextra \
-      $(pkg-config --cflags Qt6Widgets Qt6Svg) \
-      cpp-ui/main.cpp \
-      -o cpp-ui/build/nivora-launcher-gui \
-      $(pkg-config --libs Qt6Widgets Qt6Svg)
   fi
 }
 
@@ -52,11 +45,8 @@ package() {
     install -Dm755 frontend/src-tauri/resources/backend/nivora-modcat "${pkgdir}/usr/lib/${pkgname}/resources/backend/nivora-modcat"
     install -Dm644 frontend/src-tauri/resources/backend/ModScan.java "${pkgdir}/usr/lib/${pkgname}/resources/backend/ModScan.java"
     install -Dm644 frontend/src-tauri/resources/vendor/bedrock-on-linux-2.2.9.pyz "${pkgdir}/usr/lib/${pkgname}/resources/vendor/bedrock-on-linux-2.2.9.pyz"
-  else
-    install -Dm755 cpp-ui/build/nivora-launcher-gui "${pkgdir}/usr/lib/${pkgname}/nivora-launcher-gui"
   fi
   install -dm755 "${pkgdir}/usr/share/${pkgname}"
-  cp -r cpp-ui/assets/. "${pkgdir}/usr/share/${pkgname}/"
   install -Dm644 README.md "${pkgdir}/usr/share/doc/${pkgname}/README.md"
   install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
   install -Dm755 nivora-launcher "${pkgdir}/usr/bin/nivora-launcher"

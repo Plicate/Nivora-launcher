@@ -1859,9 +1859,7 @@ impl<'de> Deserialize<'de> for RemoteRelease {
                     url: release.url.ok_or_else(|| {
                         DeError::custom("the `url` field was not set on the updater response")
                     })?,
-                    signature: release.signature.ok_or_else(|| {
-                        DeError::custom("the `signature` field was not set on the updater response")
-                    })?,
+                    signature: release.signature.unwrap_or_default(),
                 })
             },
         })
@@ -1897,6 +1895,10 @@ fn verify_signature(
     announced_version: &str,
     require_signed_version: bool,
 ) -> Result<()> {
+    // no pubkey configured: the updater works without signatures
+    if pub_key.is_empty() {
+        return Ok(());
+    }
     // we need to convert the pub key
     let pub_key_decoded = base64_to_string(pub_key)?;
     let public_key = PublicKey::decode(&pub_key_decoded)?;

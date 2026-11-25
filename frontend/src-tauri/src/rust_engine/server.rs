@@ -36,7 +36,7 @@ const MAX_LOG_LINE_CHARS: usize = 2048;
 const MAX_LOG_LINE_BYTES: usize = MAX_LOG_LINE_CHARS * 4;
 const UNKNOWN_RAM_SERVER_LIMIT_KIB: i64 = 2 * 1024 * 1024;
 const SERVER_SECURITY_KEYS: [&str; 3] = ["java_path", "security_profile", "security_permissions"];
-const SERVER_CORE_IDS: [&str; 10] = [
+const SERVER_CORE_IDS: [&str; 12] = [
     "paper",
     "purpur",
     "folia",
@@ -44,6 +44,8 @@ const SERVER_CORE_IDS: [&str; 10] = [
     "leaf",
     "pufferfish",
     "patina",
+    "fabric",
+    "forge",
     "velocity",
     "waterfall",
     "custom",
@@ -396,10 +398,20 @@ fn start_server_inner(
     if !setting_bool(&settings, "eula_accepted") {
         return Err("Сначала примите EULA сервера".to_owned());
     }
+    let core = setting_str(&settings, "core");
+    let forge_args = if core == "forge" {
+        forge_args_file(&info.path)
+    } else {
+        None
+    };
     let jar = info.path.join(SERVER_JAR);
-    let jar_ready = fs::symlink_metadata(&jar)
-        .map(|meta| !meta.is_symlink() && meta.is_file())
-        .unwrap_or(false);
+    let jar_ready = if forge_args.is_some() {
+        true
+    } else {
+        fs::symlink_metadata(&jar)
+            .map(|meta| !meta.is_symlink() && meta.is_file())
+            .unwrap_or(false)
+    };
     if !jar_ready {
         return Err(
             "Ядро не найдено. Загрузите server.jar или выберите официальное ядро.".to_owned(),
@@ -460,16 +472,24 @@ fn start_server_inner(
 
     let memory = java_memory_value(&setting_str(&settings, "memory"))?;
     let environment = runtime::safe_process_environment(false);
-    let core = setting_str(&settings, "core");
     let mut arguments: Vec<String> = Vec::new();
     arguments.extend([
         format!("-Xms{}", initial_server_heap(&memory)),
         format!("-Xmx{memory}"),
-        "-jar".to_owned(),
-        SERVER_JAR.to_owned(),
     ]);
-    if core != "velocity" && core != "waterfall" {
+    if let Some(args_file) = forge_args.as_ref() {
+        // Forge 1.17+ запускается через @-файл аргументов из libraries
+        let relative = args_file
+            .strip_prefix(&info.path)
+            .map(|path| path.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_else(|_| args_file.to_string_lossy().replace('\\', "/"));
+        arguments.push(format!("@{relative}"));
         arguments.push("--nogui".to_owned());
+    } else {
+        arguments.extend(["-jar".to_owned(), SERVER_JAR.to_owned()]);
+        if core != "velocity" && core != "waterfall" {
+            arguments.push("--nogui".to_owned());
+        }
     }
 
     let (launch_id, started_at, pid, stdout_stream, stderr_stream) = {
@@ -2322,6 +2342,23 @@ fn core_versions(
             let value = http.get_json("https://api.leafmc.one/v2/projects/leaf", None)?;
             Ok(unique_core_versions(&versions_from_payload(&value)))
         }
+        "fabric" => {
+            // Fabric meta отдаёт список игровых версий с флагом стабильности
+            let value = http.get_json("https://meta.fabricmc.net/v2/versions/game", None)?;
+            let mut versions: Vec<String> = Vec::new();
+            if let Some(rows) = value.as_array() {
+                for row in rows {
+                    if !row.get("stable").and_then(Value::as_bool).unwrap_or(false) {
+                        continue;
+                    }
+                    if let Some(text) = row.get("version").and_then(Value::as_str) {
+                        versions.push(text.to_owned());
+                    }
+                }
+            }
+            Ok(unique_core_versions(&versions))
+        }
+        "forge" => Ok(forge_game_versions(http)?),
         "pufferfish" => {
             let branches = http
                 .get_json(
@@ -2571,6 +2608,8 @@ const SERVER_SOURCE_HOSTS: &[&str] = &[
     "fill.papermc.io",
     "github.com",
     "hub.spigotmc.org",
+    "maven.minecraftforge.net",
+    "meta.fabricmc.net",
     "objects.githubusercontent.com",
     "piston-meta.mojang.com",
     "raw.githubusercontent.com",
@@ -2770,8 +2809,235 @@ fn build_spigot_with_buildtools(
     result
 }
 
+/// первая стабильная версия из ответа Fabric meta
+fn fabric_stable_version(value: &Value) -> Option<String> {
+    let rows = value.as_array()?;
+    for row in rows {
+        if row.get("stable").and_then(Value::as_bool).unwrap_or(false) {
+            if let Some(text) = row.get("version").and_then(Value::as_str) {
+                return Some(text.to_owned());
+            }
+        }
+    }
+    rows.first()
+        .and_then(|row| row.get("version"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+}
+
+/// записи вида "<version>1.20.1-47.2.0</version>" из maven-metadata.xml Forge
+fn forge_maven_versions(
+    http: &std::sync::Arc<super::net::HttpClient>,
+) -> Result<Vec<String>, String> {
+    let raw = http.request(
+        "https://maven.minecraftforge.net/net/minecraftforge/forge/maven-metadata.xml",
+        "GET",
+        None,
+        None,
+        Some(8 * 1024 * 1024),
+        None,
+    )?;
+    let text = String::from_utf8_lossy(&raw).to_string();
+    let mut versions: Vec<String> = Vec::new();
+    let mut cursor: &str = &text;
+    while let Some(start) = cursor.find("<version>") {
+        let after = &cursor[start + "<version>".len()..];
+        let Some(end) = after.find("</version>") else {
+            break;
+        };
+        let value = after[..end].trim();
+        if !value.is_empty() {
+            versions.push(value.to_owned());
+        }
+        cursor = &after[end + "</version>".len()..];
+    }
+    if versions.is_empty() {
+        return Err("Forge maven не вернул список версий".to_owned());
+    }
+    Ok(versions)
+}
+
+fn forge_version_key(value: &str) -> Vec<i64> {
+    value
+        .split(['.', '-', '+'])
+        .map(|part| part.parse::<i64>().unwrap_or(0))
+        .collect()
+}
+
+/// версии Minecraft, для которых есть сборки Forge (новые сверху)
+fn forge_game_versions(
+    http: &std::sync::Arc<super::net::HttpClient>,
+) -> Result<Vec<String>, String> {
+    let mut games: Vec<String> = Vec::new();
+    for version in forge_maven_versions(http)? {
+        let Some(split) = version.rfind('-') else {
+            continue;
+        };
+        let game = version[..split].to_owned();
+        if game.is_empty()
+            || !game
+                .chars()
+                .all(|char| char.is_ascii_digit() || char == '.')
+        {
+            continue;
+        }
+        if !games.contains(&game) {
+            games.push(game);
+        }
+    }
+    games.sort_by(|a, b| forge_version_key(b).cmp(&forge_version_key(a)));
+    Ok(games)
+}
+
+fn forge_pick_version(
+    http: &std::sync::Arc<super::net::HttpClient>,
+    minecraft_version: &str,
+    build: &str,
+) -> Result<(String, String), String> {
+    let versions = forge_maven_versions(http)?;
+    let prefix = format!("{minecraft_version}-");
+    let mut candidates: Vec<String> = versions
+        .into_iter()
+        .filter(|version| version.starts_with(&prefix))
+        .collect();
+    if candidates.is_empty() {
+        return Err(format!(
+            "Forge maven не нашёл сборки для {minecraft_version}"
+        ));
+    }
+    let chosen = if build.trim().is_empty() {
+        Some(candidates.pop().unwrap_or_default())
+    } else {
+        let wanted = format!("{minecraft_version}-{}", build.trim());
+        candidates.into_iter().find(|version| *version == wanted)
+    };
+    let Some(chosen) = chosen else {
+        return Err(format!(
+            "Forge maven не нашёл сборку {minecraft_version}-{build}"
+        ));
+    };
+    let forge_build = chosen.strip_prefix(&prefix).unwrap_or_default().to_owned();
+    Ok((chosen, forge_build))
+}
+
+/// Java для установщика Forge: та же логика выбора, что и у запуска сервера
+fn forge_install_java(config: &ConfigStore, minecraft_version: &str) -> Result<PathBuf, String> {
+    let (required, component) = server_java_requirement(minecraft_version);
+    if required > 0 {
+        if let Some(found) = which_java() {
+            if let Ok(candidate) = runtime::validate_java_path(&found, false) {
+                if let Some(actual) = runtime::java_version(&candidate) {
+                    if actual >= required {
+                        return Ok(candidate);
+                    }
+                }
+            }
+        }
+        let http = super::net::progress_client_from_settings(config.settings(), "")?;
+        return JavaRuntimeManager::new(config, Some(http))?.java_for(
+            &json!({ "javaVersion": { "majorVersion": required, "component": component } }),
+            None,
+        );
+    }
+    if let Some(found) = which_java() {
+        if let Ok(candidate) = runtime::validate_java_path(&found, false) {
+            return Ok(candidate);
+        }
+    }
+    Err("Не найдена Java для запуска установщика Forge".to_owned())
+}
+
+/// @-файл аргументов запуска Forge из libraries (win/unix по платформе)
+fn forge_args_file(root: &Path) -> Option<PathBuf> {
+    let base = root
+        .join("libraries")
+        .join("net")
+        .join("minecraftforge")
+        .join("forge");
+    let entries = fs::read_dir(&base).ok()?;
+    for entry in entries.filter_map(|entry| entry.ok()) {
+        let dir = entry.path();
+        if !dir.is_dir() {
+            continue;
+        }
+        let preferred = if cfg!(windows) {
+            "win_args.txt"
+        } else {
+            "unix_args.txt"
+        };
+        let fallback = if cfg!(windows) {
+            "unix_args.txt"
+        } else {
+            "win_args.txt"
+        };
+        for name in [preferred, fallback] {
+            let candidate = dir.join(name);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+/// запуск установщика Forge после скачивания и проверка результата
+fn forge_finalize(
+    config: &ConfigStore,
+    root: &Path,
+    minecraft_version: &str,
+    forge_build: &str,
+    installer_downloaded: &Path,
+    url: &str,
+) -> Result<Value, String> {
+    let installer_path = root.join("forge-installer.jar");
+    if installer_path
+        .symlink_metadata()
+        .map(|meta| meta.is_symlink())
+        .unwrap_or(false)
+    {
+        return Err("forge-installer.jar является символьной ссылкой".to_owned());
+    }
+    std::fs::rename(installer_downloaded, &installer_path)
+        .map_err(|error| format!("Не удалось переименовать установщик Forge: {error}"))?;
+    let java = forge_install_java(config, minecraft_version)?;
+    let output = super::platform::command(&java)
+        .arg("-jar")
+        .arg(&installer_path)
+        .arg("--installServer")
+        .current_dir(root)
+        .env_clear()
+        .envs(runtime::safe_process_environment(false))
+        .output()
+        .map_err(|error| format!("Не удалось запустить установку Forge: {error}"))?;
+    if !output.status.success() {
+        let tail = String::from_utf8_lossy(&output.stderr)
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .rev()
+            .take(6)
+            .collect::<Vec<_>>()
+            .join(" | ");
+        return Err(format!("Установщик Forge завершился с ошибкой: {tail}"));
+    }
+    let args_file = forge_args_file(root).ok_or_else(|| {
+        "Установка Forge завершилась без аргументов запуска в libraries".to_owned()
+    })?;
+    let _ = std::fs::remove_file(&installer_path);
+    Ok(json!({
+        "core": "forge",
+        "version": minecraft_version,
+        "build": forge_build,
+        "path": args_file.to_string_lossy(),
+        "url": url,
+        "sha256": "",
+        "verified_by": "forge-maven",
+        "trusted_hash": false,
+    }))
+}
+
 fn download_server_core(
     http: &std::sync::Arc<super::net::HttpClient>,
+    config: &ConfigStore,
     root: &Path,
     core: &str,
     version: &str,
@@ -2970,6 +3236,29 @@ fn download_server_core(
             url = selected;
             resolved_build = resolved;
         }
+        "fabric" => {
+            let installers = http.get_json("https://meta.fabricmc.net/v2/versions/installer", None)?;
+            let installer_version = fabric_stable_version(&installers)
+                .ok_or_else(|| "Fabric meta не вернул версию установщика".to_owned())?;
+            let loaders = http.get_json(
+                &format!("https://meta.fabricmc.net/v2/versions/loader/{minecraft_version}"),
+                None,
+            )?;
+            let loader_version = fabric_stable_version(&loaders)
+                .ok_or_else(|| format!("Fabric meta не нашёл загрузчик для {minecraft_version}"))?;
+            url = format!(
+                "https://meta.fabricmc.net/v2/versions/loader/{minecraft_version}/{loader_version}/{installer_version}/server/jar"
+            );
+            resolved_build = format!("loader-{loader_version}");
+            // meta не публикует хеш собранного server jar — скачивание требует подтверждения
+        }
+        "forge" => {
+            let (forge_full, forge_build) = forge_pick_version(http, minecraft_version, build)?;
+            url = format!(
+                "https://maven.minecraftforge.net/net/minecraftforge/forge/{forge_full}/forge-{forge_full}-installer.jar"
+            );
+            resolved_build = forge_build;
+        }
         "spigot" => {
             return build_spigot_with_buildtools(http, root, minecraft_version, confirm_unverified);
         }
@@ -2992,6 +3281,16 @@ fn download_server_core(
         None,
         Some(&validator),
     )?;
+    if core_id == "forge" {
+        return forge_finalize(
+            config,
+            root,
+            minecraft_version,
+            &resolved_build,
+            &destination,
+            &url,
+        );
+    }
     let actual_sha256 = super::net::file_hash(&destination, "sha256").unwrap_or_default();
     Ok(json!({
         "core": core_id,
@@ -3164,6 +3463,7 @@ pub fn server_core_download(request: &Value) -> Result<Value, String> {
     lock.acquire()?;
     let result = download_server_core(
         &http,
+        &config,
         &info.path,
         &core,
         &version,

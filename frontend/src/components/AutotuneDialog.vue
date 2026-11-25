@@ -150,6 +150,7 @@ onMounted(load)
               <button class="icon-button" type="button" aria-label="Закрыть" @click="emit('close')"><Icon name="close" :size="16" /></button>
             </div>
 
+            <div class="autotune-body">
             <div class="autotune-modes" role="group" aria-label="Режим автонастройки">
               <button
                 v-for="item in MODES"
@@ -224,6 +225,10 @@ onMounted(load)
                 <li v-for="note in notes" :key="note">{{ note }}</li>
               </ul>
 
+            </template>
+            </div>
+
+            <div v-if="result" class="autotune-footer">
               <div class="autotune-actions">
                 <button class="button button--quiet" type="button" :disabled="applying" @click="emit('close')">Позже</button>
                 <button class="button button--accent" type="button" :disabled="applying" @click="apply">
@@ -231,45 +236,53 @@ onMounted(load)
                 </button>
               </div>
               <p class="field-help">Настройки записываются в экземпляр и применяются при следующем запуске; ручные правки не пропадают — автонастройка меняет только перечисленные поля.</p>
-            </template>
+            </div>
           </div>
         </section>
       </div>
   </template>
 
 <style scoped>
-.autotune-card { max-width: 680px; }
+.autotune-card { width: min(680px, 100%); max-width: 680px; max-height: min(880px, calc(100vh - 48px)); grid-template-rows: minmax(0, 1fr); }
+.autotune-card .dialog-copy { display: flex; flex-direction: column; min-height: 0; }
+.autotune-body { min-height: 0; overflow-y: auto; scrollbar-gutter: stable; padding-right: 2px; }
+.autotune-footer { flex-shrink: 0; padding-top: 12px; border-top: 1px solid var(--line); margin-top: 12px; }
+.autotune-footer .field-help { margin-top: 8px; }
 .autotune-modes { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 12px; }
 .autotune-mode { display: flex; gap: 8px; align-items: flex-start; padding: 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel-soft); color: var(--muted); text-align: left; cursor: pointer; transition: border-color .15s, color .15s, background .15s; }
-.autotune-mode strong { display: block; color: var(--text); font-size: 12px; }
-.autotune-mode small { display: block; margin-top: 2px; font-size: 10px; line-height: 1.45; }
+.autotune-mode svg { flex-shrink: 0; margin-top: 2px; }
+.autotune-mode span { min-width: 0; }
+.autotune-mode strong { display: block; color: var(--text); font-size: 12px; line-height: 1.3; overflow-wrap: anywhere; }
+.autotune-mode small { display: block; margin-top: 2px; font-size: 10px; line-height: 1.45; overflow-wrap: anywhere; }
 .autotune-mode--active { border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); background: color-mix(in srgb, var(--accent) 12%, var(--panel)); color: var(--quiet); }
 .autotune-mode:disabled { opacity: .6; cursor: default; }
 @media (max-width: 620px) { .autotune-modes { grid-template-columns: 1fr; } }
 .compare-note { display: flex; gap: 8px; align-items: center; padding: 10px 12px; border-radius: 10px; background: var(--panel-soft); color: var(--quiet); font-size: 13px; }
 .compare-note--danger { background: color-mix(in srgb, var(--danger) 14%, transparent); color: var(--danger); }
 .autotune-stats { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 14px; }
-.autotune-stat { display: inline-flex; align-items: baseline; gap: 5px; padding: 5px 10px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); font-size: 11px; }
+.autotune-stat { display: inline-flex; align-items: baseline; gap: 5px; padding: 5px 10px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); font-size: 11px; white-space: nowrap; }
 .autotune-stat strong { color: var(--text); font-size: 12px; font-variant-numeric: tabular-nums; }
 .autotune-stat--accent { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); color: var(--quiet); }
 .autotune-heap { display: flex; gap: 12px; align-items: center; margin-top: 12px; padding: 14px; border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--line)); border-radius: 12px; background: color-mix(in srgb, var(--accent) 9%, var(--panel)); }
+.autotune-heap svg { flex-shrink: 0; }
 .autotune-heap strong { font-size: 22px; font-variant-numeric: tabular-nums; }
-.autotune-heap small { display: block; color: var(--muted); }
+.autotune-heap small { display: block; color: var(--muted); line-height: 1.5; overflow-wrap: anywhere; }
 .autotune-hardware { display: flex; gap: 10px; align-items: center; margin-top: 12px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; color: var(--muted); }
+.autotune-hardware svg { flex-shrink: 0; }
 .autotune-hardware strong { color: var(--text); }
-.autotune-hardware small { display: block; }
-.autotune-changes { margin-top: 12px; display: flex; flex-direction: column; gap: 12px; max-height: 300px; overflow-y: auto; }
+.autotune-hardware small { display: block; line-height: 1.5; overflow-wrap: anywhere; }
+.autotune-changes { margin-top: 12px; display: flex; flex-direction: column; gap: 12px; }
 .autotune-group { display: flex; flex-direction: column; gap: 6px; }
 .autotune-group-heading { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 10px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
 .autotune-change { padding: 9px 12px; border-radius: 10px; border: 1px solid var(--line); }
-.autotune-change-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); display: block; }
-.autotune-change-values { font-size: 14px; display: block; margin-top: 2px; }
-.autotune-change-values s { opacity: 0.6; margin-right: 2px; }
-.autotune-change-reason { color: var(--muted); display: block; margin-top: 3px; }
+.autotune-change-label { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); display: block; overflow-wrap: anywhere; }
+.autotune-change-values { font-size: 14px; display: block; margin-top: 2px; overflow-wrap: anywhere; }
+.autotune-change-values s { opacity: .6; margin-right: 2px; }
+.autotune-change-reason { color: var(--muted); display: block; margin-top: 3px; line-height: 1.5; overflow-wrap: anywhere; }
 .autotune-recommendations { display: flex; flex-direction: column; gap: 6px; margin-top: 12px; }
 .autotune-recommendation { padding: 9px 12px; border: 1px dashed color-mix(in srgb, var(--warning, #e0b45c) 45%, var(--line)); border-radius: 10px; }
 .autotune-recommendation strong { display: block; font-size: 12px; }
-.autotune-recommendation small { display: block; margin-top: 2px; color: var(--muted); line-height: 1.5; }
+.autotune-recommendation small { display: block; margin-top: 2px; color: var(--muted); line-height: 1.5; overflow-wrap: anywhere; }
 .autotune-notes { margin: 12px 0 0; padding-left: 18px; color: var(--muted); font-size: 12px; }
-.autotune-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 14px; }
+.autotune-actions { display: flex; justify-content: flex-end; gap: 10px; }
 </style>

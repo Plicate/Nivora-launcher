@@ -1774,7 +1774,7 @@ fn is_symlink(path: &Path) -> bool {
 }
 
 fn within(path: &Path, root: &Path) -> bool {
-    path.strip_prefix(root).is_ok()
+    super::platform_support::path_within(path, root)
 }
 
 fn relative_posix(path: &Path, root: &Path) -> Option<String> {
@@ -1857,7 +1857,7 @@ fn ensure_safe_directory(path: &Path, root: &Path, label: &str) -> Result<(), St
     }
     let mut current = path;
     loop {
-        if is_symlink(current) {
+        if super::platform_support::is_unsafe_reparse(current, root) {
             return Err(format!("Небезопасный путь {label}: {}", path.display()));
         }
         if current == root {

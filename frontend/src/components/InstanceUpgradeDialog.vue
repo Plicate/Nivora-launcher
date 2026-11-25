@@ -501,7 +501,7 @@ function modTitle(entry: InstanceUpgradeMod): string {
   width: 5px;
   height: 9px;
   margin: 2px auto 0;
-  border: solid #fff;
+  border: solid var(--accent-foreground, #fff);
   border-width: 0 2px 2px 0;
   transform: rotate(45deg);
 }

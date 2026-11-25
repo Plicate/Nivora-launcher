@@ -659,6 +659,61 @@ pub(crate) fn diagnose(input: &DiagnoseInput) -> Map<String, Value> {
         );
     }
 
+    // диск переполнен: игра не смогла записать файлы
+    if patterns().disk_full.is_match(&combined) {
+        sink.add(
+            "disk_full",
+            "На диске закончилось место: игра не смогла записать сохранения или кэш.",
+            Vec::new(),
+            evidence_lines(&combined, &["space", "device", "disk"]),
+            "",
+            "Освободите на диске хотя бы 1–2 ГБ и запустите игру заново.",
+        );
+    }
+
+    // повреждённый level.dat мира восстанавливается из level.dat_old
+    if patterns().world_load_error.is_match(&combined) {
+        if let Some(instance_path) = input.instance_path {
+            let (restorable, unrestorable) = broken_world_dats(instance_path);
+            if !restorable.is_empty() {
+                sink.add(
+                    "world_data",
+                    "Мир не смог загрузиться: файл level.dat повреждён. Есть копия level.dat_old, из которой мир можно восстановить.",
+                    vec![restore_world_dat_fix(&restorable)],
+                    evidence_lines(&combined, &["level"]),
+                    "",
+                    "",
+                );
+            } else if !unrestorable.is_empty() {
+                sink.add(
+                    "world_data",
+                    "Мир не смог загрузиться: файл level.dat повреждён, а копии level.dat_old нет.",
+                    Vec::new(),
+                    evidence_lines(&combined, &["level"]),
+                    "",
+                    "Проверьте резервные копии лаунчера или свою собственную копию мира.",
+                );
+            }
+        }
+    }
+
+    // повреждённые options.txt / servers.dat игра пересоздаст сама
+    if patterns().game_settings_error.is_match(&combined) {
+        if let Some(instance_path) = input.instance_path {
+            let files = broken_game_settings(instance_path);
+            if !files.is_empty() {
+                sink.add(
+                    "game_settings",
+                    "Игровые настройки (options.txt или список серверов) повреждены и не читаются.",
+                    vec![reset_game_settings_fix(&files)],
+                    evidence_lines(&combined, &["options", "servers"]),
+                    "",
+                    "",
+                );
+            }
+        }
+    }
+
     let total_kib = super::config::system_memory_kib();
     let memory_setting = if input.effective_memory.is_empty() {
         settings
@@ -996,6 +1051,32 @@ pub(crate) fn diagnose(input: &DiagnoseInput) -> Map<String, Value> {
                 files[..MAX_EVIDENCE.min(files.len())].to_vec(),
                 "",
                 "",
+            );
+        }
+        if sink.issues.is_empty()
+            && !sink.has("security_sandbox")
+            && patterns().network_issue.is_match(&combined)
+        {
+            sink.add(
+                "network_issue",
+                "Игра не смогла связаться с серверами: похоже на проблему с сетью, а не с файлами игры.",
+                Vec::new(),
+                evidence_lines(&combined, &["connect", "timed out", "resolve"]),
+                "",
+                "Проверьте интернет. Отключите VPN и прокси; антивирус или межсетевой экран могут блокировать соединение.",
+            );
+        }
+        if sink.issues.is_empty()
+            && !sink.has("security_sandbox")
+            && patterns().files_locked.is_match(&combined)
+        {
+            sink.add(
+                "files_locked",
+                "Доступ к файлам запрещён: часто это антивирус, облачная синхронизация или вторая копия игры.",
+                Vec::new(),
+                evidence_lines(&combined, &["access", "denied", "доступ"]),
+                "",
+                "Добавьте папку лаунчера в исключения антивируса. Если экземпляр лежит в папке OneDrive или другой синхронизации — отключите синхронизацию этой папки.",
             );
         }
         if sink.issues.is_empty() {

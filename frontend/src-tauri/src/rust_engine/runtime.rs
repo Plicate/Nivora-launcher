@@ -657,7 +657,7 @@ fn runtime_platform() -> Result<String, String> {
 }
 
 fn within(path: &Path, root: &Path) -> bool {
-    path.starts_with(root)
+    super::platform_support::path_within(path, root)
 }
 
 fn safe_runtime_component(value: &str, label: &str) -> Result<(), String> {
@@ -673,7 +673,7 @@ fn safe_runtime_component(value: &str, label: &str) -> Result<(), String> {
 fn runtime_path_without_symlink(path: &Path, root: &Path) -> bool {
     let mut current = path.to_path_buf();
     loop {
-        if is_reparse_point(&current) {
+        if super::platform_support::is_unsafe_reparse(&current, root) {
             return false;
         }
         if current == root {

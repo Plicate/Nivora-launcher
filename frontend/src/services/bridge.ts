@@ -368,6 +368,8 @@ const fallbackState: AppState = {
     { id: 'patina', name: 'Patina', family: 'Paper', description: 'Производительный Paper-based дистрибутив.' },
     { id: 'velocity', name: 'Velocity', family: 'Proxy', description: 'Прокси-ядро для сети серверов.' },
     { id: 'waterfall', name: 'Waterfall', family: 'Proxy', description: 'BungeeCord-совместимое прокси-ядро.' },
+    { id: 'fabric', name: 'Fabric', family: 'FabricMC', description: 'Лёгкое модовое ядро с быстрым запуском.' },
+    { id: 'forge', name: 'Forge', family: 'MinecraftForge', description: 'Классическое модовое ядро с полным API.' },
     { id: 'custom', name: 'Своё ядро', family: 'Custom', description: 'Загрузите любой server.jar.' },
   ],
   plugin_catalogs: fallbackSettings.plugin_catalogs,

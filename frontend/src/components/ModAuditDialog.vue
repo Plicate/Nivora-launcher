@@ -299,7 +299,7 @@ defineExpose({ start })
 .mod-audit-verdict strong { font-size: 14px; }
 .mod-audit-verdict span { color: var(--quiet); font-size: 11px; }
 .mod-audit-verdict--danger { border-color: color-mix(in srgb, var(--danger) 45%, transparent); background: color-mix(in srgb, var(--danger) 12%, transparent); }
-.mod-audit-verdict--warning { border-color: color-mix(in srgb, #e8b34b 45%, transparent); background: color-mix(in srgb, #e8b34b 10%, transparent); }
+.mod-audit-verdict--warning { border-color: color-mix(in srgb, var(--warning, #e0b45c) 45%, transparent); background: color-mix(in srgb, var(--warning, #e0b45c) 10%, transparent); }
 .mod-audit-verdict--notice { border-color: color-mix(in srgb, var(--accent, var(--blue)) 35%, transparent); background: color-mix(in srgb, var(--accent, var(--blue)) 8%, transparent); }
 .mod-audit-verdict--success { border-color: color-mix(in srgb, var(--green) 40%, transparent); background: color-mix(in srgb, var(--green) 10%, transparent); }
 .mod-audit-findings { display: grid; gap: 10px; margin-top: 14px; }
@@ -308,7 +308,7 @@ defineExpose({ start })
 .mod-audit-group > header strong { font-size: 11px; letter-spacing: .02em; }
 .mod-audit-group > header small { color: var(--muted); font-size: 10px; }
 .mod-audit-group--critical > header strong { color: var(--danger); }
-.mod-audit-group--warning > header strong { color: #e8b34b; }
+.mod-audit-group--warning > header strong { color: var(--warning, #e0b45c); }
 .mod-audit-group--notice > header strong { color: var(--quiet); }
 .mod-audit-group--info > header strong { color: var(--muted); }
 .mod-audit-finding { display: grid; gap: 6px; width: 100%; padding: 10px 12px; border: 1px solid var(--line); border-radius: calc(var(--radius-control, 10px) * 1.1); color: var(--text); text-align: left; background: var(--panel-soft); cursor: pointer; transition: border-color .16s ease, background-color .16s ease; }
@@ -316,7 +316,7 @@ defineExpose({ start })
 .mod-audit-finding-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .mod-audit-finding-head strong { font-size: 12px; }
 .mod-audit-group--critical .mod-audit-finding { border-color: color-mix(in srgb, var(--danger) 35%, var(--line)); }
-.mod-audit-group--warning .mod-audit-finding { border-color: color-mix(in srgb, #e8b34b 30%, var(--line)); }
+.mod-audit-group--warning .mod-audit-finding { border-color: color-mix(in srgb, var(--warning, #e0b45c) 30%, var(--line)); }
 .mod-audit-finding-body { display: grid; gap: 6px; }
 .mod-audit-finding-body small { color: var(--quiet); font-size: 11px; line-height: 1.55; }
 .mod-audit-evidence { color: var(--muted); font-family: ui-monospace, monospace; font-size: 10px; word-break: break-all; }
